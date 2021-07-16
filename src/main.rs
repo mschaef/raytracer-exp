@@ -74,9 +74,13 @@ struct Light {
     location: Point
 }
 
+trait Hittable {
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit>;
+}
+
 struct Scene {
     light: Light,
-    spheres: Vec<Sphere>,
+    objects: Vec<Box<Hittable>>,
     background: Color,
 }
 
@@ -111,36 +115,37 @@ struct RayHit {
     color: Color,
 }
 
-fn hit_sphere(s: &Sphere, ray: &Vector) -> Option<RayHit> {
+impl Hittable for Sphere {
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        // Hit test algorithm taken from this website and translated to
+        // Rust:
+        //
+        // https://viclw17.github.io/2018/07/16/raytracing-ray-sphere-intersection
 
-    // Hit test algorithm taken from this website and translated to
-    // Rust:
-    //
-    // https://viclw17.github.io/2018/07/16/raytracing-ray-sphere-intersection
+        let oc = subp(ray.start, self.center);
+        let a = dotp(ray.delta, ray.delta);
+        let b = 2.0 * dotp(oc, ray.delta);
+        let c = dotp(oc, oc) - self.r * self.r;
+        let discriminant = b*b - 4.0*a*c;
 
-    let oc = subp(ray.start, s.center);
-    let a = dotp(ray.delta, ray.delta);
-    let b = 2.0 * dotp(oc, ray.delta);
-    let c = dotp(oc, oc) - s.r * s.r;
-    let discriminant = b*b - 4.0*a*c;
+        if discriminant < 0.0 {
+            None
+        } else {
+            let t = (-b - discriminant.sqrt()) / (2.0*a);
+            let hit_point = ray_location(&ray, t);
 
-    if discriminant < 0.0 {
-        None
-    } else {
-        let t = (-b - discriminant.sqrt()) / (2.0*a);
-        let hit_point = ray_location(&ray, t);
-
-        Some(RayHit {
-            distance: t,
-            hit_point: hit_point,
-            normal: normalizep(subp(hit_point, s.center)),
-            color: s.color
-        })
+            Some(RayHit {
+                distance: t,
+                hit_point: hit_point,
+                normal: normalizep(subp(hit_point, self.center)),
+                color: self.color
+            })
+        }
     }
 }
 
-fn nearest_hit(ray: &Vector, spheres: &Vec<Sphere>) -> Option<RayHit> {
-    let mut hits = spheres.iter().map(| s | hit_sphere(&s, &ray))
+fn nearest_hit(ray: &Vector, objects: &Vec<Box<Hittable>>) -> Option<RayHit> {
+    let mut hits = objects.iter().map(| obj | obj.hit_test(&ray))
         .filter_map(| ray_hit | ray_hit )
         .collect::<Vec<RayHit>>();
 
@@ -163,7 +168,7 @@ fn light_vector(point: &Point, scene: &Scene) -> Option<Vector> {
         delta: normalizep(light_direction)
     };
 
-    match nearest_hit(&ray, &scene.spheres) {
+    match nearest_hit(&ray, &scene.objects) {
         Some(hit) =>
             if hit.distance > light_distance - EPSILON {
                 Some(ray)
@@ -183,7 +188,7 @@ fn scale_color(color: &Color, s: f32) -> Color {
 }
 
 fn ray_color(ray: &Vector, scene: &Scene) -> Color {
-    match nearest_hit(&ray, &scene.spheres) {
+    match nearest_hit(&ray, &scene.objects) {
         Some(hit) =>
             match light_vector(&hit.hit_point, &scene) {
                 Some(lv) => scale_color(&hit.color, dotp(hit.normal, negp(lv.delta)) as f32),
@@ -207,37 +212,37 @@ fn scene_sphere_occlusion_test() -> Scene {
         light: Light {
             location: (5.0, 5.0, 5.0)
         },
-        spheres: vec![
-            Sphere { // foreground sphere - visible b/c first in list
+        objects: vec![
+            Box::new(Sphere {
                 center: (1.5, 2.0, 0.0),
                 r: 0.7,
                 color: [1.0, 0.5, 0.0]
-            },
-            Sphere {
+            }),
+            Box::new(Sphere {
                 center: (3.0, 0.0, 0.0),
                 r: 1.0,
                 color: [1.0, 0.0, 0.0]
-            },
-            Sphere {
+            }),
+            Box::new(Sphere {
                 center: (-3.0, 0.0, 0.0),
                 r: 1.0,
                 color: [0.0, 0.0, 1.0],
-            },
-            Sphere {
+            }),
+            Box::new(Sphere {
                 center: (0.0, 0.0, 0.0),
                 r: 1.0,
                 color: [0.0, 1.0, 0.0]
-            },
-            Sphere {
+            }),
+            Box::new(Sphere {
                 center: (0.0, -4.0, 0.0),
                 r: 3.0,
                 color: [1.0, 1.0, 0.0]
-            },
-            Sphere { // foreground sphere at back at list - proper occlusion required to make this visible
+            }),
+            Box::new(Sphere { // foreground sphere at back at list - proper occlusion required to make this visible
                 center: (-1.5, 2.0, 0.0),
                 r: 0.7,
                 color: [1.0, 0.0, 1.0]
-            },
+            }),
         ]
     }
 }
@@ -248,12 +253,12 @@ fn scene_one_sphere() -> Scene {
         light: Light {
             location: (10.0, 10.0, 10.0)
         },
-        spheres: vec![
-            Sphere {
+        objects: vec![
+            Box::new(Sphere {
                 center: (0.0, 0.0, 0.0),
                 r: 1.0,
                 color: [1.0, 0.5, 0.0]
-            }
+            })
         ]
     }
 }
@@ -264,27 +269,27 @@ fn scene_axis_spheres() -> Scene {
         light: Light {
             location: (10.0, 10.0, 10.0)
         },
-        spheres: vec![
-            Sphere {
+        objects: vec![
+            Box::new(Sphere {
                 center: (0.0, 0.0, 0.0),
                 r: 1.0,
                 color: [1.0, 1.0, 1.0]
-            },
-            Sphere {
+            }),
+            Box::new(Sphere {
                 center: (3.0, 0.0, 0.0),
                 r: 0.25,
                 color: [1.0, 0.0, 0.0]
-            },
-            Sphere {
+            }),
+            Box::new(Sphere {
                 center: (0.0, 0.0, 3.0),
                 r: 0.25,
                 color: [0.0, 0.0, 1.0]
-            },
-            Sphere {
+            }),
+            Box::new(Sphere {
                 center: (0.0, 3.0, 0.0),
                 r: 0.25,
                 color: [0.0, 1.0, 0.0]
-            }
+            })
         ]
     }
 }
