@@ -54,10 +54,12 @@ fn dotp(pt0: Point, pt1: Point) -> f64 {
     return x0 * x1 + y0 * y1 + z0 * z1;
 }
 
+type Color = [f32; 3];
+
 struct Sphere {
     center: Point,
     r: f64,
-    color: [u8; 3]
+    color: Color,
 }
 
 struct Light {
@@ -67,6 +69,7 @@ struct Light {
 struct Scene {
     light: Light,
     spheres: Vec<Sphere>,
+    background: Color,
 }
 
 struct Camera {
@@ -97,7 +100,7 @@ struct RayHit {
     distance: f64,
     hit_point: Point,
     normal: Point,
-    color: [u8; 3],
+    color: Color,
 }
 
 fn hit_sphere(s: &Sphere, ray: &Vector) -> Option<RayHit> {
@@ -142,7 +145,7 @@ fn nearest_hit(ray: &Vector, spheres: &Vec<Sphere>) -> Option<RayHit> {
     }
 }
 
-fn light_occluded(point: &Point, scene: &Scene) -> bool {
+fn light_vector(point: &Point, scene: &Scene) -> Option<Vector> {
     let light_direction = subp(*point, scene.light.location);
 
     let light_distance = lenp(light_direction);
@@ -153,24 +156,38 @@ fn light_occluded(point: &Point, scene: &Scene) -> bool {
     };
 
     match nearest_hit(&ray, &scene.spheres) {
-        Some(hit) => hit.distance < light_distance - EPSILON,
-        None => false
+        Some(hit) =>
+            if hit.distance < light_distance - EPSILON {
+                Some(ray)
+            } else {
+                None
+            }
+        None => None
     }
 }
 
-fn ray_color(ray: &Vector, scene: &Scene) -> [u8; 3] {
+fn ray_color(ray: &Vector, scene: &Scene) -> Color {
     match nearest_hit(&ray, &scene.spheres) {
-        Some(hit) => if light_occluded(&hit.hit_point, &scene) {
-            [64 as u8, 64 as u8, 64 as u8]
-        } else {
-            hit.color
-        },
-        None => [255 as u8, 255 as u8, 255 as u8]
+        Some(hit) =>
+            match light_vector(&hit.hit_point, &scene) {
+                Some(_lv) => hit.color,
+                None => [0.25, 0.25, 0.25]
+            },
+        None => scene.background
     }
+}
+
+fn to_png_color(color: &Color) -> [u8; 3] {
+    [
+        (color[0] * 256.0) as u8,
+        (color[1] * 256.0) as u8,
+        (color[2] * 256.0) as u8
+    ]
 }
 
 fn scene_sphere_occlusion_test() -> Scene {
     Scene {
+        background: [0.0, 0.0, 0.0],
         light: Light {
             location: (10.0, 10.0, 10.0)
         },
@@ -178,32 +195,32 @@ fn scene_sphere_occlusion_test() -> Scene {
             Sphere { // foreground sphere - visible b/c first in list
                 center: (1.5, 2.0, 0.0),
                 r: 0.7,
-                color: [255, 127, 0]
+                color: [1.0, 0.5, 0.0]
             },
             Sphere {
                 center: (3.0, 0.0, 0.0),
                 r: 1.0,
-                color: [255, 0, 0]
+                color: [1.0, 0.0, 0.0]
             },
             Sphere {
                 center: (-3.0, 0.0, 0.0),
                 r: 1.0,
-                color: [0, 0, 255]
+                color: [0.0, 0.0, 1.0],
             },
             Sphere {
                 center: (0.0, 0.0, 0.0),
                 r: 1.0,
-                color: [0, 255, 0]
+                color: [0.0, 1.0, 0.0]
             },
             Sphere {
                 center: (0.0, -4.0, 0.0),
                 r: 3.0,
-                color: [255, 255, 0]
+                color: [1.0, 1.0, 0.0]
             },
             Sphere { // foreground sphere at back at list - proper occlusion required to make this visible
                 center: (-1.5, 2.0, 0.0),
                 r: 0.7,
-                color: [255, 0, 255]
+                color: [1.0, 0.0, 1.0]
             },
         ]
     }
@@ -211,6 +228,7 @@ fn scene_sphere_occlusion_test() -> Scene {
 
 fn scene_one_sphere() -> Scene {
     Scene {
+        background: [0.0, 0.0, 0.0],
         light: Light {
             location: (10.0, 10.0, 10.0)
         },
@@ -218,7 +236,7 @@ fn scene_one_sphere() -> Scene {
             Sphere {
                 center: (0.0, 0.0, 0.0),
                 r: 1.0,
-                color: [255, 127, 0]
+                color: [1.0, 0.5, 0.0]
             }
         ]
     }
@@ -242,7 +260,7 @@ fn main() {
 
     for (x, y, pixel) in imgbuf.enumerate_pixels_mut() {
         let ray = camera_ray(&c, x as f64 / imgx as f64, y as f64 / imgy as f64);
-        *pixel = image::Rgb(ray_color(&ray, &scene));
+        *pixel = image::Rgb(to_png_color(&ray_color(&ray, &scene)));
     }
 
     imgbuf.save("render.png").unwrap();
