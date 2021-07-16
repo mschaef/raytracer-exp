@@ -128,13 +128,18 @@ fn main() {
     let imgy = 800;
 
     let c = Camera {
-        location: (0.0, 10.0, 0.0),
+        location: (0.0, 10.0, -3.0),
         point_at: (0.0, 0.0, 0.0),
         u: (10.0, 0.0, 0.0),
         v: (0.0, 0.0, 10.0)
     };
 
     let spheres = [
+        Sphere { // foreground sphere - visible b/c first in list
+            center: (1.5, 2.0, 0.0),
+            r: 0.7,
+            color: [255, 127, 0]
+        },
         Sphere {
             center: (3.0, 0.0, 0.0),
             r: 1.0,
@@ -154,6 +159,11 @@ fn main() {
             center: (0.0, -4.0, 0.0),
             r: 5.0,
             color: [255, 255, 0]
+        },
+        Sphere { // foreground sphere - invisible b/c last in list and overlapped by earlier spheres
+            center: (-1.5, 2.0, 0.0),
+            r: 0.7,
+            color: [255, 0, 255]
         },
     ];
 
