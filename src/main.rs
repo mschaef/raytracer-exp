@@ -9,16 +9,22 @@ struct Vector {
     delta: Point
 }
 
+fn lenp(pt: Point) -> f64 {
+    let (x, y, z) = pt;
+
+    ((x * x) + (y * y) + (z * z)).sqrt()
+}
+
 fn normalizep(pt: Point) -> Point {
     let (x, y, z) = pt;
 
-    let len = ((x * x) + (y * y) + (z * z)).sqrt();
+    let len = lenp(pt);
 
     if len < EPSILON {
         panic!("Cannot normalize point vector of length 0.");
     }
 
-    return (x / len, y / len, z / len);
+    (x / len, y / len, z / len)
 }
 
 fn scalep(pt: Point, t: f64) -> Point {
@@ -54,8 +60,13 @@ struct Sphere {
     color: [u8; 3]
 }
 
+struct Light {
+    location: Point
+}
+
 struct Scene {
-    spheres: Vec<Sphere>
+    light: Light,
+    spheres: Vec<Sphere>,
 }
 
 struct Camera {
@@ -112,7 +123,7 @@ fn hit_sphere(s: &Sphere, ray: &Vector) -> Option<RayHit> {
             distance: t,
             hit_point: hit_point,
             normal: normalizep(subp(hit_point, s.center)),
-            color: s.color,
+            color: s.color
         })
     }
 }
@@ -131,15 +142,38 @@ fn nearest_hit(ray: &Vector, spheres: &Vec<Sphere>) -> Option<RayHit> {
     }
 }
 
+fn light_occluded(point: &Point, scene: &Scene) -> bool {
+    let light_direction = subp(*point, scene.light.location);
+
+    let light_distance = lenp(light_direction);
+
+    let ray = Vector {
+        start: scene.light.location,
+        delta: normalizep(light_direction)
+    };
+
+    match nearest_hit(&ray, &scene.spheres) {
+        Some(hit) => hit.distance < light_distance - EPSILON,
+        None => false
+    }
+}
+
 fn ray_color(ray: &Vector, scene: &Scene) -> [u8; 3] {
     match nearest_hit(&ray, &scene.spheres) {
-        Some(hit) => hit.color,
+        Some(hit) => if light_occluded(&hit.hit_point, &scene) {
+            [64 as u8, 64 as u8, 64 as u8]
+        } else {
+            hit.color
+        },
         None => [255 as u8, 255 as u8, 255 as u8]
     }
 }
 
 fn scene_sphere_occlusion_test() -> Scene {
     Scene {
+        light: Light {
+            location: (10.0, 10.0, 10.0)
+        },
         spheres: vec![
             Sphere { // foreground sphere - visible b/c first in list
                 center: (1.5, 2.0, 0.0),
@@ -175,6 +209,21 @@ fn scene_sphere_occlusion_test() -> Scene {
     }
 }
 
+fn scene_one_sphere() -> Scene {
+    Scene {
+        light: Light {
+            location: (10.0, 10.0, 10.0)
+        },
+        spheres: vec![
+            Sphere {
+                center: (0.0, 0.0, 0.0),
+                r: 1.0,
+                color: [255, 127, 0]
+            }
+        ]
+    }
+}
+
 fn main() {
     let imgx = 800;
     let imgy = 800;
@@ -187,6 +236,7 @@ fn main() {
     };
 
     let scene = scene_sphere_occlusion_test();
+    //let scene = scene_one_sphere();
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
