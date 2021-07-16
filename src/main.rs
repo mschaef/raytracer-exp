@@ -59,9 +59,9 @@ fn normalizev(vec: Vector) -> Vector {
 
 struct Sphere {
     center: Point,
-    r: f64
+    r: f64,
+    color: [u8; 3]
 }
-
 
 struct Camera {
     location: Point,
@@ -130,13 +130,14 @@ fn main() {
     let c = Camera {
         location: (0.0, 10.0, 0.0),
         point_at: (0.0, 0.0, 0.0),
-        u: (2.0, 0.0, 0.0),
-        v: (0.0, 0.0, 2.0)
+        u: (10.0, 0.0, 0.0),
+        v: (0.0, 0.0, 10.0)
     };
 
     let s = Sphere {
         center: (0.0, 0.0, 0.0),
-        r: 1.0
+        r: 1.0,
+        color: [255, 0, 0]
     };
 
     // Create a new ImgBuf with width: imgx and height: imgy
@@ -151,13 +152,13 @@ fn main() {
 
         // let value = ((x as f64 / imgx as f64) * 255.0) as u8;
 
-        let value = if hit_sphere(&s, &ray) {
-            0 as u8
+        let cvec = if hit_sphere(&s, &ray) {
+            s.color
         } else {
-            255 as u8
+            [255 as u8, 255 as u8, 255 as u8]
         };
 
-        *pixel = image::Rgb([value, value, value]);
+        *pixel = image::Rgb(cvec);
     }
 
     // Save the image as “fractal.png”, the format is deduced from the path
