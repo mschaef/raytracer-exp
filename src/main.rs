@@ -73,8 +73,17 @@ fn camera_ray(c: &Camera, xt: f64, yt: f64) -> Vector {
     };
 }
 
+fn ray_location(ray: &Vector, t: f64) -> Point {
+    let (x, y, z) = ray.start;
+    let (dx, dy, dz) = ray.delta;
+
+    return (x + dx * t, y + dy * t, z + dz * t);
+}
+
 struct RayHit {
     distance: f64,
+    hit_point: Point,
+    normal: Point,
     color: [u8; 3],
 }
 
@@ -94,9 +103,14 @@ fn hit_sphere(s: &Sphere, ray: &Vector) -> Option<RayHit> {
     if discriminant < 0.0 {
         None
     } else {
+        let t = (-b - discriminant.sqrt()) / (2.0*a);
+        let hit_point = ray_location(&ray, t);
+
         Some(RayHit {
-            distance: (-b - discriminant.sqrt()) / (2.0*a),
-            color: s.color
+            distance: t,
+            hit_point: hit_point,
+            normal: normalizep(subp(hit_point, s.center)),
+            color: s.color,
         })
     }
 }
