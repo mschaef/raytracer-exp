@@ -56,6 +56,12 @@ fn dotp(pt0: Point, pt1: Point) -> f64 {
     return x0 * x1 + y0 * y1 + z0 * z1;
 }
 
+fn negp(pt: Point) -> Point {
+    let (x, y, z) = pt;
+
+    return (-x, -y, -z);
+}
+
 type Color = [f32; 3];
 
 struct Sphere {
@@ -170,9 +176,9 @@ fn light_vector(point: &Point, scene: &Scene) -> Option<Vector> {
 
 fn scale_color(color: &Color, s: f32) -> Color {
     [
-        color[0] * s.abs(),
-        color[1] * s.abs(),
-        color[2] * s.abs()
+        color[0] * s,
+        color[1] * s,
+        color[2] * s
     ]
 }
 
@@ -180,7 +186,7 @@ fn ray_color(ray: &Vector, scene: &Scene) -> Color {
     match nearest_hit(&ray, &scene.spheres) {
         Some(hit) =>
             match light_vector(&hit.hit_point, &scene) {
-                Some(lv) => scale_color(&hit.color, dotp(lv.delta, hit.normal) as f32),
+                Some(lv) => scale_color(&hit.color, dotp(hit.normal, negp(lv.delta)) as f32),
                 None => [0.0, 0.0, 0.0]
             },
         None => scene.background
