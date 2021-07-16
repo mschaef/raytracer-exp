@@ -1,6 +1,4 @@
-//! An example of generating julia fractals.
 extern crate image;
-extern crate num_complex;
 
 const EPSILON: f64 = 0.0001;
 
@@ -54,6 +52,10 @@ struct Sphere {
     center: Point,
     r: f64,
     color: [u8; 3]
+}
+
+struct Scene {
+    spheres: Vec<Sphere>
 }
 
 struct Camera {
@@ -115,6 +117,64 @@ fn hit_sphere(s: &Sphere, ray: &Vector) -> Option<RayHit> {
     }
 }
 
+fn nearest_hit(ray: &Vector, spheres: &Vec<Sphere>) -> Option<RayHit> {
+    let mut hits = spheres.iter().map(| s | hit_sphere(&s, &ray))
+        .filter_map(| ray_hit | ray_hit )
+        .collect::<Vec<RayHit>>();
+
+    hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+
+    if hits.len() > 0 {
+        Some(hits.remove(0))
+    } else {
+        None
+    }
+}
+
+fn ray_color(ray: &Vector, scene: &Scene) -> [u8; 3] {
+    match nearest_hit(&ray, &scene.spheres) {
+        Some(hit) => hit.color,
+        None => [255 as u8, 255 as u8, 255 as u8]
+    }
+}
+
+fn scene_sphere_occlusion_test() -> Scene {
+    Scene {
+        spheres: vec![
+            Sphere { // foreground sphere - visible b/c first in list
+                center: (1.5, 2.0, 0.0),
+                r: 0.7,
+                color: [255, 127, 0]
+            },
+            Sphere {
+                center: (3.0, 0.0, 0.0),
+                r: 1.0,
+                color: [255, 0, 0]
+            },
+            Sphere {
+                center: (-3.0, 0.0, 0.0),
+                r: 1.0,
+                color: [0, 0, 255]
+            },
+            Sphere {
+                center: (0.0, 0.0, 0.0),
+                r: 1.0,
+                color: [0, 255, 0]
+            },
+            Sphere {
+                center: (0.0, -4.0, 0.0),
+                r: 3.0,
+                color: [255, 255, 0]
+            },
+            Sphere { // foreground sphere at back at list - proper occlusion required to make this visible
+                center: (-1.5, 2.0, 0.0),
+                r: 0.7,
+                color: [255, 0, 255]
+            },
+        ]
+    }
+}
+
 fn main() {
     let imgx = 800;
     let imgy = 800;
@@ -126,59 +186,14 @@ fn main() {
         v: (0.0, 0.0, 10.0)
     };
 
-    let spheres = [
-        Sphere { // foreground sphere - visible b/c first in list
-            center: (1.5, 2.0, 0.0),
-            r: 0.7,
-            color: [255, 127, 0]
-        },
-        Sphere {
-            center: (3.0, 0.0, 0.0),
-            r: 1.0,
-            color: [255, 0, 0]
-        },
-        Sphere {
-            center: (-3.0, 0.0, 0.0),
-            r: 1.0,
-            color: [0, 0, 255]
-        },
-        Sphere {
-            center: (0.0, 0.0, 0.0),
-            r: 1.0,
-            color: [0, 255, 0]
-        },
-        Sphere {
-            center: (0.0, -4.0, 0.0),
-            r: 3.0,
-            color: [255, 255, 0]
-        },
-        Sphere { // foreground sphere at back at list - proper occlusion required to make this visible
-            center: (-1.5, 2.0, 0.0),
-            r: 0.7,
-            color: [255, 0, 255]
-        },
-    ];
+    let scene = scene_sphere_occlusion_test();
 
-    // Create a new ImgBuf with width: imgx and height: imgy
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
     for (x, y, pixel) in imgbuf.enumerate_pixels_mut() {
         let ray = camera_ray(&c, x as f64 / imgx as f64, y as f64 / imgy as f64);
-
-        let mut hits = spheres.iter().map(| s | hit_sphere(&s, &ray))
-            .filter_map(| ray_hit | ray_hit )
-            .collect::<Vec<RayHit>>();
-
-        hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
-
-        let cvec = if hits.len() > 0 {
-            hits[0].color
-        } else {
-            [255 as u8, 255 as u8, 255 as u8]
-        };
-
-        *pixel = image::Rgb(cvec);
+        *pixel = image::Rgb(ray_color(&ray, &scene));
     }
 
-    imgbuf.save("fractal.png").unwrap();
+    imgbuf.save("render.png").unwrap();
 }
