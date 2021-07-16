@@ -50,13 +50,6 @@ fn dotp(pt0: Point, pt1: Point) -> f64 {
     return x0 * x1 + y0 * y1 + z0 * z1;
 }
 
-fn normalizev(vec: Vector) -> Vector {
-    return Vector {
-        start: vec.start,
-        delta: normalizep(vec.delta)
-    };
-}
-
 struct Sphere {
     center: Point,
     r: f64,
@@ -80,34 +73,12 @@ fn camera_ray(c: &Camera, xt: f64, yt: f64) -> Vector {
     };
 }
 
-fn solve_quadratic(a: f64, b: f64, c: f64) -> Option<(f64, f64)> {
-
-    let discr = b * b - 4.0 * a * c;
-
-    if discr < 0.0 {
-        None
-    } else if discr < EPSILON {
-        let x = - 0.5 * b / a;
-        Some((x, x))
-    } else {
-        let q = if b > 0.0 {
-            -0.5 * (b + discr.sqrt())
-        } else {
-            -0.5 * (b - discr.sqrt())
-        };
-
-        let x0 = q / a;
-        let x1 = c / q;
-
-        if x0 > x1 {
-            Some((x1, x0))
-        } else {
-            Some((x0, x1))
-        }
-    }
+struct RayHit {
+    distance: f64,
+    color: [u8; 3],
 }
 
-fn hit_sphere(s: &Sphere, ray: &Vector) -> bool {
+fn hit_sphere(s: &Sphere, ray: &Vector) -> Option<RayHit> {
 
     // Hit test algorithm taken from this website and translated to
     // Rust:
@@ -120,7 +91,14 @@ fn hit_sphere(s: &Sphere, ray: &Vector) -> bool {
     let c = dotp(oc, oc) - s.r * s.r;
     let discriminant = b*b - 4.0*a*c;
 
-    discriminant > 0.0
+    if discriminant < 0.0 {
+        None
+    } else {
+        Some(RayHit {
+            distance: (-b - discriminant.sqrt()) / (2.0*a),
+            color: s.color
+        })
+    }
 }
 
 fn main() {
@@ -157,10 +135,10 @@ fn main() {
         },
         Sphere {
             center: (0.0, -4.0, 0.0),
-            r: 5.0,
+            r: 3.0,
             color: [255, 255, 0]
         },
-        Sphere { // foreground sphere - invisible b/c last in list and overlapped by earlier spheres
+        Sphere { // foreground sphere at back at list - proper occlusion required to make this visible
             center: (-1.5, 2.0, 0.0),
             r: 0.7,
             color: [255, 0, 255]
@@ -173,11 +151,16 @@ fn main() {
     for (x, y, pixel) in imgbuf.enumerate_pixels_mut() {
         let ray = camera_ray(&c, x as f64 / imgx as f64, y as f64 / imgy as f64);
 
-        let s = spheres.iter().find(| &s | hit_sphere(&s, &ray));
+        let mut hits = spheres.iter().map(| s | hit_sphere(&s, &ray))
+            .filter_map(| ray_hit | ray_hit )
+            .collect::<Vec<RayHit>>();
 
-        let cvec = match s {
-            None => [255 as u8, 255 as u8, 255 as u8],
-            Some(hs) => hs.color
+        hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
+
+        let cvec = if hits.len() > 0 {
+            hits[0].color
+        } else {
+            [255 as u8, 255 as u8, 255 as u8]
         };
 
         *pixel = image::Rgb(cvec);
