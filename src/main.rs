@@ -157,7 +157,7 @@ fn light_vector(point: &Point, scene: &Scene) -> Option<Vector> {
 
     match nearest_hit(&ray, &scene.spheres) {
         Some(hit) =>
-            if hit.distance < light_distance - EPSILON {
+            if hit.distance > light_distance - EPSILON {
                 Some(ray)
             } else {
                 None
@@ -166,12 +166,20 @@ fn light_vector(point: &Point, scene: &Scene) -> Option<Vector> {
     }
 }
 
+fn scale_color(color: &Color, s: f32) -> Color {
+    [
+        color[0] * s.abs(),
+        color[1] * s.abs(),
+        color[2] * s.abs()
+    ]
+}
+
 fn ray_color(ray: &Vector, scene: &Scene) -> Color {
     match nearest_hit(&ray, &scene.spheres) {
         Some(hit) =>
             match light_vector(&hit.hit_point, &scene) {
-                Some(_lv) => hit.color,
-                None => [0.25, 0.25, 0.25]
+                Some(lv) => scale_color(&hit.color, dotp(lv.delta, hit.normal) as f32),
+                None => [0.0, 0.0, 0.0]
             },
         None => scene.background
     }
@@ -189,7 +197,7 @@ fn scene_sphere_occlusion_test() -> Scene {
     Scene {
         background: [0.0, 0.0, 0.0],
         light: Light {
-            location: (10.0, 10.0, 10.0)
+            location: (5.0, 5.0, 5.0)
         },
         spheres: vec![
             Sphere { // foreground sphere - visible b/c first in list
@@ -242,19 +250,51 @@ fn scene_one_sphere() -> Scene {
     }
 }
 
+fn scene_axis_spheres() -> Scene {
+    Scene {
+        background: [0.0, 0.0, 0.0],
+        light: Light {
+            location: (10.0, 10.0, 10.0)
+        },
+        spheres: vec![
+            Sphere {
+                center: (0.0, 0.0, 0.0),
+                r: 1.0,
+                color: [1.0, 1.0, 1.0]
+            },
+            Sphere {
+                center: (3.0, 0.0, 0.0),
+                r: 0.25,
+                color: [1.0, 0.0, 0.0]
+            },
+            Sphere {
+                center: (0.0, 0.0, 3.0),
+                r: 0.25,
+                color: [0.0, 0.0, 1.0]
+            },
+            Sphere {
+                center: (0.0, 3.0, 0.0),
+                r: 0.25,
+                color: [0.0, 1.0, 0.0]
+            }
+        ]
+    }
+}
+
 fn main() {
     let imgx = 800;
     let imgy = 800;
 
     let c = Camera {
-        location: (0.0, 10.0, -3.0),
+        location: (0.0, 10.0, 0.0),
         point_at: (0.0, 0.0, 0.0),
         u: (10.0, 0.0, 0.0),
-        v: (0.0, 0.0, 10.0)
+        v: (0.0, 0.0, -10.0)
     };
 
     let scene = scene_sphere_occlusion_test();
     //let scene = scene_one_sphere();
+    //let scene = scene_axis_spheres();
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
