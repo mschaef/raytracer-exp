@@ -134,33 +134,44 @@ fn main() {
         v: (0.0, 0.0, 10.0)
     };
 
-    let s = Sphere {
-        center: (0.0, 0.0, 0.0),
-        r: 1.0,
-        color: [255, 0, 0]
-    };
+    let spheres = [
+        Sphere {
+            center: (3.0, 0.0, 0.0),
+            r: 1.0,
+            color: [255, 0, 0]
+        },
+        Sphere {
+            center: (-3.0, 0.0, 0.0),
+            r: 1.0,
+            color: [0, 0, 255]
+        },
+        Sphere {
+            center: (0.0, 0.0, 0.0),
+            r: 1.0,
+            color: [0, 255, 0]
+        },
+        Sphere {
+            center: (0.0, -4.0, 0.0),
+            r: 5.0,
+            color: [255, 255, 0]
+        },
+    ];
 
     // Create a new ImgBuf with width: imgx and height: imgy
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
-    // Iterate over the coordinates and pixels of the image
     for (x, y, pixel) in imgbuf.enumerate_pixels_mut() {
-
-        //println!("x: {}, y: {}'", x, y);
-
         let ray = camera_ray(&c, x as f64 / imgx as f64, y as f64 / imgy as f64);
 
-        // let value = ((x as f64 / imgx as f64) * 255.0) as u8;
+        let s = spheres.iter().find(| &s | hit_sphere(&s, &ray));
 
-        let cvec = if hit_sphere(&s, &ray) {
-            s.color
-        } else {
-            [255 as u8, 255 as u8, 255 as u8]
+        let cvec = match s {
+            None => [255 as u8, 255 as u8, 255 as u8],
+            Some(hs) => hs.color
         };
 
         *pixel = image::Rgb(cvec);
     }
 
-    // Save the image as “fractal.png”, the format is deduced from the path
     imgbuf.save("fractal.png").unwrap();
 }
