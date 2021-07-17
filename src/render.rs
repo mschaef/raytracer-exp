@@ -33,18 +33,20 @@ pub struct Light {
     pub location: Point
 }
 
-pub struct Scene {
-    pub light: Light,
-    pub objects: Vec<Box<dyn Hittable>>,
-    pub background: Color,
-}
-
 pub struct Camera {
     pub location: Point,
     pub point_at: Point,
     pub u: Point,
     pub v: Point
 }
+
+pub struct Scene {
+    pub camera: Camera,
+    pub light: Light,
+    pub objects: Vec<Box<dyn Hittable>>,
+    pub background: Color,
+}
+
 
 pub trait Hittable {
     fn hit_test(&self, ray: &Vector) -> Option<RayHit>;
@@ -198,13 +200,13 @@ fn to_png_color(color: &Color) -> [u8; 3] {
 }
 
 pub fn render(
-    c: &Camera, scene: &Scene, imgx: u32, imgy: u32
+    scene: &Scene, imgx: u32, imgy: u32
 ) -> image::ImageBuffer<image::Rgb<u8>, Vec<u8>> {
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
     for (x, y, pixel) in imgbuf.enumerate_pixels_mut() {
-        let ray = camera_ray(&c, x as f64 / imgx as f64, y as f64 / imgy as f64);
+        let ray = camera_ray(&scene.camera, x as f64 / imgx as f64, y as f64 / imgy as f64);
         *pixel = image::Rgb(to_png_color(&ray_color(&ray, &scene)));
     }
 

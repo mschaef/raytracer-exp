@@ -1,12 +1,21 @@
 use crate::render::{
+    Camera,
     Scene,
     Light,
     Sphere,
     Plane,
 };
 
+const DEFAULT_CAMERA: Camera = Camera {
+    location: (0.0, 10.0, 0.0),
+    point_at: (0.0, 0.0, 0.0),
+    u: (10.0, 0.0, 0.0),
+    v: (0.0, 0.0, -10.0)
+};
+
 pub fn scene_sphere_occlusion_test() -> Scene {
     Scene {
+        camera: DEFAULT_CAMERA,
         background: [0.0, 0.0, 0.0],
         light: Light {
             location: (5.0, 5.0, 5.0)
@@ -48,6 +57,7 @@ pub fn scene_sphere_occlusion_test() -> Scene {
 
 pub fn scene_one_sphere() -> Scene {
     Scene {
+        camera: DEFAULT_CAMERA,
         background: [0.0, 0.0, 0.0],
         light: Light {
             location: (10.0, 10.0, 10.0)
@@ -80,6 +90,7 @@ pub fn scene_one_sphere() -> Scene {
 
 pub fn scene_axis_spheres() -> Scene {
     Scene {
+        camera: DEFAULT_CAMERA,
         background: [0.0, 0.0, 0.0],
         light: Light {
             location: (10.0, 10.0, 10.0)
@@ -112,6 +123,7 @@ pub fn scene_axis_spheres() -> Scene {
 
 pub fn scene_ball_on_plane() -> Scene {
     Scene {
+        camera: DEFAULT_CAMERA,
         background: [0.0, 0.0, 0.0],
         light: Light {
             location: (10.0, 10.0, 10.0)
