@@ -70,6 +70,12 @@ struct Sphere {
     color: Color,
 }
 
+struct Plane {
+    normal: Point,
+    p0: Point,
+    color: Color,
+}
+
 struct Light {
     location: Point
 }
@@ -80,7 +86,7 @@ trait Hittable {
 
 struct Scene {
     light: Light,
-    objects: Vec<Box<Hittable>>,
+    objects: Vec<Box<dyn Hittable>>,
     background: Color,
 }
 
@@ -144,7 +150,33 @@ impl Hittable for Sphere {
     }
 }
 
-fn nearest_hit(ray: &Vector, objects: &Vec<Box<Hittable>>) -> Option<RayHit> {
+impl Hittable for Plane {
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        let denom = dotp(self.normal, ray.delta);
+
+        if denom.abs() < EPSILON {
+            None
+        } else {
+            let p0l0 = subp(self.p0, ray.start);
+            let t = dotp(p0l0, self.normal) / denom;
+
+            if t <= EPSILON {
+                None
+            } else {
+                let hit_point = ray_location(&ray, t);
+
+                Some(RayHit {
+                    distance: t,
+                    hit_point: hit_point,
+                    normal: self.normal,
+                    color: self.color
+                })
+            }
+        }
+    }
+}
+
+fn nearest_hit(ray: &Vector, objects: &Vec<Box<dyn Hittable>>) -> Option<RayHit> {
     let mut hits = objects.iter().map(| obj | obj.hit_test(&ray))
         .filter_map(| ray_hit | ray_hit )
         .collect::<Vec<RayHit>>();
@@ -187,11 +219,17 @@ fn scale_color(color: &Color, s: f32) -> Color {
     ]
 }
 
+fn shade_pixel(hit: &RayHit, lv: &Vector) -> Color {
+    // https://en.wikipedia.org/wiki/Lambertian_reflectance
+
+    scale_color(&hit.color, dotp(hit.normal, negp(lv.delta)) as f32)
+}
+
 fn ray_color(ray: &Vector, scene: &Scene) -> Color {
     match nearest_hit(&ray, &scene.objects) {
         Some(hit) =>
             match light_vector(&hit.hit_point, &scene) {
-                Some(lv) => scale_color(&hit.color, dotp(hit.normal, negp(lv.delta)) as f32),
+                Some(lv) => shade_pixel(&hit, &lv),
                 None => [0.0, 0.0, 0.0]
             },
         None => scene.background
@@ -258,7 +296,23 @@ fn scene_one_sphere() -> Scene {
                 center: (0.0, 0.0, 0.0),
                 r: 1.0,
                 color: [1.0, 0.5, 0.0]
-            })
+            }),
+
+            Box::new(Plane {
+                normal: (1.0, 0.0, 0.0),
+                p0: (-3.0, 0.0, 0.0),
+                color: [1.0, 0.0, 0.0]
+            }),
+            Box::new(Plane {
+                normal: (0.0, 1.0, 0.0),
+                p0: (0.0, -3.0, 0.0),
+                color: [0.0, 1.0, 0.0]
+            }),
+            Box::new(Plane {
+                normal: (0.0, 0.0, 1.0),
+                p0: (0.0, 0.0, -3.0),
+                color: [0.0, 0.0, 1.0]
+            }),
         ]
     }
 }
@@ -281,15 +335,38 @@ fn scene_axis_spheres() -> Scene {
                 color: [1.0, 0.0, 0.0]
             }),
             Box::new(Sphere {
+                center: (0.0, 3.0, 0.0),
+                r: 0.25,
+                color: [0.0, 1.0, 0.0]
+            }),
+            Box::new(Sphere {
                 center: (0.0, 0.0, 3.0),
                 r: 0.25,
                 color: [0.0, 0.0, 1.0]
             }),
+        ]
+    }
+}
+
+
+fn scene_ball_on_plane() -> Scene {
+    Scene {
+        background: [0.0, 0.0, 0.0],
+        light: Light {
+            location: (10.0, 10.0, 10.0)
+        },
+        objects: vec![
             Box::new(Sphere {
-                center: (0.0, 3.0, 0.0),
-                r: 0.25,
-                color: [0.0, 1.0, 0.0]
-            })
+                center: (0.0, -2.0, -1.0),
+                r: 0.66,
+                color: [0.0, 0.0, 1.0]
+            }),
+            Box::new(Plane {
+                normal: (0.0, 0.0, 1.0),
+                p0: (0.0, 0.0, -2.0),
+                color: [1.0, 1.0, 1.0]
+            }),
+
         ]
     }
 }
@@ -322,15 +399,18 @@ fn main() {
 
     let scene = [
         scene_sphere_occlusion_test(),
+        scene_axis_spheres(),
         scene_one_sphere(),
-        scene_axis_spheres()
+        scene_ball_on_plane()
     ];
 
-    output_imgbuf.copy_from(&render(&c, &scene[0], imgdim / 2, imgdim / 2), 0, 0)
-        .map_err(|err| println!("{:?}", err)).ok();
+     output_imgbuf.copy_from(&render(&c, &scene[0], imgdim / 2, imgdim / 2), 0, 0)
+         .map_err(|err| println!("{:?}", err)).ok();
     output_imgbuf.copy_from(&render(&c, &scene[1], imgdim / 2, imgdim / 2), imgdim / 2, 0)
         .map_err(|err| println!("{:?}", err)).ok();
-    output_imgbuf.copy_from(&render(&c, &scene[2], imgdim / 2, imgdim / 2), 0, imgdim / 2)
+     output_imgbuf.copy_from(&render(&c, &scene[2], imgdim / 2, imgdim / 2), 0, imgdim / 2)
+        .map_err(|err| println!("{:?}", err)).ok();
+     output_imgbuf.copy_from(&render(&c, &scene[3], imgdim / 2, imgdim / 2), imgdim / 2, imgdim / 2)
         .map_err(|err| println!("{:?}", err)).ok();
 
     for ii in 0..imgdim - 1 {
