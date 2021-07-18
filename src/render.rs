@@ -17,16 +17,21 @@ use geometry::{
 
 pub type Color = [f32; 3];
 
+#[derive(Copy, Clone)]
+pub struct Surface {
+    pub color: Color
+}
+
 pub struct Sphere {
     pub center: Point,
     pub r: f64,
-    pub color: Color,
+    pub surface: Surface,
 }
 
 pub struct Plane {
     pub normal: Point,
     pub p0: Point,
-    pub color: Color,
+    pub surface: Surface,
 }
 
 pub struct Light {
@@ -73,7 +78,7 @@ pub struct RayHit {
     pub distance: f64,
     pub hit_point: Point,
     pub normal: Point,
-    pub color: Color,
+    pub surface: Surface,
 }
 
 impl Hittable for Sphere {
@@ -99,7 +104,7 @@ impl Hittable for Sphere {
                 distance: t,
                 hit_point: hit_point,
                 normal: normalizep(subp(hit_point, self.center)),
-                color: self.color
+                surface: self.surface
             })
         }
     }
@@ -124,7 +129,7 @@ impl Hittable for Plane {
                     distance: t,
                     hit_point: hit_point,
                     normal: self.normal,
-                    color: self.color
+                    surface: self.surface
                 })
             }
         }
@@ -174,19 +179,18 @@ fn scale_color(color: &Color, s: f32) -> Color {
     ]
 }
 
-fn shade_pixel(hit: &RayHit, lv: &Vector) -> Color {
+fn shade_pixel(scene: &Scene, hit: &RayHit) -> Color {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
-    scale_color(&hit.color, dotp(hit.normal, negp(lv.delta)) as f32)
+    match light_vector(&hit.hit_point, &scene) {
+        Some(lv) => scale_color(&hit.surface.color, dotp(hit.normal, negp(lv.delta)) as f32),
+        None => [0.0, 0.0, 0.0]
+    }
 }
 
 fn ray_color(ray: &Vector, scene: &Scene) -> Color {
     match nearest_hit(&ray, &scene.objects) {
-        Some(hit) =>
-            match light_vector(&hit.hit_point, &scene) {
-                Some(lv) => shade_pixel(&hit, &lv),
-                None => [0.0, 0.0, 0.0]
-            },
+        Some(hit) => shade_pixel(&scene, &hit),
         None => scene.background
     }
 }
