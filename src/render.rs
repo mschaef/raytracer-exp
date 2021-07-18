@@ -179,13 +179,27 @@ fn scale_color(color: &Color, s: f32) -> Color {
     ]
 }
 
+fn addcolor(colora: &Color, colorb: &Color) -> Color {
+    [
+        colora[0] + colorb[0],
+        colora[1] + colorb[1],
+        colora[2] + colorb[2],
+    ]
+}
+
+const AMBIENT: f32 = 0.3;
+
 fn shade_pixel(scene: &Scene, hit: &RayHit) -> Color {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
-    match light_vector(&hit.hit_point, &scene) {
+    let ambient: Color = scale_color(&hit.surface.color, AMBIENT);
+
+    let light: Color = match light_vector(&hit.hit_point, &scene) {
         Some(lv) => scale_color(&hit.surface.color, dotp(hit.normal, negp(lv.delta)) as f32),
         None => [0.0, 0.0, 0.0]
-    }
+    };
+
+    addcolor(&ambient, &scale_color(&light, 1.0 - AMBIENT))
 }
 
 fn ray_color(ray: &Vector, scene: &Scene) -> Color {
