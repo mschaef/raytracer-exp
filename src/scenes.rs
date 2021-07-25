@@ -14,41 +14,58 @@ const DEFAULT_CAMERA: Camera = Camera {
     v: (0.0, 0.0, -10.0)
 };
 
-const AMBIENT: f32 = 0.3 as f32;
+const AMBIENT: f32 = 0.2 as f32;
+const SPECULAR: f32 = 0.5 as f32;
+const LIGHT: f32 = 0.6 as f32;
+
 
 const SURFACE_RED: Surface = Surface {
     color: [1.0, 0.0, 0.0],
-    ambient: AMBIENT
+    ambient: AMBIENT,
+    specular: SPECULAR,
+    light: LIGHT
 };
 
 const SURFACE_GREEN: Surface = Surface {
     color: [0.0, 1.0, 0.0],
-    ambient: AMBIENT
+    ambient: AMBIENT,
+    specular: SPECULAR,
+    light: LIGHT
 };
 
 const SURFACE_BLUE: Surface = Surface {
     color: [0.0, 0.0, 1.0],
-    ambient: AMBIENT
+    ambient: AMBIENT,
+    specular: SPECULAR,
+    light: LIGHT
 };
 
 const SURFACE_ORANGE: Surface = Surface {
     color: [1.0, 0.5, 0.0],
-    ambient: AMBIENT
+    ambient: AMBIENT,
+    specular: SPECULAR,
+    light: LIGHT
 };
 
 const SURFACE_YELLOW: Surface = Surface {
     color: [1.0, 1.0, 0.0],
-    ambient: AMBIENT
+    ambient: AMBIENT,
+    specular: SPECULAR,
+    light: LIGHT
 };
 
 const SURFACE_PURPLE: Surface = Surface {
     color: [1.0, 0.0, 1.0],
-    ambient: AMBIENT
+    ambient: AMBIENT,
+    specular: SPECULAR,
+    light: LIGHT
 };
 
 const SURFACE_WHITE: Surface = Surface {
     color: [1.0, 1.0, 1.0],
-    ambient: AMBIENT
+    ambient: AMBIENT,
+    specular: SPECULAR,
+    light: LIGHT
 };
 
 pub fn scene_sphere_occlusion_test() -> Scene {

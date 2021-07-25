@@ -20,7 +20,9 @@ pub type Color = [f32; 3];
 #[derive(Copy, Clone)]
 pub struct Surface {
     pub color: Color,
-    pub ambient: f32
+    pub ambient: f32,
+    pub specular: f32,
+    pub light: f32
 }
 
 pub struct Sphere {
@@ -194,11 +196,18 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit) -> Color {
     let ambient: Color = scale_color(&hit.surface.color, hit.surface.ambient);
 
     let light: Color = match light_vector(&hit.hit_point, &scene) {
-        Some(lv) => scale_color(&hit.surface.color, dotp(hit.normal, negp(lv.delta)) as f32),
+        Some(lv) => {
+            let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0) as f32;
+
+            addcolor(&scale_color(&[1.0, 1.0, 1.0], kspecular * hit.surface.specular),
+                     &scale_color(&hit.surface.color, hit.surface.light * dotp(hit.normal, negp(lv.delta)) as f32))
+
+        },
         None => [0.0, 0.0, 0.0]
     };
 
-    addcolor(&ambient, &scale_color(&light, 1.0 - hit.surface.ambient))
+
+    addcolor(&ambient, &light)
 }
 
 fn ray_color(ray: &Vector, scene: &Scene) -> Color {
