@@ -19,7 +19,8 @@ pub type Color = [f32; 3];
 
 #[derive(Copy, Clone)]
 pub struct Surface {
-    pub color: Color
+    pub color: Color,
+    pub ambient: f32
 }
 
 pub struct Sphere {
@@ -187,24 +188,22 @@ fn addcolor(colora: &Color, colorb: &Color) -> Color {
     ]
 }
 
-const AMBIENT: f32 = 0.3;
-
-fn shade_pixel(scene: &Scene, hit: &RayHit) -> Color {
+fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit) -> Color {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
-    let ambient: Color = scale_color(&hit.surface.color, AMBIENT);
+    let ambient: Color = scale_color(&hit.surface.color, hit.surface.ambient);
 
     let light: Color = match light_vector(&hit.hit_point, &scene) {
         Some(lv) => scale_color(&hit.surface.color, dotp(hit.normal, negp(lv.delta)) as f32),
         None => [0.0, 0.0, 0.0]
     };
 
-    addcolor(&ambient, &scale_color(&light, 1.0 - AMBIENT))
+    addcolor(&ambient, &scale_color(&light, 1.0 - hit.surface.ambient))
 }
 
 fn ray_color(ray: &Vector, scene: &Scene) -> Color {
     match nearest_hit(&ray, &scene.objects) {
-        Some(hit) => shade_pixel(&scene, &hit),
+        Some(hit) => shade_pixel(&ray, &scene, &hit),
         None => scene.background
     }
 }

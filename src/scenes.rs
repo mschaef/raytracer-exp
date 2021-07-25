@@ -14,6 +14,43 @@ const DEFAULT_CAMERA: Camera = Camera {
     v: (0.0, 0.0, -10.0)
 };
 
+const AMBIENT: f32 = 0.3 as f32;
+
+const SURFACE_RED: Surface = Surface {
+    color: [1.0, 0.0, 0.0],
+    ambient: AMBIENT
+};
+
+const SURFACE_GREEN: Surface = Surface {
+    color: [0.0, 1.0, 0.0],
+    ambient: AMBIENT
+};
+
+const SURFACE_BLUE: Surface = Surface {
+    color: [0.0, 0.0, 1.0],
+    ambient: AMBIENT
+};
+
+const SURFACE_ORANGE: Surface = Surface {
+    color: [1.0, 0.5, 0.0],
+    ambient: AMBIENT
+};
+
+const SURFACE_YELLOW: Surface = Surface {
+    color: [1.0, 1.0, 0.0],
+    ambient: AMBIENT
+};
+
+const SURFACE_PURPLE: Surface = Surface {
+    color: [1.0, 0.0, 1.0],
+    ambient: AMBIENT
+};
+
+const SURFACE_WHITE: Surface = Surface {
+    color: [1.0, 1.0, 1.0],
+    ambient: AMBIENT
+};
+
 pub fn scene_sphere_occlusion_test() -> Scene {
     Scene {
         camera: DEFAULT_CAMERA,
@@ -25,44 +62,32 @@ pub fn scene_sphere_occlusion_test() -> Scene {
             Box::new(Sphere {
                 center: (1.5, 2.0, 0.0),
                 r: 0.7,
-                surface: Surface {
-                    color: [1.0, 0.5, 0.0]
-                }
+                surface: SURFACE_ORANGE
             }),
             Box::new(Sphere {
                 center: (3.0, 0.0, 0.0),
                 r: 1.0,
-                surface: Surface {
-                    color: [1.0, 0.0, 0.0]
-                }
+                surface: SURFACE_RED
             }),
             Box::new(Sphere {
                 center: (-3.0, 0.0, 0.0),
                 r: 1.0,
-                surface: Surface {
-                    color: [0.0, 0.0, 1.0],
-                }
+                surface: SURFACE_BLUE
             }),
             Box::new(Sphere {
                 center: (0.0, 0.0, 0.0),
                 r: 1.0,
-                surface: Surface {
-                    color: [0.0, 1.0, 0.0]
-                }
+                surface: SURFACE_GREEN
             }),
             Box::new(Sphere {
                 center: (0.0, -4.0, 0.0),
                 r: 3.0,
-                surface: Surface {
-                    color: [1.0, 1.0, 0.0]
-                }
+                surface: SURFACE_YELLOW
             }),
             Box::new(Sphere { // foreground sphere at back at list - proper occlusion required to make this visible
                 center: (-1.5, 2.0, 0.0),
                 r: 0.7,
-                surface: Surface {
-                    color: [1.0, 0.0, 1.0]
-                }
+                surface: SURFACE_PURPLE
             }),
         ]
     }
@@ -79,31 +104,23 @@ pub fn scene_one_sphere() -> Scene {
             Box::new(Sphere {
                 center: (0.0, 0.0, 0.0),
                 r: 1.0,
-                surface: Surface {
-                    color: [1.0, 0.5, 0.0]
-                }
+                surface: SURFACE_ORANGE
             }),
 
             Box::new(Plane {
                 normal: (1.0, 0.0, 0.0),
                 p0: (-3.0, 0.0, 0.0),
-                surface: Surface {
-                    color: [1.0, 0.0, 0.0]
-                }
+                surface: SURFACE_RED
             }),
             Box::new(Plane {
                 normal: (0.0, 1.0, 0.0),
                 p0: (0.0, -3.0, 0.0),
-                surface: Surface {
-                    color: [0.0, 1.0, 0.0]
-                }
+                surface: SURFACE_GREEN
             }),
             Box::new(Plane {
                 normal: (0.0, 0.0, 1.0),
                 p0: (0.0, 0.0, -3.0),
-                surface: Surface {
-                    color: [0.0, 0.0, 1.0]
-                }
+                surface: SURFACE_BLUE
             }),
         ]
     }
@@ -120,30 +137,22 @@ pub fn scene_axis_spheres() -> Scene {
             Box::new(Sphere {
                 center: (0.0, 0.0, 0.0),
                 r: 1.0,
-                surface: Surface {
-                    color: [1.0, 1.0, 1.0]
-                }
+                surface: SURFACE_WHITE
             }),
             Box::new(Sphere {
                 center: (3.0, 0.0, 0.0),
                 r: 0.25,
-                surface: Surface {
-                    color: [1.0, 0.0, 0.0]
-                }
+                surface: SURFACE_RED
             }),
             Box::new(Sphere {
                 center: (0.0, 3.0, 0.0),
                 r: 0.25,
-                surface: Surface {
-                    color: [0.0, 1.0, 0.0]
-                }
+                surface: SURFACE_GREEN
             }),
             Box::new(Sphere {
                 center: (0.0, 0.0, 3.0),
                 r: 0.25,
-                surface: Surface {
-                    color: [0.0, 0.0, 1.0]
-                }
+                surface: SURFACE_BLUE
             }),
         ]
     }
@@ -161,16 +170,12 @@ pub fn scene_ball_on_plane() -> Scene {
             Box::new(Sphere {
                 center: (0.0, -2.0, -1.0),
                 r: 0.66,
-                surface: Surface {
-                    color: [0.0, 0.0, 1.0]
-                }
+                surface: SURFACE_BLUE
             }),
             Box::new(Plane {
                 normal: (0.0, 0.0, 1.0),
                 p0: (0.0, 0.0, -2.0),
-                surface: Surface {
-                    color: [1.0, 1.0, 1.0]
-                }
+                surface: SURFACE_WHITE
             }),
         ]
     }
