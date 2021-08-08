@@ -217,17 +217,34 @@ fn ray_color(ray: &Vector, scene: &Scene) -> Color {
     }
 }
 
+
+fn linear_to_srgb(x: f32) -> f32 {
+    if x < 0.0 {
+        0.0
+    } else if x < 0.0031308	{
+        x * 12.92
+    } else if x < 1.0 {
+        1.055 * x.powf(1.0/2.4) - 0.055
+    } else {
+        1.0
+    }
+}
+
 fn to_png_color(color: &Color) -> [u8; 3] {
     [
-        (color[0] * 256.0) as u8,
-        (color[1] * 256.0) as u8,
-        (color[2] * 256.0) as u8
+        (linear_to_srgb(color[0]) * 256.0) as u8,
+        (linear_to_srgb(color[1]) * 256.0) as u8,
+        (linear_to_srgb(color[2]) * 256.0) as u8
     ]
 }
 
 pub fn render(
     scene: &Scene, imgx: u32, imgy: u32
 ) -> image::ImageBuffer<image::Rgb<u8>, Vec<u8>> {
+
+    for xx in 0..11 {
+        println!(" lin {} => {}", (xx as f32)/10.0, linear_to_srgb((xx as f32)/10.0));
+    }
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
