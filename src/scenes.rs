@@ -2,6 +2,7 @@ use crate::render::{
     Camera,
     Scene,
     Light,
+    Hittable,
     Surface,
     Sphere,
     Plane,
@@ -107,6 +108,35 @@ pub fn scene_sphere_occlusion_test() -> Scene {
                 surface: SURFACE_PURPLE
             }),
         ]
+    }
+}
+
+fn test_surface(light: f32, specular: f32) -> Surface {
+    Surface {
+        color: [1.0, 0.0, 0.0],
+        ambient: AMBIENT,
+        specular: specular,
+        light: light
+    }
+}
+
+
+pub fn scene_sphere_surface_test() -> Scene {
+    Scene {
+        camera: DEFAULT_CAMERA,
+        background: [0.0, 0.0, 0.0],
+        light: Light {
+            location: (5.0, 5.0, 5.0)
+        },
+        objects: (0..25).map(| x | Box::new(Sphere {
+            center: (
+                0.0 + ((x % 5) - 2) as f64,
+                0.0,
+                0.0 + ((x / 5) - 2) as f64,
+            ),
+            r: 0.4,
+            surface: test_surface((x % 5) as f32 / 5.0, (x / 5) as f32 / 5.0)
+        }) as Box<Hittable>).collect::<Vec<_>>()
     }
 }
 

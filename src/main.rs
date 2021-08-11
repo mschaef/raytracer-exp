@@ -8,7 +8,8 @@ mod scenes;
 use render::{render, Scene};
 
 use scenes::{
-    scene_sphere_occlusion_test,
+    //scene_sphere_occlusion_test,
+    scene_sphere_surface_test,
     scene_axis_spheres,
     scene_one_sphere,
     scene_ball_on_plane
@@ -28,7 +29,8 @@ fn main() {
     let mut output_imgbuf = image::ImageBuffer::new(imgdim, imgdim);
 
     let scene = [
-        scene_sphere_occlusion_test(),
+        //scene_sphere_occlusion_test(),
+        scene_sphere_surface_test(),
         scene_axis_spheres(),
         scene_one_sphere(),
         scene_ball_on_plane()

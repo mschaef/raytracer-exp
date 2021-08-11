@@ -242,10 +242,6 @@ pub fn render(
     scene: &Scene, imgx: u32, imgy: u32
 ) -> image::ImageBuffer<image::Rgb<u8>, Vec<u8>> {
 
-    for xx in 0..11 {
-        println!(" lin {} => {}", (xx as f32)/10.0, linear_to_srgb((xx as f32)/10.0));
-    }
-
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
     for (x, y, pixel) in imgbuf.enumerate_pixels_mut() {
