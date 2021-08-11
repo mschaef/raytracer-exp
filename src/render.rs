@@ -49,6 +49,7 @@ pub struct Camera {
 }
 
 pub struct Scene {
+    pub name: &'static str,
     pub camera: Camera,
     pub light: Light,
     pub objects: Vec<Box<dyn Hittable>>,

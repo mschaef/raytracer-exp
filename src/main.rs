@@ -1,5 +1,7 @@
 extern crate image;
 
+use std::time::Instant;
+
 use crate::image::GenericImage;
 
 mod render;
@@ -18,8 +20,13 @@ use scenes::{
 fn render_into(output_imgbuf: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
                scene: &Scene, sx: u32, sy: u32, x: u32, y: u32) {
 
+    let start = Instant::now();
+
     output_imgbuf.copy_from(&render(&scene, sx, sy), x, y)
         .map_err(|err| println!("{:?}", err)).ok();
+
+    let duration = start.elapsed();
+    println!("Time elapsed in {} is: {:?}", scene.name, duration);
 }
 
 fn main() {

@@ -71,6 +71,7 @@ const SURFACE_WHITE: Surface = Surface {
 
 pub fn scene_sphere_occlusion_test() -> Scene {
     Scene {
+        name: "Occlusion Test",
         camera: DEFAULT_CAMERA,
         background: [0.0, 0.0, 0.0],
         light: Light {
@@ -123,6 +124,7 @@ fn test_surface(light: f32, specular: f32) -> Surface {
 
 pub fn scene_sphere_surface_test() -> Scene {
     Scene {
+        name: "Surface Finish Test",
         camera: DEFAULT_CAMERA,
         background: [0.0, 0.0, 0.0],
         light: Light {
@@ -136,12 +138,13 @@ pub fn scene_sphere_surface_test() -> Scene {
             ),
             r: 0.4,
             surface: test_surface((x % 5) as f32 / 5.0, (x / 5) as f32 / 5.0)
-        }) as Box<Hittable>).collect::<Vec<_>>()
+        }) as Box<dyn Hittable>).collect::<Vec<_>>()
     }
 }
 
 pub fn scene_one_sphere() -> Scene {
     Scene {
+        name: "Single Sphere",
         camera: DEFAULT_CAMERA,
         background: [0.0, 0.0, 0.0],
         light: Light {
@@ -175,6 +178,7 @@ pub fn scene_one_sphere() -> Scene {
 
 pub fn scene_axis_spheres() -> Scene {
     Scene {
+        name: "Axis Spheres",
         camera: DEFAULT_CAMERA,
         background: [0.0, 0.0, 0.0],
         light: Light {
@@ -208,6 +212,7 @@ pub fn scene_axis_spheres() -> Scene {
 
 pub fn scene_ball_on_plane() -> Scene {
     Scene {
+        name: "Ball on Plane",
         camera: DEFAULT_CAMERA,
         background: [0.0, 0.0, 0.0],
         light: Light {
