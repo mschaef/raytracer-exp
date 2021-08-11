@@ -15,14 +15,14 @@ use geometry::{
     subp,
 };
 
-pub type Color = [f32; 3];
+pub type Color = [f64; 3];
 
 #[derive(Copy, Clone)]
 pub struct Surface {
     pub color: Color,
-    pub ambient: f32,
-    pub specular: f32,
-    pub light: f32
+    pub ambient: f64,
+    pub specular: f64,
+    pub light: f64
 }
 
 pub struct Sphere {
@@ -72,10 +72,10 @@ fn camera_ray(c: &Camera, xt: f64, yt: f64) -> Vector {
 }
 
 fn ray_location(ray: &Vector, t: f64) -> Point {
-    let (x, y, z) = ray.start;
-    let (dx, dy, dz) = ray.delta;
+    let [x, y, z] = ray.start;
+    let [dx, dy, dz] = ray.delta;
 
-    return (x + dx * t, y + dy * t, z + dz * t);
+    return [x + dx * t, y + dy * t, z + dz * t];
 }
 
 pub struct RayHit {
@@ -175,7 +175,7 @@ fn light_vector(point: &Point, scene: &Scene) -> Option<Vector> {
     }
 }
 
-fn scale_color(color: &Color, s: f32) -> Color {
+fn scale_color(color: &Color, s: f64) -> Color {
     [
         color[0] * s,
         color[1] * s,
@@ -198,10 +198,10 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit) -> Color {
 
     let light: Color = match light_vector(&hit.hit_point, &scene) {
         Some(lv) => {
-            let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0) as f32;
+            let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0) as f64;
 
             addcolor(&scale_color(&[1.0, 1.0, 1.0], kspecular * hit.surface.specular),
-                     &scale_color(&hit.surface.color, hit.surface.light * dotp(hit.normal, negp(lv.delta)) as f32))
+                     &scale_color(&hit.surface.color, hit.surface.light * dotp(hit.normal, negp(lv.delta)) as f64))
 
         },
         None => [0.0, 0.0, 0.0]
@@ -219,7 +219,7 @@ fn ray_color(ray: &Vector, scene: &Scene) -> Color {
 }
 
 
-fn linear_to_srgb(x: f32) -> f32 {
+fn linear_to_srgb(x: f64) -> f64 {
     if x < 0.0 {
         0.0
     } else if x < 0.0031308	{
