@@ -24,49 +24,64 @@ const SURFACE_RED: Surface = Surface {
     color: [1.0, 0.0, 0.0],
     ambient: AMBIENT,
     specular: SPECULAR,
-    light: LIGHT
+    light: LIGHT,
+    checked: false
 };
 
 const SURFACE_GREEN: Surface = Surface {
     color: [0.0, 1.0, 0.0],
     ambient: AMBIENT,
     specular: SPECULAR,
-    light: LIGHT
+    light: LIGHT,
+    checked: false
 };
 
 const SURFACE_BLUE: Surface = Surface {
     color: [0.0, 0.0, 1.0],
     ambient: AMBIENT,
     specular: SPECULAR,
-    light: LIGHT
+    light: LIGHT,
+    checked: false
 };
 
 const SURFACE_ORANGE: Surface = Surface {
     color: [1.0, 0.5, 0.0],
     ambient: AMBIENT,
     specular: SPECULAR,
-    light: LIGHT
+    light: LIGHT,
+    checked: false
 };
 
 const SURFACE_YELLOW: Surface = Surface {
     color: [1.0, 1.0, 0.0],
     ambient: AMBIENT,
     specular: SPECULAR,
-    light: LIGHT
+    light: LIGHT,
+    checked: false
 };
 
 const SURFACE_PURPLE: Surface = Surface {
     color: [1.0, 0.0, 1.0],
     ambient: AMBIENT,
     specular: SPECULAR,
-    light: LIGHT
+    light: LIGHT,
+    checked: false
 };
 
 const SURFACE_WHITE: Surface = Surface {
     color: [1.0, 1.0, 1.0],
     ambient: AMBIENT,
     specular: SPECULAR,
-    light: LIGHT
+    light: LIGHT,
+    checked: false
+};
+
+const SURFACE_WHITE_C: Surface = Surface {
+    color: [1.0, 1.0, 1.0],
+    ambient: AMBIENT,
+    specular: SPECULAR,
+    light: LIGHT,
+    checked: true
 };
 
 pub fn scene_sphere_occlusion_test() -> Scene {
@@ -117,7 +132,8 @@ fn test_surface(light: f64, specular: f64) -> Surface {
         color: [1.0, 0.0, 0.0],
         ambient: AMBIENT,
         specular: specular,
-        light: light
+        light: light,
+        checked: false
     }
 }
 
@@ -160,17 +176,17 @@ pub fn scene_one_sphere() -> Scene {
             Box::new(Plane {
                 normal: [1.0, 0.0, 0.0],
                 p0: [-3.0, 0.0, 0.0],
-                surface: SURFACE_RED
+                surface: SURFACE_WHITE_C
             }),
             Box::new(Plane {
                 normal: [0.0, 1.0, 0.0],
                 p0: [0.0, -3.0, 0.0],
-                surface: SURFACE_GREEN
+                surface: SURFACE_WHITE_C
             }),
             Box::new(Plane {
                 normal: [0.0, 0.0, 1.0],
                 p0: [0.0, 0.0, -3.0],
-                surface: SURFACE_BLUE
+                surface: SURFACE_WHITE_C
             }),
         ]
     }
@@ -227,7 +243,7 @@ pub fn scene_ball_on_plane() -> Scene {
             Box::new(Plane {
                 normal: [0.0, 0.0, 1.0],
                 p0: [0.0, 0.0, -2.0],
-                surface: SURFACE_WHITE
+                surface: SURFACE_WHITE_C
             }),
         ]
     }

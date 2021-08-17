@@ -22,7 +22,8 @@ pub struct Surface {
     pub color: Color,
     pub ambient: f64,
     pub specular: f64,
-    pub light: f64
+    pub light: f64,
+    pub checked: bool
 }
 
 pub struct Sphere {
@@ -194,14 +195,23 @@ fn addcolor(colora: &Color, colorb: &Color) -> Color {
 fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit) -> Color {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
-    let ambient: Color = scale_color(&hit.surface.color, hit.surface.ambient);
+    let checkidx = (((hit.hit_point[0] + EPSILON).floor() +
+                     (hit.hit_point[1] + EPSILON).floor() +
+                     (hit.hit_point[2] + EPSILON).floor()) as i64 % 2).abs();
+
+    let scolor = scale_color(
+        &hit.surface.color,
+        if !hit.surface.checked || (checkidx == 0) { 1.0 } else { 0.5 });
+
+
+    let ambient: Color = scale_color(&scolor, hit.surface.ambient);
 
     let light: Color = match light_vector(&hit.hit_point, &scene) {
         Some(lv) => {
             let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0) as f64;
 
             addcolor(&scale_color(&[1.0, 1.0, 1.0], kspecular * hit.surface.specular),
-                     &scale_color(&hit.surface.color, hit.surface.light * dotp(hit.normal, negp(lv.delta)) as f64))
+                     &scale_color(&scolor, hit.surface.light * dotp(hit.normal, negp(lv.delta)) as f64))
 
         },
         None => [0.0, 0.0, 0.0]
