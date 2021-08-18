@@ -18,6 +18,7 @@ const DEFAULT_CAMERA: Camera = Camera {
 const AMBIENT: f64 = 0.2 as f64;
 const SPECULAR: f64 = 0.5 as f64;
 const LIGHT: f64 = 0.6 as f64;
+const REFLECTION: f64 = 0.5 as f64;
 
 
 const SURFACE_RED: Surface = Surface {
@@ -25,7 +26,8 @@ const SURFACE_RED: Surface = Surface {
     ambient: AMBIENT,
     specular: SPECULAR,
     light: LIGHT,
-    checked: false
+    checked: false,
+    reflection: REFLECTION
 };
 
 const SURFACE_GREEN: Surface = Surface {
@@ -33,7 +35,8 @@ const SURFACE_GREEN: Surface = Surface {
     ambient: AMBIENT,
     specular: SPECULAR,
     light: LIGHT,
-    checked: false
+    checked: false,
+    reflection: REFLECTION
 };
 
 const SURFACE_BLUE: Surface = Surface {
@@ -41,7 +44,8 @@ const SURFACE_BLUE: Surface = Surface {
     ambient: AMBIENT,
     specular: SPECULAR,
     light: LIGHT,
-    checked: false
+    checked: false,
+    reflection: REFLECTION
 };
 
 const SURFACE_ORANGE: Surface = Surface {
@@ -49,7 +53,8 @@ const SURFACE_ORANGE: Surface = Surface {
     ambient: AMBIENT,
     specular: SPECULAR,
     light: LIGHT,
-    checked: false
+    checked: false,
+    reflection: REFLECTION
 };
 
 const SURFACE_YELLOW: Surface = Surface {
@@ -57,7 +62,8 @@ const SURFACE_YELLOW: Surface = Surface {
     ambient: AMBIENT,
     specular: SPECULAR,
     light: LIGHT,
-    checked: false
+    checked: false,
+    reflection: REFLECTION
 };
 
 const SURFACE_PURPLE: Surface = Surface {
@@ -65,7 +71,8 @@ const SURFACE_PURPLE: Surface = Surface {
     ambient: AMBIENT,
     specular: SPECULAR,
     light: LIGHT,
-    checked: false
+    checked: false,
+    reflection: REFLECTION
 };
 
 const SURFACE_WHITE: Surface = Surface {
@@ -73,7 +80,8 @@ const SURFACE_WHITE: Surface = Surface {
     ambient: AMBIENT,
     specular: SPECULAR,
     light: LIGHT,
-    checked: false
+    checked: false,
+    reflection: REFLECTION
 };
 
 const SURFACE_WHITE_C: Surface = Surface {
@@ -81,7 +89,8 @@ const SURFACE_WHITE_C: Surface = Surface {
     ambient: AMBIENT,
     specular: SPECULAR,
     light: LIGHT,
-    checked: true
+    checked: true,
+    reflection: 0.5
 };
 
 pub fn scene_sphere_occlusion_test() -> Scene {
@@ -133,7 +142,8 @@ fn test_surface(light: f64, specular: f64) -> Surface {
         ambient: AMBIENT,
         specular: specular,
         light: light,
-        checked: false
+        checked: false,
+        reflection: 0.0
     }
 }
 

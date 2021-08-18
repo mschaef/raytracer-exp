@@ -15,6 +15,8 @@ use geometry::{
     subp,
 };
 
+const REFLECT_LIMIT: i32 = 2;
+
 pub type Color = [f64; 3];
 
 #[derive(Copy, Clone)]
@@ -23,7 +25,8 @@ pub struct Surface {
     pub ambient: f64,
     pub specular: f64,
     pub light: f64,
-    pub checked: bool
+    pub checked: bool,
+    pub reflection: f64
 }
 
 pub struct Sphere {
@@ -192,7 +195,7 @@ fn addcolor(colora: &Color, colorb: &Color) -> Color {
     ]
 }
 
-fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit) -> Color {
+fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_limit: i32) -> Color {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
     let checkidx = (((hit.hit_point[0] + EPSILON).floor() +
@@ -206,6 +209,23 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit) -> Color {
 
     let ambient: Color = scale_color(&scolor, hit.surface.ambient);
 
+    // r=I−2(N⋅I)N.
+
+    let reflected: Color = if (hit.surface.reflection > EPSILON) && (reflect_limit > 0) {
+        let rvec = subp(negp(ray.delta), scalep(hit.normal, 2.0 * dotp(negp(ray.delta), hit.normal)));
+
+        let rcolor = ray_color(&Vector {
+            start: hit.hit_point,
+            delta: normalizep(rvec)
+        }, &scene, reflect_limit - 1);
+
+        scale_color(&rcolor, hit.surface.reflection)
+    } else {
+        [0.0, 0.0, 0.0]
+    };
+
+
+
     let light: Color = match light_vector(&hit.hit_point, &scene) {
         Some(lv) => {
             let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0) as f64;
@@ -218,12 +238,12 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit) -> Color {
     };
 
 
-    addcolor(&ambient, &light)
+    addcolor(&reflected, &addcolor(&ambient, &light))
 }
 
-fn ray_color(ray: &Vector, scene: &Scene) -> Color {
+fn ray_color(ray: &Vector, scene: &Scene, reflect_limit: i32) -> Color {
     match nearest_hit(&ray, &scene.objects) {
-        Some(hit) => shade_pixel(&ray, &scene, &hit),
+        Some(hit) => shade_pixel(&ray, &scene, &hit, reflect_limit),
         None => scene.background
     }
 }
@@ -257,7 +277,7 @@ pub fn render(
 
     for (x, y, pixel) in imgbuf.enumerate_pixels_mut() {
         let ray = camera_ray(&scene.camera, x as f64 / imgx as f64, y as f64 / imgy as f64);
-        *pixel = image::Rgb(to_png_color(&ray_color(&ray, &scene)));
+        *pixel = image::Rgb(to_png_color(&ray_color(&ray, &scene, REFLECT_LIMIT)));
     }
 
     imgbuf
