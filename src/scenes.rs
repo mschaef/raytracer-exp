@@ -1,5 +1,6 @@
 use crate::render::{
     Camera,
+    Color,
     Scene,
     Light,
     Hittable,
@@ -20,69 +21,33 @@ const SPECULAR: f64 = 0.5 as f64;
 const LIGHT: f64 = 0.6 as f64;
 const REFLECTION: f64 = 0.5 as f64;
 
+const fn surface_glossy(c: Color) -> Surface {
+    Surface {
+        color: c,
+        ambient: 0.2,
+        specular: 0.5,
+        light: LIGHT,
+        checked: false,
+        reflection: 0.0
+    }
+}
 
-const SURFACE_RED: Surface = Surface {
-    color: [1.0, 0.0, 0.0],
-    ambient: AMBIENT,
-    specular: SPECULAR,
-    light: LIGHT,
-    checked: false,
-    reflection: REFLECTION
-};
+const fn reflective(s: Surface) -> Surface {
+    Surface {
+        reflection: 0.2,
+        .. s
+    }
+}
 
-const SURFACE_GREEN: Surface = Surface {
-    color: [0.0, 1.0, 0.0],
-    ambient: AMBIENT,
-    specular: SPECULAR,
-    light: LIGHT,
-    checked: false,
-    reflection: REFLECTION
-};
+const SURFACE_RED: Surface = surface_glossy([1.0, 0.0, 0.0]);
+const SURFACE_GREEN: Surface = surface_glossy([0.0, 1.0, 0.0]);
+const SURFACE_BLUE: Surface = surface_glossy([0.0, 0.0, 1.0]);
+const SURFACE_PURPLE: Surface = surface_glossy([1.0, 0.0, 1.0]);
+const SURFACE_ORANGE: Surface = surface_glossy([1.0, 0.5, 0.0]);
+const SURFACE_YELLOW: Surface = surface_glossy([1.0, 1.0, 0.0]);
+const SURFACE_WHITE: Surface = surface_glossy([1.0, 1.0, 1.0]);
 
-const SURFACE_BLUE: Surface = Surface {
-    color: [0.0, 0.0, 1.0],
-    ambient: AMBIENT,
-    specular: SPECULAR,
-    light: LIGHT,
-    checked: false,
-    reflection: REFLECTION
-};
-
-const SURFACE_ORANGE: Surface = Surface {
-    color: [1.0, 0.5, 0.0],
-    ambient: AMBIENT,
-    specular: SPECULAR,
-    light: LIGHT,
-    checked: false,
-    reflection: REFLECTION
-};
-
-const SURFACE_YELLOW: Surface = Surface {
-    color: [1.0, 1.0, 0.0],
-    ambient: AMBIENT,
-    specular: SPECULAR,
-    light: LIGHT,
-    checked: false,
-    reflection: REFLECTION
-};
-
-const SURFACE_PURPLE: Surface = Surface {
-    color: [1.0, 0.0, 1.0],
-    ambient: AMBIENT,
-    specular: SPECULAR,
-    light: LIGHT,
-    checked: false,
-    reflection: REFLECTION
-};
-
-const SURFACE_WHITE: Surface = Surface {
-    color: [1.0, 1.0, 1.0],
-    ambient: AMBIENT,
-    specular: SPECULAR,
-    light: LIGHT,
-    checked: false,
-    reflection: REFLECTION
-};
+const SURFACE_BLACK: Surface = surface_glossy([0.0, 0.0, 0.0]);
 
 const SURFACE_WHITE_C: Surface = Surface {
     color: [0.2, 0.2, 0.2],
@@ -185,17 +150,17 @@ pub fn scene_one_sphere() -> Scene {
 
             Box::new(Plane {
                 normal: [1.0, 0.0, 0.0],
-                p0: [-3.0, 0.0, 0.0],
+                p0: [-2.0, 0.0, 0.0],
                 surface: SURFACE_WHITE_C
             }),
             Box::new(Plane {
                 normal: [0.0, 1.0, 0.0],
-                p0: [0.0, -3.0, 0.0],
+                p0: [0.0, -2.0, 0.0],
                 surface: SURFACE_WHITE_C
             }),
             Box::new(Plane {
                 normal: [0.0, 0.0, 1.0],
-                p0: [0.0, 0.0, -3.0],
+                p0: [0.0, 0.0, -2.0],
                 surface: SURFACE_WHITE_C
             }),
         ]

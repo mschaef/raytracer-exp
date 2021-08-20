@@ -210,8 +210,6 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_limit: i32) ->
 
     let ambient: Color = scale_color(&scolor, hit.surface.ambient);
 
-    // r=I−2(N⋅I)N.
-
     let reflected: Color = if (hit.surface.reflection > EPSILON) && (reflect_limit > 0) {
         let rvec = subp(negp(ray.delta), scalep(hit.normal, 2.0 * dotp(negp(ray.delta), hit.normal)));
 
