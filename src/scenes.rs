@@ -85,7 +85,7 @@ const SURFACE_WHITE: Surface = Surface {
 };
 
 const SURFACE_WHITE_C: Surface = Surface {
-    color: [1.0, 1.0, 1.0],
+    color: [0.2, 0.2, 0.2],
     ambient: AMBIENT,
     specular: SPECULAR,
     light: LIGHT,

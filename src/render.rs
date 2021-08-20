@@ -198,14 +198,15 @@ fn addcolor(colora: &Color, colorb: &Color) -> Color {
 fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_limit: i32) -> Color {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
-    let checkidx = (((hit.hit_point[0] + EPSILON).floor() +
-                     (hit.hit_point[1] + EPSILON).floor() +
-                     (hit.hit_point[2] + EPSILON).floor()) as i64 % 2).abs();
+    let scolor = if hit.surface.checked {
+        let checkidx = (((hit.hit_point[0] + EPSILON).floor() +
+                         (hit.hit_point[1] + EPSILON).floor() +
+                         (hit.hit_point[2] + EPSILON).floor()) as i64 % 2).abs();
 
-    let scolor = scale_color(
-        &hit.surface.color,
-        if !hit.surface.checked || (checkidx == 0) { 1.0 } else { 0.5 });
-
+        scale_color(&hit.surface.color, if checkidx == 0 { 1.0 } else { 0.5 })
+    } else {
+        hit.surface.color
+    };
 
     let ambient: Color = scale_color(&scolor, hit.surface.ambient);
 
@@ -223,7 +224,6 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_limit: i32) ->
     } else {
         [0.0, 0.0, 0.0]
     };
-
 
 
     let light: Color = match light_vector(&hit.hit_point, &scene) {
