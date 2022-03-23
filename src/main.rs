@@ -1,5 +1,6 @@
 extern crate image;
 
+use std::env;
 use std::time::Instant;
 
 use crate::image::GenericImage;
@@ -27,13 +28,21 @@ fn render_into(parallel: bool,
         .map_err(|err| println!("{:?}", err)).ok();
 
     let duration = start.elapsed();
-    println!("Time elapsed in {} is: {:?}", scene.name, duration);
+    println!("Time elapsed in {} is: {:?} (parallel: {})", scene.name, duration, parallel);
+}
+
+fn is_parallel() -> bool {
+    match env::var("PARALLEL") {
+        Ok(val) => val.to_lowercase() == "y",
+        Err(_) => true
+    }
 }
 
 fn main() {
     let imgdim = 2048;
     let half = imgdim / 2;
-    let parallel = true;
+    let parallel = is_parallel();
+
 
     let mut output_imgbuf = image::ImageBuffer::new(imgdim, imgdim);
 
