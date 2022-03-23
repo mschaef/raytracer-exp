@@ -16,11 +16,19 @@ const DEFAULT_CAMERA: Camera = Camera {
     v: [0.0, 0.0, -10.0]
 };
 
+#[allow(dead_code)]
 const AMBIENT: f64 = 0.2 as f64;
+
+#[allow(dead_code)]
 const SPECULAR: f64 = 0.5 as f64;
+
+#[allow(dead_code)]
 const LIGHT: f64 = 0.6 as f64;
+
+#[allow(dead_code)]
 const REFLECTION: f64 = 0.5 as f64;
 
+#[allow(dead_code)]
 const fn surface_glossy(c: Color) -> Surface {
     Surface {
         color: c,
@@ -32,6 +40,7 @@ const fn surface_glossy(c: Color) -> Surface {
     }
 }
 
+#[allow(dead_code)]
 const fn reflective(s: Surface) -> Surface {
     Surface {
         reflection: 0.2,
@@ -39,16 +48,31 @@ const fn reflective(s: Surface) -> Surface {
     }
 }
 
+#[allow(dead_code)]
 const SURFACE_RED: Surface = surface_glossy([1.0, 0.0, 0.0]);
+
+#[allow(dead_code)]
 const SURFACE_GREEN: Surface = surface_glossy([0.0, 1.0, 0.0]);
+
+#[allow(dead_code)]
 const SURFACE_BLUE: Surface = surface_glossy([0.0, 0.0, 1.0]);
+
+#[allow(dead_code)]
 const SURFACE_PURPLE: Surface = surface_glossy([1.0, 0.0, 1.0]);
+
+#[allow(dead_code)]
 const SURFACE_ORANGE: Surface = surface_glossy([1.0, 0.5, 0.0]);
+
+#[allow(dead_code)]
 const SURFACE_YELLOW: Surface = surface_glossy([1.0, 1.0, 0.0]);
+
+#[allow(dead_code)]
 const SURFACE_WHITE: Surface = surface_glossy([1.0, 1.0, 1.0]);
 
+#[allow(dead_code)]
 const SURFACE_BLACK: Surface = surface_glossy([0.0, 0.0, 0.0]);
 
+#[allow(dead_code)]
 const SURFACE_WHITE_C: Surface = Surface {
     color: [0.2, 0.2, 0.2],
     ambient: AMBIENT,
@@ -58,6 +82,7 @@ const SURFACE_WHITE_C: Surface = Surface {
     reflection: 0.5
 };
 
+#[allow(dead_code)]
 pub fn scene_sphere_occlusion_test() -> Scene {
     Scene {
         name: "Occlusion Test",
@@ -101,6 +126,7 @@ pub fn scene_sphere_occlusion_test() -> Scene {
     }
 }
 
+#[allow(dead_code)]
 fn test_surface(light: f64, specular: f64) -> Surface {
     Surface {
         color: [1.0, 0.0, 0.0],
@@ -113,6 +139,7 @@ fn test_surface(light: f64, specular: f64) -> Surface {
 }
 
 
+#[allow(dead_code)]
 pub fn scene_sphere_surface_test() -> Scene {
     Scene {
         name: "Surface Finish Test",
@@ -133,6 +160,7 @@ pub fn scene_sphere_surface_test() -> Scene {
     }
 }
 
+#[allow(dead_code)]
 pub fn scene_one_sphere() -> Scene {
     Scene {
         name: "Single Sphere",
@@ -167,6 +195,7 @@ pub fn scene_one_sphere() -> Scene {
     }
 }
 
+#[allow(dead_code)]
 pub fn scene_axis_spheres() -> Scene {
     Scene {
         name: "Axis Spheres",
@@ -201,6 +230,7 @@ pub fn scene_axis_spheres() -> Scene {
 }
 
 
+#[allow(dead_code)]
 pub fn scene_ball_on_plane() -> Scene {
     Scene {
         name: "Ball on Plane",
