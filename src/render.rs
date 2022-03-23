@@ -2,6 +2,8 @@ extern crate image;
 
 mod geometry;
 
+use rayon::prelude::*;
+
 use geometry::{
     EPSILON,
     Point,
@@ -56,7 +58,7 @@ pub struct Scene {
     pub name: &'static str,
     pub camera: Camera,
     pub light: Light,
-    pub objects: Vec<Box<dyn Hittable>>,
+    pub objects: Vec<Box<dyn Hittable + Sync + Send>>,
     pub background: Color,
 }
 
@@ -144,7 +146,7 @@ impl Hittable for Plane {
     }
 }
 
-fn nearest_hit(ray: &Vector, objects: &Vec<Box<dyn Hittable>>) -> Option<RayHit> {
+fn nearest_hit(ray: &Vector, objects: &Vec<Box<dyn Hittable + Send + Sync>>) -> Option<RayHit> {
     let mut hits = objects.iter().map(| obj | obj.hit_test(&ray))
         .filter_map(| ray_hit | ray_hit )
         .collect::<Vec<RayHit>>();
@@ -282,9 +284,9 @@ pub fn render(
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
-    for (_, row) in imgbuf.enumerate_rows_mut() {
-        render_into_line(scene, imgx, imgy, row)
-    }
+    imgbuf.enumerate_rows_mut()
+        .par_bridge()
+        .for_each(| (_, row ) | render_into_line(scene, imgx, imgy, row));
 
     imgbuf
 }

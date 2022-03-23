@@ -129,7 +129,7 @@ pub fn scene_sphere_surface_test() -> Scene {
             ],
             r: 0.4,
             surface: test_surface((x % 5) as f64 / 5.0, (x / 5) as f64 / 5.0)
-        }) as Box<dyn Hittable>).collect::<Vec<_>>()
+        }) as Box<dyn Hittable + Send + Sync>).collect::<Vec<_>>()
     }
 }
 
