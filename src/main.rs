@@ -17,12 +17,13 @@ use scenes::{
     scene_ball_on_plane
 };
 
-fn render_into(output_imgbuf: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+fn render_into(parallel: bool,
+               output_imgbuf: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
                scene: &Scene, sx: u32, sy: u32, x: u32, y: u32) {
 
     let start = Instant::now();
 
-    output_imgbuf.copy_from(&render(&scene, sx, sy), x, y)
+    output_imgbuf.copy_from(&render(&scene, sx, sy, parallel), x, y)
         .map_err(|err| println!("{:?}", err)).ok();
 
     let duration = start.elapsed();
@@ -30,8 +31,9 @@ fn render_into(output_imgbuf: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
 }
 
 fn main() {
-    let imgdim = 1024;
+    let imgdim = 2048;
     let half = imgdim / 2;
+    let parallel = true;
 
     let mut output_imgbuf = image::ImageBuffer::new(imgdim, imgdim);
 
@@ -43,10 +45,10 @@ fn main() {
         scene_ball_on_plane()
     ];
 
-    render_into(&mut output_imgbuf, &scene[0], half, half, 0, 0);
-    render_into(&mut output_imgbuf, &scene[1], half, half, half, 0);
-    render_into(&mut output_imgbuf, &scene[2], half, half, 0, half);
-    render_into(&mut output_imgbuf, &scene[3], half, half, half, half);
+    render_into(parallel, &mut output_imgbuf, &scene[0], half, half, 0, 0);
+    render_into(parallel, &mut output_imgbuf, &scene[1], half, half, half, 0);
+    render_into(parallel, &mut output_imgbuf, &scene[2], half, half, 0, half);
+    render_into(parallel, &mut output_imgbuf, &scene[3], half, half, half, half);
 
     for ii in 0..imgdim - 1 {
         *output_imgbuf.get_pixel_mut(ii, imgdim / 2) = image::Rgb([255, 255, 255]);

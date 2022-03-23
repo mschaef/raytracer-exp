@@ -279,14 +279,21 @@ pub fn render_into_line(
 }
 
 pub fn render(
-    scene: &Scene, imgx: u32, imgy: u32
+    scene: &Scene, imgx: u32, imgy: u32, parallel: bool
 ) -> image::ImageBuffer<image::Rgb<u8>, Vec<u8>> {
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
-    imgbuf.enumerate_rows_mut()
-        .par_bridge()
-        .for_each(| (_, row ) | render_into_line(scene, imgx, imgy, row));
+    if parallel {
+        imgbuf.enumerate_rows_mut()
+            .par_bridge()
+            .for_each(| (_, row ) | render_into_line(scene, imgx, imgy, row));
+    } else {
+        for (_, row) in imgbuf.enumerate_rows_mut() {
+            render_into_line(scene, imgx, imgy, row)
+        }
+    }
 
     imgbuf
 }
+
