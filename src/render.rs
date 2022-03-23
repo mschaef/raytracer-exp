@@ -267,15 +267,23 @@ fn to_png_color(color: &Color) -> [u8; 3] {
     ]
 }
 
+pub fn render_into_line(
+    scene: &Scene, imgx: u32, imgy: u32, row: image::buffer::EnumeratePixelsMut<image::Rgb<u8>>
+) {
+    for (_, (x, y, pixel)) in row.enumerate() {
+        let ray = camera_ray(&scene.camera, x as f64 / imgx as f64, y as f64 / imgy as f64);
+        *pixel = image::Rgb(to_png_color(&ray_color(&ray, &scene, REFLECT_LIMIT)));
+    }
+}
+
 pub fn render(
     scene: &Scene, imgx: u32, imgy: u32
 ) -> image::ImageBuffer<image::Rgb<u8>, Vec<u8>> {
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
-    for (x, y, pixel) in imgbuf.enumerate_pixels_mut() {
-        let ray = camera_ray(&scene.camera, x as f64 / imgx as f64, y as f64 / imgy as f64);
-        *pixel = image::Rgb(to_png_color(&ray_color(&ray, &scene, REFLECT_LIMIT)));
+    for (_, row) in imgbuf.enumerate_rows_mut() {
+        render_into_line(scene, imgx, imgy, row)
     }
 
     imgbuf
