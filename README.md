@@ -59,3 +59,10 @@ A couple suggestions on where this could be taken:
 * Support for multiple lights in a scene.
 * A text-based definition language for scenes.
 * Refractive, transparent objects.
+
+# Licensing and Copyright
+
+Copyright (c) Michael Schaeffer
+
+Licened under the Eclipse Public Licence v2.0, found at the root of
+this repository in the [`LICENSE`](LICENSE) file.
