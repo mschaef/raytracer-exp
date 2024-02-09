@@ -18,19 +18,24 @@ use crate::image::GenericImage;
 mod render;
 mod scenes;
 
-use render::{render, Scene};
+use render::{render, Scene, Surface};
 
 use scenes::{
-    //scene_sphere_occlusion_test,
-    scene_sphere_surface_test,
-    scene_axis_spheres,
-    scene_one_sphere,
-    scene_ball_on_plane
+    SURFACE_BLACK,
+    SURFACE_BLUE,
+    SURFACE_GREEN,
+    SURFACE_ORANGE,
+    SURFACE_PURPLE,
+    SURFACE_RED,
+    SURFACE_WHITE,
+    SURFACE_YELLOW,
+    scene_one_sphere
 };
 
-fn render_into(parallel: bool,
-               output_imgbuf: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+fn render_into(output_imgbuf: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
                scene: &Scene, sx: u32, sy: u32, x: u32, y: u32) {
+
+    let parallel = is_parallel();
 
     let start = Instant::now();
 
@@ -48,31 +53,19 @@ fn is_parallel() -> bool {
     }
 }
 
-fn main() {
-    let imgdim = 2048;
-    let half = imgdim / 2;
-    let parallel = is_parallel();
-
-
+fn render_sphere(sphere_surface: Surface, imgdim: u32, filename: &str) {
     let mut output_imgbuf = image::ImageBuffer::new(imgdim, imgdim);
+    render_into(&mut output_imgbuf, &scene_one_sphere(sphere_surface), 128, 128, 0, 0);
+    output_imgbuf.save(filename).unwrap();
+}
 
-    let scene = [
-        //scene_sphere_occlusion_test(),
-        scene_sphere_surface_test(),
-        scene_axis_spheres(),
-        scene_one_sphere(),
-        scene_ball_on_plane()
-    ];
-
-    render_into(parallel, &mut output_imgbuf, &scene[0], half, half, 0, 0);
-    render_into(parallel, &mut output_imgbuf, &scene[1], half, half, half, 0);
-    render_into(parallel, &mut output_imgbuf, &scene[2], half, half, 0, half);
-    render_into(parallel, &mut output_imgbuf, &scene[3], half, half, half, half);
-
-    for ii in 0..imgdim - 1 {
-        *output_imgbuf.get_pixel_mut(ii, imgdim / 2) = image::Rgb([255, 255, 255]);
-        *output_imgbuf.get_pixel_mut(imgdim / 2, ii) = image::Rgb([255, 255, 255]);
-    }
-
-    output_imgbuf.save("render.png").unwrap();
+fn main() {
+    render_sphere(SURFACE_BLACK , 128, "sphere-black.png");
+    render_sphere(SURFACE_BLUE  , 128, "sphere-blue.png");
+    render_sphere(SURFACE_GREEN , 128, "sphere-green.png");
+    render_sphere(SURFACE_ORANGE, 128, "sphere-orange.png");
+    render_sphere(SURFACE_PURPLE, 128, "sphere-purple.png");
+    render_sphere(SURFACE_RED   , 128, "sphere-red.png");
+    render_sphere(SURFACE_WHITE , 128, "sphere-white.png");
+    render_sphere(SURFACE_YELLOW, 128, "sphere-yellow.png");
 }
