@@ -279,12 +279,24 @@ fn to_png_color(color: &Color) -> [u8; 3] {
     ]
 }
 
+
 pub fn render_into_line(
     scene: &Scene, imgx: u32, imgy: u32, row: image::buffer::EnumeratePixelsMut<image::Rgb<u8>>
 ) {
+    let dx = 1.0 / imgx as f64;
+    let dy = 1.0 / imgy as f64;
+
     for (_, (x, y, pixel)) in row.enumerate() {
-        let ray = camera_ray(&scene.camera, x as f64 / imgx as f64, y as f64 / imgy as f64);
-        *pixel = image::Rgb(to_png_color(&ray_color(&ray, &scene, REFLECT_LIMIT)));
+        let rcs = [
+            ray_color(&camera_ray(&scene.camera, x as f64 * dx - dx / 4.0, y as f64 * dy - dy / 4.0), &scene, REFLECT_LIMIT),
+            ray_color(&camera_ray(&scene.camera, x as f64 * dx + dx / 4.0, y as f64 * dy - dy / 4.0), &scene, REFLECT_LIMIT),
+            ray_color(&camera_ray(&scene.camera, x as f64 * dx - dx / 4.0, y as f64 * dy + dy / 4.0), &scene, REFLECT_LIMIT),
+            ray_color(&camera_ray(&scene.camera, x as f64 * dx + dx / 4.0, y as f64 * dy + dy / 4.0), &scene, REFLECT_LIMIT),
+        ];
+
+        let rc = scale_color(&addcolor(&rcs[0], &addcolor(&rcs[1], &addcolor(&rcs[2], &rcs[3]))), 0.25);
+
+        *pixel = image::Rgb(to_png_color(&rc));
     }
 }
 
