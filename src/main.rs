@@ -32,6 +32,14 @@ use scenes::{
     scene_one_sphere
 };
 
+
+fn is_parallel() -> bool {
+    match env::var("PARALLEL") {
+        Ok(val) => val.to_lowercase() == "y",
+        Err(_) => true
+    }
+}
+
 fn render_into(output_imgbuf: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
                scene: &Scene, sx: u32, sy: u32, x: u32, y: u32) {
 
@@ -44,13 +52,6 @@ fn render_into(output_imgbuf: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
 
     let duration = start.elapsed();
     println!("Time elapsed in {} is: {:?} (parallel: {})", scene.name, duration, parallel);
-}
-
-fn is_parallel() -> bool {
-    match env::var("PARALLEL") {
-        Ok(val) => val.to_lowercase() == "y",
-        Err(_) => true
-    }
 }
 
 fn render_sphere(sphere_surface: Surface, imgdim: u32, filename: &str) {
