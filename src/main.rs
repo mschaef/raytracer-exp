@@ -28,9 +28,17 @@ use scenes::{
     scene_ball_on_plane
 };
 
-fn render_into(parallel: bool,
-               output_imgbuf: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
+fn is_parallel() -> bool {
+    match env::var("PARALLEL") {
+        Ok(val) => val.to_lowercase() == "y",
+        Err(_) => true
+    }
+}
+
+fn render_into(output_imgbuf: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
                scene: &Scene, sx: u32, sy: u32, x: u32, y: u32) {
+
+    let parallel = is_parallel();
 
     let start = Instant::now();
 
@@ -41,18 +49,9 @@ fn render_into(parallel: bool,
     println!("Time elapsed in {} is: {:?} (parallel: {})", scene.name, duration, parallel);
 }
 
-fn is_parallel() -> bool {
-    match env::var("PARALLEL") {
-        Ok(val) => val.to_lowercase() == "y",
-        Err(_) => true
-    }
-}
-
 fn main() {
     let imgdim = 2048;
     let half = imgdim / 2;
-    let parallel = is_parallel();
-
 
     let mut output_imgbuf = image::ImageBuffer::new(imgdim, imgdim);
 
@@ -64,10 +63,10 @@ fn main() {
         scene_ball_on_plane()
     ];
 
-    render_into(parallel, &mut output_imgbuf, &scene[0], half, half, 0, 0);
-    render_into(parallel, &mut output_imgbuf, &scene[1], half, half, half, 0);
-    render_into(parallel, &mut output_imgbuf, &scene[2], half, half, 0, half);
-    render_into(parallel, &mut output_imgbuf, &scene[3], half, half, half, half);
+    render_into(&mut output_imgbuf, &scene[0], half, half, 0, 0);
+    render_into(&mut output_imgbuf, &scene[1], half, half, half, 0);
+    render_into(&mut output_imgbuf, &scene[2], half, half, 0, half);
+    render_into(&mut output_imgbuf, &scene[3], half, half, half, half);
 
     for ii in 0..imgdim - 1 {
         *output_imgbuf.get_pixel_mut(ii, imgdim / 2) = image::Rgb([255, 255, 255]);
