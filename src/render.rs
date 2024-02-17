@@ -27,8 +27,6 @@ use geometry::{
     subp,
 };
 
-const REFLECT_LIMIT: i32 = 2;
-
 pub type Color = [f64; 3];
 
 #[derive(Copy, Clone)]
@@ -70,6 +68,7 @@ pub struct Scene {
     pub light: Light,
     pub objects: Vec<Box<dyn Hittable + Sync + Send>>,
     pub background: Color,
+    pub reflect_limit: u32,
 }
 
 
@@ -207,7 +206,7 @@ fn addcolor(colora: &Color, colorb: &Color) -> Color {
     ]
 }
 
-fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_limit: i32) -> Color {
+fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) -> Color {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
     let scolor = if hit.surface.checked {
@@ -222,13 +221,13 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_limit: i32) ->
 
     let ambient: Color = scale_color(&scolor, hit.surface.ambient);
 
-    let reflected: Color = if (hit.surface.reflection > EPSILON) && (reflect_limit > 0) {
+    let reflected: Color = if (hit.surface.reflection > EPSILON) && (reflect_count >= scene.reflect_limit) {
         let rvec = subp(negp(ray.delta), scalep(hit.normal, 2.0 * dotp(negp(ray.delta), hit.normal)));
 
         let rcolor = ray_color(&Vector {
             start: hit.hit_point,
             delta: normalizep(rvec)
-        }, &scene, reflect_limit - 1);
+        }, &scene, reflect_count + 1);
 
         scale_color(&rcolor, hit.surface.reflection)
     } else {
@@ -247,13 +246,12 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_limit: i32) ->
         None => [0.0, 0.0, 0.0]
     };
 
-
     addcolor(&reflected, &addcolor(&ambient, &light))
 }
 
-fn ray_color(ray: &Vector, scene: &Scene, reflect_limit: i32) -> Color {
+fn ray_color(ray: &Vector, scene: &Scene, reflect_count: u32) -> Color {
     match nearest_hit(&ray, &scene.objects) {
-        Some(hit) => shade_pixel(&ray, &scene, &hit, reflect_limit),
+        Some(hit) => shade_pixel(&ray, &scene, &hit, reflect_count),
         None => scene.background
     }
 }
@@ -288,10 +286,10 @@ pub fn render_into_line(
 
     for (_, (x, y, pixel)) in row.enumerate() {
         let rcs = [
-            ray_color(&camera_ray(&scene.camera, x as f64 * dx - dx / 4.0, y as f64 * dy - dy / 4.0), &scene, REFLECT_LIMIT),
-            ray_color(&camera_ray(&scene.camera, x as f64 * dx + dx / 4.0, y as f64 * dy - dy / 4.0), &scene, REFLECT_LIMIT),
-            ray_color(&camera_ray(&scene.camera, x as f64 * dx - dx / 4.0, y as f64 * dy + dy / 4.0), &scene, REFLECT_LIMIT),
-            ray_color(&camera_ray(&scene.camera, x as f64 * dx + dx / 4.0, y as f64 * dy + dy / 4.0), &scene, REFLECT_LIMIT),
+            ray_color(&camera_ray(&scene.camera, x as f64 * dx - dx / 4.0, y as f64 * dy - dy / 4.0), &scene, 0),
+            ray_color(&camera_ray(&scene.camera, x as f64 * dx + dx / 4.0, y as f64 * dy - dy / 4.0), &scene, 0),
+            ray_color(&camera_ray(&scene.camera, x as f64 * dx - dx / 4.0, y as f64 * dy + dy / 4.0), &scene, 0),
+            ray_color(&camera_ray(&scene.camera, x as f64 * dx + dx / 4.0, y as f64 * dy + dy / 4.0), &scene, 0),
         ];
 
         let rc = scale_color(&addcolor(&rcs[0], &addcolor(&rcs[1], &addcolor(&rcs[2], &rcs[3]))), 0.25);
