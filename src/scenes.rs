@@ -15,6 +15,9 @@ use crate::render::{
     Light,
     Hittable,
     Surface,
+};
+
+use crate::render::shapes::{
     Sphere,
     Plane,
 };
