@@ -84,17 +84,17 @@ fn camera_ray(c: &Camera, xt: f64, yt: f64) -> Vector {
 
     let ray_point_at = addp(addp(c.point_at, scalep(c.u, xt - 0.5)), scalep(c.v, yt - 0.5));
 
-    return Vector {
+    Vector {
         start: c.location,
         delta: normalizep(subp(ray_point_at, c.location))
-    };
+    }
 }
 
 fn ray_location(ray: &Vector, t: f64) -> Point {
     let [x, y, z] = ray.start;
     let [dx, dy, dz] = ray.delta;
 
-    return [x + dx * t, y + dy * t, z + dz * t];
+    [x + dx * t, y + dy * t, z + dz * t]
 }
 
 pub struct RayHit {
@@ -106,13 +106,13 @@ pub struct RayHit {
 
 
 fn nearest_hit(ray: &Vector, objects: &Vec<Box<dyn Hittable + Send + Sync>>) -> Option<RayHit> {
-    let mut hits = objects.iter().map(| obj | obj.hit_test(&ray))
+    let mut hits = objects.iter().map(| obj | obj.hit_test(ray))
         .filter_map(| ray_hit | ray_hit )
         .collect::<Vec<RayHit>>();
 
     hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
 
-    if hits.len() > 0 {
+    if !hits.is_empty() {
         Some(hits.remove(0))
     } else {
         None
@@ -161,14 +161,14 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) ->
         let rcolor = ray_color(&Vector {
             start: hit.hit_point,
             delta: normalizep(rvec)
-        }, &scene, reflect_count + 1);
+        }, scene, reflect_count + 1);
 
         scale_linear_color(&rcolor, hit.surface.reflection)
     } else {
         [0.0, 0.0, 0.0]
     };
 
-    let light: LinearColor = match light_vector(&hit.hit_point, &scene) {
+    let light: LinearColor = match light_vector(&hit.hit_point, scene) {
         Some(lv) => {
             let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0) as f64;
 
@@ -183,8 +183,8 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) ->
 }
 
 fn ray_color(ray: &Vector, scene: &Scene, reflect_count: u32) -> LinearColor {
-    match nearest_hit(&ray, &scene.objects) {
-        Some(hit) => shade_pixel(&ray, &scene, &hit, reflect_count),
+    match nearest_hit(ray, &scene.objects) {
+        Some(hit) => shade_pixel(ray, scene, &hit, reflect_count),
         None => scene.background
     }
 }
@@ -208,7 +208,7 @@ fn pixel_color(
             let xt = xc + subdx * (1 + 2 * iix) as f64;
             let yt = yc + subdy * (1 + 2 * iiy) as f64;
 
-            let rc = ray_color(&camera_ray(&camera.camera, xt, yt), &scene, 0);
+            let rc = ray_color(&camera_ray(&camera.camera, xt, yt), scene, 0);
 
             pc = add_linear_color(&pc, &rc)
         }
@@ -222,8 +222,8 @@ fn render_into_line(
     scene: &Scene,
     row: image::buffer::EnumeratePixelsMut<image::Rgb<u8>>
 ) {
-    for (_, (x, y, pixel)) in row.enumerate() {
-        let pc = pixel_color(&camera, &scene, x, y);
+    for (x, y, pixel) in row {
+        let pc = pixel_color(camera, scene, x, y);
         *pixel = image::Rgb(to_png_color(&pc))
     }
 }

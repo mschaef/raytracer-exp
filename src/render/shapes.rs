@@ -50,11 +50,11 @@ impl Hittable for Sphere {
             None
         } else {
             let t = (-b - discriminant.sqrt()) / (2.0*a);
-            let hit_point = ray_location(&ray, t);
+            let hit_point = ray_location(ray, t);
 
             Some(RayHit {
                 distance: t,
-                hit_point: hit_point,
+                hit_point,
                 normal: normalizep(subp(hit_point, self.center)),
                 surface: self.surface
             })
@@ -75,11 +75,11 @@ impl Hittable for Plane {
             if t <= EPSILON {
                 None
             } else {
-                let hit_point = ray_location(&ray, t);
+                let hit_point = ray_location(ray, t);
 
                 Some(RayHit {
                     distance: t,
-                    hit_point: hit_point,
+                    hit_point,
                     normal: self.normal,
                     surface: self.surface
                 })

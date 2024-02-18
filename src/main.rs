@@ -42,7 +42,7 @@ fn render_into(output_imgbuf: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
 
     let start = Instant::now();
 
-    output_imgbuf.copy_from(&render(&scene, sx, sy, parallel), x, y)
+    output_imgbuf.copy_from(&render(scene, sx, sy, parallel), x, y)
         .map_err(|err| println!("{:?}", err)).ok();
 
     let duration = start.elapsed();

@@ -36,16 +36,16 @@ const DEFAULT_CAMERA: Camera = Camera {
 };
 
 #[allow(dead_code)]
-const AMBIENT: f64 = 0.2 as f64;
+const AMBIENT: f64 = 0.2_f64;
 
 #[allow(dead_code)]
-const SPECULAR: f64 = 0.5 as f64;
+const SPECULAR: f64 = 0.5_f64;
 
 #[allow(dead_code)]
-const LIGHT: f64 = 0.6 as f64;
+const LIGHT: f64 = 0.6_f64;
 
 #[allow(dead_code)]
-const REFLECTION: f64 = 0.5 as f64;
+const REFLECTION: f64 = 0.5_f64;
 
 #[allow(dead_code)]
 const fn surface_glossy(c: LinearColor) -> Surface {
@@ -152,8 +152,8 @@ fn test_surface(light: f64, specular: f64) -> Surface {
     Surface {
         color: [1.0, 0.0, 0.0],
         ambient: AMBIENT,
-        specular: specular,
-        light: light,
+        specular,
+        light,
         checked: false,
         reflection: 0.0
     }

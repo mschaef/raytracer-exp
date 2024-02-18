@@ -38,32 +38,32 @@ pub fn normalizep(pt: Point) -> Point {
 pub fn scalep(pt: Point, t: f64) -> Point {
     let [x, y, z] = pt;
 
-    return [x * t, y * t, z * t];
+    [x * t, y * t, z * t]
 }
 
 pub fn addp(pt0: Point, pt1: Point) -> Point {
     let [x0, y0, z0] = pt0;
     let [x1, y1, z1] = pt1;
 
-    return [x0 + x1, y0 + y1, z0 + z1];
+    [x0 + x1, y0 + y1, z0 + z1]
 }
 
 pub fn subp(pt0: Point, pt1: Point) -> Point {
     let [x0, y0, z0] = pt0;
     let [x1, y1, z1] = pt1;
 
-    return [x0 - x1, y0 - y1, z0 - z1];
+    [x0 - x1, y0 - y1, z0 - z1]
 }
 
 pub fn dotp(pt0: Point, pt1: Point) -> f64 {
     let [x0, y0, z0] = pt0;
     let [x1, y1, z1] = pt1;
 
-    return x0 * x1 + y0 * y1 + z0 * z1;
+    x0 * x1 + y0 * y1 + z0 * z1
 }
 
 pub fn negp(pt: Point) -> Point {
     let [x, y, z] = pt;
 
-    return [-x, -y, -z];
+    [-x, -y, -z]
 }
