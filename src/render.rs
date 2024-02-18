@@ -50,11 +50,19 @@ pub struct Light {
     pub location: Point
 }
 
+#[derive(Copy, Clone)]
 pub struct Camera {
     pub location: Point,
     pub point_at: Point,
     pub u: Point,
     pub v: Point
+}
+
+struct CameraDetails {
+    pub camera: Camera,
+    pub dx: f64,
+    pub dy: f64,
+    pub oversample: u32,
 }
 
 pub struct Scene {
@@ -132,7 +140,6 @@ fn light_vector(point: &Point, scene: &Scene) -> Option<Vector> {
     }
 }
 
-
 fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) -> LinearColor {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
@@ -161,7 +168,6 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) ->
         [0.0, 0.0, 0.0]
     };
 
-
     let light: LinearColor = match light_vector(&hit.hit_point, &scene) {
         Some(lv) => {
             let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0) as f64;
@@ -183,34 +189,42 @@ fn ray_color(ray: &Vector, scene: &Scene, reflect_count: u32) -> LinearColor {
     }
 }
 
+fn pixel_color(
+    camera: &CameraDetails,
+    scene: &Scene,
+    x: u32,
+    y: u32,
+) -> LinearColor {
+    let subdx = camera.dx / (camera.oversample as f64 * 2.0);
+    let subdy = camera.dy / (camera.oversample as f64 * 2.0);
 
+    let xc = x as f64 * camera.dx - camera.dx / 2.0;
+    let yc = y as f64 * camera.dy - camera.dy / 2.0;
 
-pub fn render_into_line(
-    scene: &Scene, imgx: u32, imgy: u32, row: image::buffer::EnumeratePixelsMut<image::Rgb<u8>>
-) {
-    let dx = 1.0 / imgx as f64;
-    let dy = 1.0 / imgy as f64;
+    let mut pc = [0.0, 0.0, 0.0];
+    for iix in 0..scene.oversample {
+        for iiy in 0..scene.oversample {
 
-    let subdx = dx / (scene.oversample as f64 * 2.0);
-    let subdy = dy / (scene.oversample as f64 * 2.0);
+            let xt = xc + subdx * (1 + 2 * iix) as f64;
+            let yt = yc + subdy * (1 + 2 * iiy) as f64;
 
-    for (_, (x, y, pixel)) in row.enumerate() {
+            let rc = ray_color(&camera_ray(&camera.camera, xt, yt), &scene, 0);
 
-        let mut pc = [0.0, 0.0, 0.0];
-
-        let xc = x as f64 * dx - dx / 2.0;
-        let yc = y as f64 * dy - dy / 2.0;
-
-        for iix in 0..scene.oversample {
-            for iiy in 0..scene.oversample {
-
-                let rc = ray_color(&camera_ray(&scene.camera, xc + subdx * (1.0 + iix as f64), yc + subdy * (1.0 + iiy as f64)), &scene, 0);
-
-                pc = add_linear_color(&pc, &rc)
-            }
+            pc = add_linear_color(&pc, &rc)
         }
+    }
 
-        *pixel = image::Rgb(to_png_color(&scale_linear_color(&pc, 1.0 / (scene.oversample * scene.oversample) as f64)))
+    scale_linear_color(&pc, 1.0 / (scene.oversample * scene.oversample) as f64)
+}
+
+fn render_into_line(
+    camera: &CameraDetails,
+    scene: &Scene,
+    row: image::buffer::EnumeratePixelsMut<image::Rgb<u8>>
+) {
+    for (_, (x, y, pixel)) in row.enumerate() {
+        let pc = pixel_color(&camera, &scene, x, y);
+        *pixel = image::Rgb(to_png_color(&pc))
     }
 }
 
@@ -220,13 +234,20 @@ pub fn render(
 
     let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
 
+    let camera = CameraDetails {
+        camera: scene.camera,
+        dx: 1.0 / imgx as f64,
+        dy: 1.0 / imgy as f64,
+        oversample: scene.oversample
+    };
+
     if parallel {
         imgbuf.enumerate_rows_mut()
             .par_bridge()
-            .for_each(| (_, row ) | render_into_line(scene, imgx, imgy, row));
+            .for_each(| (_, row ) | render_into_line(&camera, scene, row));
     } else {
         for (_, row) in imgbuf.enumerate_rows_mut() {
-            render_into_line(scene, imgx, imgy, row)
+            render_into_line(&camera, scene, row)
         }
     }
 
