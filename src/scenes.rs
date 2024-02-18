@@ -10,11 +10,14 @@
 
 use crate::render::{
     Camera,
-    Color,
     Scene,
     Light,
     Hittable,
     Surface,
+};
+
+use crate::render::color::{
+    LinearColor,
 };
 
 use crate::render::shapes::{
@@ -45,7 +48,7 @@ const LIGHT: f64 = 0.6 as f64;
 const REFLECTION: f64 = 0.5 as f64;
 
 #[allow(dead_code)]
-const fn surface_glossy(c: Color) -> Surface {
+const fn surface_glossy(c: LinearColor) -> Surface {
     Surface {
         color: c,
         ambient: 0.2,

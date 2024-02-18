@@ -10,7 +10,8 @@
 
 extern crate image;
 
-mod geometry;
+pub mod geometry;
+pub mod color;
 pub mod shapes;
 
 use rayon::prelude::*;
@@ -28,11 +29,16 @@ use geometry::{
     subp,
 };
 
-pub type Color = [f64; 3];
+use color::{
+    LinearColor,
+    scale_linear_color,
+    add_linear_color,
+    to_png_color,
+};
 
 #[derive(Copy, Clone)]
 pub struct Surface {
-    pub color: Color,
+    pub color: LinearColor,
     pub ambient: f64,
     pub specular: f64,
     pub light: f64,
@@ -56,7 +62,7 @@ pub struct Scene {
     pub camera: Camera,
     pub light: Light,
     pub objects: Vec<Box<dyn Hittable + Sync + Send>>,
-    pub background: Color,
+    pub background: LinearColor,
 
     pub reflect_limit: u32,
     pub oversample: u32,
@@ -126,23 +132,8 @@ fn light_vector(point: &Point, scene: &Scene) -> Option<Vector> {
     }
 }
 
-fn scale_color(color: &Color, s: f64) -> Color {
-    [
-        color[0] * s,
-        color[1] * s,
-        color[2] * s
-    ]
-}
 
-fn addcolor(colora: &Color, colorb: &Color) -> Color {
-    [
-        colora[0] + colorb[0],
-        colora[1] + colorb[1],
-        colora[2] + colorb[2],
-    ]
-}
-
-fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) -> Color {
+fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) -> LinearColor {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
     let scolor = if hit.surface.checked {
@@ -150,14 +141,14 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) ->
                          (hit.hit_point[1] + EPSILON).floor() +
                          (hit.hit_point[2] + EPSILON).floor()) as i64 % 2).abs();
 
-        scale_color(&hit.surface.color, if checkidx == 0 { 1.0 } else { 0.5 })
+        scale_linear_color(&hit.surface.color, if checkidx == 0 { 1.0 } else { 0.5 })
     } else {
         hit.surface.color
     };
 
-    let ambient: Color = scale_color(&scolor, hit.surface.ambient);
+    let ambient: LinearColor = scale_linear_color(&scolor, hit.surface.ambient);
 
-    let reflected: Color = if (hit.surface.reflection > EPSILON) && (reflect_count >= scene.reflect_limit) {
+    let reflected: LinearColor = if (hit.surface.reflection > EPSILON) && (reflect_count >= scene.reflect_limit) {
         let rvec = subp(negp(ray.delta), scalep(hit.normal, 2.0 * dotp(negp(ray.delta), hit.normal)));
 
         let rcolor = ray_color(&Vector {
@@ -165,53 +156,33 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) ->
             delta: normalizep(rvec)
         }, &scene, reflect_count + 1);
 
-        scale_color(&rcolor, hit.surface.reflection)
+        scale_linear_color(&rcolor, hit.surface.reflection)
     } else {
         [0.0, 0.0, 0.0]
     };
 
 
-    let light: Color = match light_vector(&hit.hit_point, &scene) {
+    let light: LinearColor = match light_vector(&hit.hit_point, &scene) {
         Some(lv) => {
             let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0) as f64;
 
-            addcolor(&scale_color(&[1.0, 1.0, 1.0], kspecular * hit.surface.specular),
-                     &scale_color(&scolor, hit.surface.light * dotp(hit.normal, negp(lv.delta)) as f64))
+            add_linear_color(&scale_linear_color(&[1.0, 1.0, 1.0], kspecular * hit.surface.specular),
+                     &scale_linear_color(&scolor, hit.surface.light * dotp(hit.normal, negp(lv.delta)) as f64))
 
         },
         None => [0.0, 0.0, 0.0]
     };
 
-    addcolor(&reflected, &addcolor(&ambient, &light))
+    add_linear_color(&reflected, &add_linear_color(&ambient, &light))
 }
 
-fn ray_color(ray: &Vector, scene: &Scene, reflect_count: u32) -> Color {
+fn ray_color(ray: &Vector, scene: &Scene, reflect_count: u32) -> LinearColor {
     match nearest_hit(&ray, &scene.objects) {
         Some(hit) => shade_pixel(&ray, &scene, &hit, reflect_count),
         None => scene.background
     }
 }
 
-
-fn linear_to_srgb(x: f64) -> f64 {
-    if x < 0.0 {
-        0.0
-    } else if x < 0.0031308	{
-        x * 12.92
-    } else if x < 1.0 {
-        1.055 * x.powf(1.0/2.4) - 0.055
-    } else {
-        1.0
-    }
-}
-
-fn to_png_color(color: &Color) -> [u8; 3] {
-    [
-        (linear_to_srgb(color[0]) * 256.0) as u8,
-        (linear_to_srgb(color[1]) * 256.0) as u8,
-        (linear_to_srgb(color[2]) * 256.0) as u8
-    ]
-}
 
 
 pub fn render_into_line(
@@ -235,11 +206,11 @@ pub fn render_into_line(
 
                 let rc = ray_color(&camera_ray(&scene.camera, xc + subdx * (1.0 + iix as f64), yc + subdy * (1.0 + iiy as f64)), &scene, 0);
 
-                pc = addcolor(&pc, &rc)
+                pc = add_linear_color(&pc, &rc)
             }
         }
 
-        *pixel = image::Rgb(to_png_color(&scale_color(&pc, 1.0 / (scene.oversample * scene.oversample) as f64)))
+        *pixel = image::Rgb(to_png_color(&scale_linear_color(&pc, 1.0 / (scene.oversample * scene.oversample) as f64)))
     }
 }
 
