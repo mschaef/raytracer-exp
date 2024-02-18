@@ -104,10 +104,9 @@ pub struct RayHit {
     pub surface: Surface,
 }
 
-
 fn nearest_hit(ray: &Vector, objects: &Vec<Box<dyn Hittable + Send + Sync>>) -> Option<RayHit> {
-    let mut hits = objects.iter().map(| obj | obj.hit_test(ray))
-        .filter_map(| ray_hit | ray_hit )
+    let mut hits = objects.iter()
+        .filter_map(| obj | obj.hit_test(ray))
         .collect::<Vec<RayHit>>();
 
     hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
@@ -173,7 +172,7 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) ->
             let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0) as f64;
 
             add_linear_color(&scale_linear_color(&[1.0, 1.0, 1.0], kspecular * hit.surface.specular),
-                     &scale_linear_color(&scolor, hit.surface.light * dotp(hit.normal, negp(lv.delta)) as f64))
+                             &scale_linear_color(&scolor, hit.surface.light * dotp(hit.normal, negp(lv.delta)) as f64))
 
         },
         None => [0.0, 0.0, 0.0]
