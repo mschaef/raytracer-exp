@@ -68,9 +68,10 @@ pub struct Scene {
     pub light: Light,
     pub objects: Vec<Box<dyn Hittable + Sync + Send>>,
     pub background: Color,
-    pub reflect_limit: u32,
-}
 
+    pub reflect_limit: u32,
+    pub oversample: u32,
+}
 
 pub trait Hittable {
     fn hit_test(&self, ray: &Vector) -> Option<RayHit>;
@@ -284,17 +285,26 @@ pub fn render_into_line(
     let dx = 1.0 / imgx as f64;
     let dy = 1.0 / imgy as f64;
 
+    let subdx = dx / (scene.oversample as f64 * 2.0);
+    let subdy = dy / (scene.oversample as f64 * 2.0);
+
     for (_, (x, y, pixel)) in row.enumerate() {
-        let rcs = [
-            ray_color(&camera_ray(&scene.camera, x as f64 * dx - dx / 4.0, y as f64 * dy - dy / 4.0), &scene, 0),
-            ray_color(&camera_ray(&scene.camera, x as f64 * dx + dx / 4.0, y as f64 * dy - dy / 4.0), &scene, 0),
-            ray_color(&camera_ray(&scene.camera, x as f64 * dx - dx / 4.0, y as f64 * dy + dy / 4.0), &scene, 0),
-            ray_color(&camera_ray(&scene.camera, x as f64 * dx + dx / 4.0, y as f64 * dy + dy / 4.0), &scene, 0),
-        ];
 
-        let rc = scale_color(&addcolor(&rcs[0], &addcolor(&rcs[1], &addcolor(&rcs[2], &rcs[3]))), 0.25);
+        let mut pc = [0.0, 0.0, 0.0];
 
-        *pixel = image::Rgb(to_png_color(&rc));
+        let xc = x as f64 * dx - dx / 2.0;
+        let yc = y as f64 * dy - dy / 2.0;
+
+        for iix in 0..scene.oversample {
+            for iiy in 0..scene.oversample {
+
+                let rc = ray_color(&camera_ray(&scene.camera, xc + subdx * (1.0 + iix as f64), yc + subdy * (1.0 + iiy as f64)), &scene, 0);
+
+                pc = addcolor(&pc, &rc)
+            }
+        }
+
+        *pixel = image::Rgb(to_png_color(&scale_color(&pc, 1.0 / (scene.oversample * scene.oversample) as f64)))
     }
 }
 

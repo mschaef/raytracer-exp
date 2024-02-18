@@ -20,6 +20,7 @@ use crate::render::{
 };
 
 const REFLECT_LIMIT: u32 = 2;
+const OVERSAMPLE: u32 = 2;
 
 const DEFAULT_CAMERA: Camera = Camera {
     location: [0.0, 10.0, 0.0],
@@ -135,7 +136,8 @@ pub fn scene_sphere_occlusion_test() -> Scene {
                 surface: SURFACE_PURPLE
             }),
         ],
-        reflect_limit: REFLECT_LIMIT
+        reflect_limit: REFLECT_LIMIT,
+        oversample: OVERSAMPLE,
     }
 }
 
@@ -170,7 +172,8 @@ pub fn scene_sphere_surface_test() -> Scene {
             r: 0.4,
             surface: test_surface((x % 5) as f64 / 5.0, (x / 5) as f64 / 5.0)
         }) as Box<dyn Hittable + Send + Sync>).collect::<Vec<_>>(),
-        reflect_limit: REFLECT_LIMIT
+        reflect_limit: REFLECT_LIMIT,
+        oversample: OVERSAMPLE,
     }
 }
 
@@ -206,7 +209,8 @@ pub fn scene_one_sphere() -> Scene {
                 surface: SURFACE_WHITE_C
             }),
         ],
-        reflect_limit: REFLECT_LIMIT
+        reflect_limit: REFLECT_LIMIT,
+        oversample: OVERSAMPLE,
     }
 }
 
@@ -241,7 +245,8 @@ pub fn scene_axis_spheres() -> Scene {
                 surface: SURFACE_BLUE
             }),
         ],
-        reflect_limit: REFLECT_LIMIT
+        reflect_limit: REFLECT_LIMIT,
+        oversample: OVERSAMPLE,
     }
 }
 
@@ -267,7 +272,8 @@ pub fn scene_ball_on_plane() -> Scene {
                 surface: SURFACE_WHITE_C
             }),
         ],
-        reflect_limit: REFLECT_LIMIT
+        reflect_limit: REFLECT_LIMIT,
+        oversample: OVERSAMPLE,
     }
 }
 
