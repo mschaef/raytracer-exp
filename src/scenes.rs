@@ -186,7 +186,7 @@ pub fn scene_sphere_surface_test() -> Scene {
 #[allow(dead_code)]
 pub fn scene_one_sphere() -> Scene {
     Scene {
-        name: "Single Sphere",
+        name: "Single Sphere, Reflective Planes",
         camera: DEFAULT_CAMERA,
         background: [0.0, 0.0, 0.0],
         light: Light {
