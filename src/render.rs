@@ -36,6 +36,8 @@ use color::{
     to_png_color,
 };
 
+use std::cmp::Ordering;
+
 #[derive(Copy, Clone)]
 pub struct Surface {
     pub color: LinearColor,
@@ -104,19 +106,41 @@ pub struct RayHit {
     pub surface: Surface,
 }
 
-fn nearest_hit(ray: &Vector, objects: &Vec<Box<dyn Hittable + Send + Sync>>) -> Option<RayHit> {
-    let mut hits = objects.iter()
-        .filter_map(| obj | obj.hit_test(ray))
-        .collect::<Vec<RayHit>>();
+impl PartialOrd for RayHit {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let order = if self.distance < other.distance {
+            Ordering::Greater
+        } else if self.distance > other.distance {
+            Ordering::Less
+        } else {
+            Ordering::Equal
+        };
 
-    hits.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap());
-
-    if !hits.is_empty() {
-        Some(hits.remove(0))
-    } else {
-        None
+        Some(order)
     }
 }
+
+impl PartialEq for RayHit {
+    fn eq(&self, other: &Self) -> bool {
+        self.distance == other.distance
+    }
+}
+
+fn nearest_hit(ray: &Vector, objects: &Vec<Box<dyn Hittable + Send + Sync>>) -> Option<RayHit> {
+
+    objects
+        .iter()
+        .fold(None, | last_hit, obj | {
+            let hit = obj.hit_test(ray);
+
+            if hit > last_hit {
+                hit
+            } else {
+                last_hit
+            }
+        })
+}
+
 
 fn light_vector(point: &Point, scene: &Scene) -> Option<Vector> {
     let light_direction = subp(*point, scene.light.location);
