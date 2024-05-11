@@ -8,13 +8,14 @@ import Codec.Picture.Png (writePng)
 doRender :: IO ()
 doRender = do
   putStrLn "doRender"
-  savePngImage "render.png" generateImg
+  savePngImage "render.png" (generateImg 400 400)
 
-generateImg :: DynamicImage
-generateImg = ImageRGB8 (generateImage originalFnc 200 200)
+generateImg :: Int -> Int -> DynamicImage
+generateImg w h =
+  ImageRGB8 (generateImage (originalFnc w h) w h)
 
-originalFnc :: Int -> Int -> PixelRGB8
-originalFnc x y =
-  if x > 100 && y > 100
+originalFnc :: Int -> Int -> Int -> Int -> PixelRGB8
+originalFnc w h x y =
+  if x > (div w 2) && y > (div h 2)
      then PixelRGB8 255 255 255
   else PixelRGB8 0 0 0
