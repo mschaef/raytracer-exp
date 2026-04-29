@@ -62,6 +62,17 @@ pub fn dotp(pt0: Point, pt1: Point) -> f64 {
     x0 * x1 + y0 * y1 + z0 * z1
 }
 
+pub fn crossp(pt0: Point, pt1: Point) -> Point {
+    let [x0, y0, z0] = pt0;
+    let [x1, y1, z1] = pt1;
+
+    [
+        y0 * z1 - z0 * y1,
+        z0 * x1 - x0 * z1,
+        x0 * y1 - y0 * x1,
+    ]
+}
+
 pub fn negp(pt: Point) -> Point {
     let [x, y, z] = pt;
 

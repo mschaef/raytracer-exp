@@ -36,6 +36,7 @@ use geometry::{
     Point,
     Vector,
     addp,
+    crossp,
     dotp,
     lenp,
     negp,
@@ -67,18 +68,93 @@ pub struct Light {
     pub location: Point
 }
 
+/// Look-at camera in pre-computed form.
+///
+/// Construct via `Camera::looking_at` (zoom-based) or `Camera::with_fov`
+/// (field-of-view based) rather than building this struct directly — the
+/// constructors derive an orthonormal basis from the user-friendly inputs
+/// `(location, look_at, up_hint)` and cache the result here so per-ray
+/// work is just additions and scales.
+///
+/// Fields:
+/// - `location`     — world-space camera position.
+/// - `forward`      — unit vector pointing from `location` toward the look-at point.
+/// - `right`        — unit vector along the camera's right (image +x).
+/// - `up`           — unit vector along the camera's up (image −y after inversion).
+///                    Re-orthogonalized from the user's `up_hint`.
+/// - `half_height`  — half the height of the view plane at unit distance.
+///                    Smaller values = more zoomed in.
 #[derive(Copy, Clone)]
 pub struct Camera {
     pub location: Point,
-    pub point_at: Point,
-    pub u: Point,
-    pub v: Point
+    pub forward: Point,
+    pub right: Point,
+    pub up: Point,
+    pub half_height: f64,
+}
+
+impl Camera {
+    /// Construct a camera by location, target, up-direction hint, and zoom.
+    ///
+    /// `up_hint` need not be perpendicular to the view direction — the
+    /// component along `forward` is projected out and the result is
+    /// renormalized. The only constraint is that `up_hint` must not be
+    /// parallel to `(look_at - location)`, which would leave no
+    /// orientation degree of freedom.
+    ///
+    /// `zoom` is a positive multiplier: `zoom = 1.0` corresponds to a
+    /// vertical FOV of about 53° (a "normal" lens, equivalent to the
+    /// previous default camera). `zoom = 2.0` is twice as zoomed in,
+    /// `zoom = 0.5` is wider-angle.
+    pub fn looking_at(
+        location: Point,
+        look_at: Point,
+        up_hint: Point,
+        zoom: f64,
+    ) -> Camera {
+        let forward = normalizep(subp(look_at, location));
+
+        // right = up_hint × forward, then renormalize. This convention
+        // gives the intuitive result for a camera placed above the scene
+        // looking down at the origin (right = +x).
+        let right_unnorm = crossp(up_hint, forward);
+        if lenp(right_unnorm) < EPSILON {
+            panic!("Camera::looking_at: up_hint is parallel to view direction");
+        }
+        let right = normalizep(right_unnorm);
+
+        // Re-orthogonalize up: project user's up_hint onto the plane
+        // perpendicular to forward by taking forward × right.
+        let up = crossp(forward, right);
+
+        // half_height = 0.5 / zoom puts a 1.0-tall view plane at unit
+        // distance when zoom = 1, giving 2*atan(0.5) ≈ 53° vertical FOV.
+        let half_height = 0.5 / zoom;
+
+        Camera { location, forward, right, up, half_height }
+    }
+
+    /// Construct a camera using a vertical field of view (in radians)
+    /// instead of a zoom factor. Internally maps to
+    /// `half_height = tan(fov / 2)`.
+    pub fn with_fov(
+        location: Point,
+        look_at: Point,
+        up_hint: Point,
+        fov_radians: f64,
+    ) -> Camera {
+        let half_height = (fov_radians / 2.0).tan();
+        // Equivalent zoom = 0.5 / half_height; route through `looking_at`
+        // so all the basis math lives in one place.
+        Camera::looking_at(location, look_at, up_hint, 0.5 / half_height)
+    }
 }
 
 struct CameraDetails {
     pub camera: Camera,
     pub dx: f64,
     pub dy: f64,
+    pub aspect: f64,
     pub oversample: u32,
 }
 
@@ -97,13 +173,27 @@ pub trait Hittable {
     fn hit_test(&self, ray: &Vector) -> Option<RayHit>;
 }
 
-fn camera_ray(c: &Camera, xt: f64, yt: f64) -> Vector {
+fn camera_ray(c: &Camera, aspect: f64, xt: f64, yt: f64) -> Vector {
+    // Map normalized pixel coordinates [0, 1] to view-plane offsets [-1, 1].
+    // The y axis is flipped so that yt=0 (top of image) corresponds to
+    // +up in the camera's local frame, matching standard image orientation.
+    let sx = 2.0 * xt - 1.0;
+    let sy = 1.0 - 2.0 * yt;
 
-    let ray_point_at = addp(addp(c.point_at, scalep(c.u, xt - 0.5)), scalep(c.v, yt - 0.5));
+    let half_width = c.half_height * aspect;
+
+    // direction = forward + sx*half_width*right + sy*half_height*up
+    let dir = addp(
+        addp(
+            c.forward,
+            scalep(c.right, sx * half_width),
+        ),
+        scalep(c.up, sy * c.half_height),
+    );
 
     Vector {
         start: c.location,
-        delta: normalizep(subp(ray_point_at, c.location))
+        delta: normalizep(dir),
     }
 }
 
@@ -230,7 +320,7 @@ fn pixel_color(
             let xt = xc + subdx * (1 + 2 * iix) as f64;
             let yt = yc + subdy * (1 + 2 * iiy) as f64;
 
-            let rc = ray_color(&camera_ray(&camera.camera, xt, yt), scene, 0);
+            let rc = ray_color(&camera_ray(&camera.camera, camera.aspect, xt, yt), scene, 0);
 
             pc = add_linear_color(&pc, &rc)
         }
@@ -260,6 +350,7 @@ pub fn render(
         camera: scene.camera,
         dx: 1.0 / imgx as f64,
         dy: 1.0 / imgy as f64,
+        aspect: imgx as f64 / imgy as f64,
         oversample: scene.oversample
     };
 

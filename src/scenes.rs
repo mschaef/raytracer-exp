@@ -37,12 +37,22 @@ use crate::render::shapes::{
 const REFLECT_LIMIT: u32 = 2;
 const OVERSAMPLE: u32 = 2;
 
-const DEFAULT_CAMERA: Camera = Camera {
-    location: [0.0, 10.0, 0.0],
-    point_at: [0.0, 0.0, 0.0],
-    u: [10.0, 0.0, 0.0],
-    v: [0.0, 0.0, -10.0]
-};
+// `Camera::looking_at` performs a normalize and a couple of cross
+// products, so it can't be a `const fn` for `f64`. A plain function
+// returning a fresh Camera is the equivalent — cheap to call once per
+// scene at construction time.
+//
+// `zoom = 1.0` corresponds to a vertical FOV of about 53°, which closely
+// matches the previous fixed camera so existing scenes render at
+// roughly the same framing.
+fn default_camera() -> Camera {
+    Camera::looking_at(
+        [0.0, 10.0, 0.0],   // location
+        [0.0,  0.0, 0.0],   // look at the origin
+        [0.0,  0.0, 1.0],   // world up = +z
+        1.0,                // zoom
+    )
+}
 
 #[allow(dead_code)]
 const AMBIENT: f64 = 0.2_f64;
@@ -114,7 +124,7 @@ const SURFACE_WHITE_C: Surface = Surface {
 pub fn scene_sphere_occlusion_test() -> Scene {
     Scene {
         name: "Occlusion Test",
-        camera: DEFAULT_CAMERA,
+        camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         light: Light {
             location: [5.0, 5.0, 5.0]
@@ -173,7 +183,7 @@ fn test_surface(light: f64, specular: f64) -> Surface {
 pub fn scene_sphere_surface_test() -> Scene {
     Scene {
         name: "Surface Finish Test",
-        camera: DEFAULT_CAMERA,
+        camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         light: Light {
             location: [5.0, 5.0, 5.0]
@@ -196,7 +206,7 @@ pub fn scene_sphere_surface_test() -> Scene {
 pub fn scene_one_sphere() -> Scene {
     Scene {
         name: "Single Sphere, Reflective Planes",
-        camera: DEFAULT_CAMERA,
+        camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         light: Light {
             location: [10.0, 10.0, 10.0]
@@ -233,7 +243,7 @@ pub fn scene_one_sphere() -> Scene {
 pub fn scene_axis_spheres() -> Scene {
     Scene {
         name: "Axis Spheres",
-        camera: DEFAULT_CAMERA,
+        camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         light: Light {
             location: [10.0, 10.0, 10.0]
@@ -270,7 +280,7 @@ pub fn scene_axis_spheres() -> Scene {
 pub fn scene_cuboid_test() -> Scene {
     Scene {
         name: "Cuboid Test",
-        camera: DEFAULT_CAMERA,
+        camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         light: Light {
             location: [10.0, 10.0, 10.0]
@@ -321,7 +331,7 @@ pub fn scene_group_test() -> Scene {
     // structure that transforms will hang off of in the next step.
     Scene {
         name: "Group Test",
-        camera: DEFAULT_CAMERA,
+        camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         light: Light {
             location: [10.0, 10.0, 10.0]
@@ -378,7 +388,7 @@ pub fn scene_transform_test() -> Scene {
 
     Scene {
         name: "Transform Test",
-        camera: DEFAULT_CAMERA,
+        camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         light: Light {
             location: [10.0, 10.0, 10.0]
@@ -467,7 +477,7 @@ pub fn scene_transform_test() -> Scene {
 pub fn scene_ball_on_plane() -> Scene {
     Scene {
         name: "Ball on Plane",
-        camera: DEFAULT_CAMERA,
+        camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         light: Light {
             location: [10.0, 10.0, 10.0]
