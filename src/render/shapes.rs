@@ -39,6 +39,40 @@ pub struct Cuboid {
     pub surface: Surface,
 }
 
+/// Closed enumeration of all shape primitives the renderer knows how to
+/// hit-test. Stored inline in `Scene::objects` (no boxing, no vtable).
+///
+/// The `scene_objects!` macro and the `From` impls below let scene
+/// definitions just write `Sphere { ... }` and have it auto-promoted to
+/// the right variant.
+pub enum Shape {
+    Sphere(Sphere),
+    Plane(Plane),
+    Cuboid(Cuboid),
+}
+
+impl From<Sphere> for Shape {
+    fn from(s: Sphere) -> Self { Shape::Sphere(s) }
+}
+
+impl From<Plane> for Shape {
+    fn from(p: Plane) -> Self { Shape::Plane(p) }
+}
+
+impl From<Cuboid> for Shape {
+    fn from(c: Cuboid) -> Self { Shape::Cuboid(c) }
+}
+
+impl Hittable for Shape {
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        match self {
+            Shape::Sphere(s) => s.hit_test(ray),
+            Shape::Plane(p)  => p.hit_test(ray),
+            Shape::Cuboid(c) => c.hit_test(ray),
+        }
+    }
+}
+
 impl Hittable for Sphere {
     fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
         // Hit test algorithm taken from this website and translated to

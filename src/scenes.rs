@@ -8,11 +8,12 @@
 //
 // You must not remove this notice, or any other, from this software.
 
+use crate::scene_objects;
+
 use crate::render::{
     Camera,
     Scene,
     Light,
-    Hittable,
     Surface,
 };
 
@@ -24,6 +25,7 @@ use crate::render::shapes::{
     Sphere,
     Plane,
     Cuboid,
+    Shape,
 };
 
 const REFLECT_LIMIT: u32 = 2;
@@ -111,37 +113,37 @@ pub fn scene_sphere_occlusion_test() -> Scene {
         light: Light {
             location: [5.0, 5.0, 5.0]
         },
-        objects: vec![
-            Box::new(Sphere {
+        objects: scene_objects![
+            Sphere {
                 center: [1.5, 2.0, 0.0],
                 r: 0.7,
                 surface: SURFACE_ORANGE
-            }),
-            Box::new(Sphere {
+            },
+            Sphere {
                 center: [3.0, 0.0, 0.0],
                 r: 1.0,
                 surface: SURFACE_RED
-            }),
-            Box::new(Sphere {
+            },
+            Sphere {
                 center: [-3.0, 0.0, 0.0],
                 r: 1.0,
                 surface: SURFACE_BLUE
-            }),
-            Box::new(Sphere {
+            },
+            Sphere {
                 center: [0.0, 0.0, 0.0],
                 r: 1.0,
                 surface: SURFACE_GREEN
-            }),
-            Box::new(Sphere {
+            },
+            Sphere {
                 center: [0.0, -4.0, 0.0],
                 r: 3.0,
                 surface: SURFACE_YELLOW
-            }),
-            Box::new(Sphere { // foreground sphere at back at list - proper occlusion required to make this visible
+            },
+            Sphere { // foreground sphere at back at list - proper occlusion required to make this visible
                 center: [-1.5, 2.0, 0.0],
                 r: 0.7,
                 surface: SURFACE_PURPLE
-            }),
+            },
         ],
         reflect_limit: REFLECT_LIMIT,
         oversample: OVERSAMPLE,
@@ -170,7 +172,7 @@ pub fn scene_sphere_surface_test() -> Scene {
         light: Light {
             location: [5.0, 5.0, 5.0]
         },
-        objects: (0..25).map(| x | Box::new(Sphere {
+        objects: (0..25).map(| x | Shape::from(Sphere {
             center: [
                 0.0 + ((x % 5) - 2) as f64,
                 0.0,
@@ -178,7 +180,7 @@ pub fn scene_sphere_surface_test() -> Scene {
             ],
             r: 0.4,
             surface: test_surface((x % 5) as f64 / 5.0, (x / 5) as f64 / 5.0)
-        }) as Box<dyn Hittable + Send + Sync>).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
         reflect_limit: REFLECT_LIMIT,
         oversample: OVERSAMPLE,
     }
@@ -193,28 +195,28 @@ pub fn scene_one_sphere() -> Scene {
         light: Light {
             location: [10.0, 10.0, 10.0]
         },
-        objects: vec![
-            Box::new(Sphere {
+        objects: scene_objects![
+            Sphere {
                 center: [0.0, 0.0, 0.0],
                 r: 1.0,
                 surface: SURFACE_ORANGE
-            }),
+            },
 
-            Box::new(Plane {
+            Plane {
                 normal: [1.0, 0.0, 0.0],
                 p0: [-2.0, 0.0, 0.0],
                 surface: SURFACE_WHITE_C
-            }),
-            Box::new(Plane {
+            },
+            Plane {
                 normal: [0.0, 1.0, 0.0],
                 p0: [0.0, -2.0, 0.0],
                 surface: SURFACE_WHITE_C
-            }),
-            Box::new(Plane {
+            },
+            Plane {
                 normal: [0.0, 0.0, 1.0],
                 p0: [0.0, 0.0, -2.0],
                 surface: SURFACE_WHITE_C
-            }),
+            },
         ],
         reflect_limit: REFLECT_LIMIT,
         oversample: OVERSAMPLE,
@@ -230,27 +232,27 @@ pub fn scene_axis_spheres() -> Scene {
         light: Light {
             location: [10.0, 10.0, 10.0]
         },
-        objects: vec![
-            Box::new(Sphere {
+        objects: scene_objects![
+            Sphere {
                 center: [0.0, 0.0, 0.0],
                 r: 1.0,
                 surface: SURFACE_WHITE
-            }),
-            Box::new(Sphere {
+            },
+            Sphere {
                 center: [3.0, 0.0, 0.0],
                 r: 0.25,
                 surface: SURFACE_RED
-            }),
-            Box::new(Sphere {
+            },
+            Sphere {
                 center: [0.0, 3.0, 0.0],
                 r: 0.25,
                 surface: SURFACE_GREEN
-            }),
-            Box::new(Sphere {
+            },
+            Sphere {
                 center: [0.0, 0.0, 3.0],
                 r: 0.25,
                 surface: SURFACE_BLUE
-            }),
+            },
         ],
         reflect_limit: REFLECT_LIMIT,
         oversample: OVERSAMPLE,
@@ -267,38 +269,38 @@ pub fn scene_cuboid_test() -> Scene {
         light: Light {
             location: [10.0, 10.0, 10.0]
         },
-        objects: vec![
+        objects: scene_objects![
             // A tall narrow red box at the origin.
-            Box::new(Cuboid {
+            Cuboid {
                 center: [0.0, 0.0, 0.0],
                 size: [1.5, 1.5, 2.5],
                 surface: SURFACE_RED
-            }),
+            },
             // A small green cube floating to the right.
-            Box::new(Cuboid {
+            Cuboid {
                 center: [3.0, 0.0, 0.5],
                 size: [1.0, 1.0, 1.0],
                 surface: SURFACE_GREEN
-            }),
+            },
             // A wide flat blue slab on the left.
-            Box::new(Cuboid {
+            Cuboid {
                 center: [-2.5, 0.5, -0.75],
                 size: [1.5, 2.0, 0.5],
                 surface: SURFACE_BLUE
-            }),
+            },
             // A sphere for visual reference and to confirm interaction with
             // existing primitives still works.
-            Box::new(Sphere {
+            Sphere {
                 center: [1.0, -2.5, 0.5],
                 r: 0.6,
                 surface: SURFACE_YELLOW
-            }),
+            },
             // A reflective checkered ground plane to catch shadows.
-            Box::new(Plane {
+            Plane {
                 normal: [0.0, 0.0, 1.0],
                 p0: [0.0, 0.0, -2.0],
                 surface: SURFACE_WHITE_C
-            }),
+            },
         ],
         reflect_limit: REFLECT_LIMIT,
         oversample: OVERSAMPLE,
@@ -314,17 +316,17 @@ pub fn scene_ball_on_plane() -> Scene {
         light: Light {
             location: [10.0, 10.0, 10.0]
         },
-        objects: vec![
-            Box::new(Sphere {
+        objects: scene_objects![
+            Sphere {
                 center: [0.0, -2.0, -1.0],
                 r: 0.66,
                 surface: SURFACE_BLUE
-            }),
-            Box::new(Plane {
+            },
+            Plane {
                 normal: [0.0, 0.0, 1.0],
                 p0: [0.0, 0.0, -2.0],
                 surface: SURFACE_WHITE_C
-            }),
+            },
         ],
         reflect_limit: REFLECT_LIMIT,
         oversample: OVERSAMPLE,

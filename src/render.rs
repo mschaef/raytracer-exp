@@ -14,7 +14,21 @@ pub mod geometry;
 pub mod color;
 pub mod shapes;
 
+use shapes::Shape;
+
 use rayon::prelude::*;
+
+/// Build a `Vec<Shape>` from a comma-separated list of shape literals
+/// (e.g. `Sphere { ... }`, `Plane { ... }`, `Cuboid { ... }`). Each entry
+/// is converted to `Shape` via its `From` impl, so scene definitions don't
+/// have to spell out `Box::new(...)` or `Shape::Sphere(...)` for every
+/// object.
+#[macro_export]
+macro_rules! scene_objects {
+    ($($shape:expr),* $(,)?) => {
+        vec![$(<$crate::render::shapes::Shape>::from($shape)),*]
+    };
+}
 
 use geometry::{
     EPSILON,
@@ -71,7 +85,7 @@ pub struct Scene {
     pub name: &'static str,
     pub camera: Camera,
     pub light: Light,
-    pub objects: Vec<Box<dyn Hittable + Sync + Send>>,
+    pub objects: Vec<Shape>,
     pub background: LinearColor,
 
     pub reflect_limit: u32,
@@ -126,7 +140,7 @@ impl PartialEq for RayHit {
     }
 }
 
-fn nearest_hit(ray: &Vector, objects: &Vec<Box<dyn Hittable + Send + Sync>>) -> Option<RayHit> {
+fn nearest_hit(ray: &Vector, objects: &Vec<Shape>) -> Option<RayHit> {
 
     objects
         .iter()
