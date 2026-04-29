@@ -8,14 +8,14 @@
 //
 // You must not remove this notice, or any other, from this software.
 
-extern crate image;
-
 pub mod geometry;
 pub mod color;
 pub mod transform;
 pub mod shapes;
+pub mod output;
 
 use shapes::{Shape, nearest_hit};
+use output::RenderTarget;
 
 use rayon::prelude::*;
 
@@ -329,41 +329,52 @@ fn pixel_color(
     scale_linear_color(&pc, 1.0 / (scene.oversample * scene.oversample) as f64)
 }
 
-fn render_into_line(
+fn render_one_row<T: RenderTarget + ?Sized>(
+    target: &T,
     camera: &CameraDetails,
     scene: &Scene,
-    row: image::buffer::EnumeratePixelsMut<image::Rgb<u8>>
+    imgx: u32,
+    y: u32,
 ) {
-    for (x, y, pixel) in row {
+    let mut row = vec![[0u8; 3]; imgx as usize];
+    for x in 0..imgx {
         let pc = pixel_color(camera, scene, x, y);
-        *pixel = image::Rgb(to_png_color(&pc))
+        row[x as usize] = to_png_color(&pc);
     }
+    target.submit_row(0, y, &row);
 }
 
-pub fn render(
-    scene: &Scene, imgx: u32, imgy: u32, parallel: bool
-) -> image::ImageBuffer<image::Rgb<u8>, Vec<u8>> {
-
-    let mut imgbuf = image::ImageBuffer::new(imgx, imgy);
-
+/// Render `scene` at resolution `imgx`×`imgy`, pushing finished pixel rows
+/// into `target`. The renderer no longer allocates an image of its own —
+/// where pixels go and what becomes of them is the target's concern.
+///
+/// Under `parallel = true`, rows are computed across Rayon's thread pool;
+/// `target.submit_row` will be called concurrently from multiple threads
+/// (in unspecified order). The trait's `Send + Sync` bound is what makes
+/// this safe.
+pub fn render<T: RenderTarget + ?Sized>(
+    scene: &Scene,
+    imgx: u32,
+    imgy: u32,
+    target: &T,
+    parallel: bool,
+) {
     let camera = CameraDetails {
         camera: scene.camera,
         dx: 1.0 / imgx as f64,
         dy: 1.0 / imgy as f64,
         aspect: imgx as f64 / imgy as f64,
-        oversample: scene.oversample
+        oversample: scene.oversample,
     };
 
     if parallel {
-        imgbuf.enumerate_rows_mut()
-            .par_bridge()
-            .for_each(| (_, row ) | render_into_line(&camera, scene, row));
+        (0..imgy).into_par_iter().for_each(
+            | y | render_one_row(target, &camera, scene, imgx, y)
+        );
     } else {
-        for (_, row) in imgbuf.enumerate_rows_mut() {
-            render_into_line(&camera, scene, row)
-        }
+        (0..imgy).for_each(
+            | y | render_one_row(target, &camera, scene, imgx, y)
+        );
     }
-
-    imgbuf
 }
 

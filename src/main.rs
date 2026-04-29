@@ -8,17 +8,14 @@
 //
 // You must not remove this notice, or any other, from this software.
 
-extern crate image;
-
 use std::env;
 use std::time::Instant;
-
-use crate::image::GenericImage;
 
 mod render;
 mod scenes;
 
 use render::{render, Scene};
+use render::output::{PngTarget, OffsetTarget, RenderTarget};
 
 use scenes::{
     //scene_sphere_occlusion_test,
@@ -36,17 +33,15 @@ fn is_parallel() -> bool {
     }
 }
 
-fn render_into(output_imgbuf: &mut image::ImageBuffer<image::Rgb<u8>, Vec<u8>>,
-               scene: &Scene, sx: u32, sy: u32, x: u32, y: u32) {
-
+fn render_into<T: RenderTarget + ?Sized>(
+    target: &T, scene: &Scene, sx: u32, sy: u32,
+) {
     let parallel = is_parallel();
 
     let start = Instant::now();
-
-    output_imgbuf.copy_from(&render(scene, sx, sy, parallel), x, y)
-        .map_err(|err| println!("{:?}", err)).ok();
-
+    render(scene, sx, sy, target, parallel);
     let duration = start.elapsed();
+
     println!("Time elapsed in {} is: {:?} (parallel: {})", scene.name, duration, parallel);
 }
 
@@ -54,7 +49,10 @@ fn main() {
     let imgdim = 2048;
     let half = imgdim / 2;
 
-    let mut output_imgbuf = image::ImageBuffer::new(imgdim, imgdim);
+    // One backing PngTarget for the whole composite. Each scene renders
+    // into its quadrant via an OffsetTarget that re-routes coordinates;
+    // no intermediate sub-buffers are allocated.
+    let target = PngTarget::new(imgdim, imgdim);
 
     let scene = [
         //scene_sphere_occlusion_test(),
@@ -65,15 +63,18 @@ fn main() {
         scene_ball_on_plane()
     ];
 
-    render_into(&mut output_imgbuf, &scene[0], half, half, 0, 0);
-    render_into(&mut output_imgbuf, &scene[1], half, half, half, 0);
-    render_into(&mut output_imgbuf, &scene[2], half, half, 0, half);
-    render_into(&mut output_imgbuf, &scene[3], half, half, half, half);
+    render_into(&OffsetTarget::new(&target, 0,    0   ), &scene[0], half, half);
+    render_into(&OffsetTarget::new(&target, half, 0   ), &scene[1], half, half);
+    render_into(&OffsetTarget::new(&target, 0,    half), &scene[2], half, half);
+    render_into(&OffsetTarget::new(&target, half, half), &scene[3], half, half);
 
+    // Crosshair lines between quadrants. PngTarget exposes put_pixel for
+    // exactly this kind of compositing operation that doesn't fit the
+    // row-at-a-time pattern.
     for ii in 0..imgdim - 1 {
-        *output_imgbuf.get_pixel_mut(ii, imgdim / 2) = image::Rgb([255, 255, 255]);
-        *output_imgbuf.get_pixel_mut(imgdim / 2, ii) = image::Rgb([255, 255, 255]);
+        target.put_pixel(ii, imgdim / 2, [255, 255, 255]);
+        target.put_pixel(imgdim / 2, ii, [255, 255, 255]);
     }
 
-    output_imgbuf.save("render.png").unwrap();
+    target.save("render.png").unwrap();
 }

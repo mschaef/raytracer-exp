@@ -41,6 +41,10 @@ src/
                          rotation_x/y/z, rotation_axis. Plus compose, inverse,
                          transform_point, transform_vector.
     render/shapes.rs     The Shape enum and everything related. See below.
+    render/output.rs     The `RenderTarget` trait plus the `PngTarget` and
+                         `OffsetTarget` impls. The renderer pushes finished
+                         rows into a target rather than returning an image;
+                         `image` crate use is fully encapsulated here.
 
   scenes.rs            Hand-written scene definitions, surface presets,
                        and default_camera(). Each scene is a `pub fn` returning
@@ -159,10 +163,10 @@ the image — required for existing scenes to render right-side-up.
 ## Rendering pipeline
 
 ```
-render(scene, imgx, imgy, parallel)
-  └─ for each row (rayon::par_bridge if parallel):
-       render_into_line
-         └─ for each pixel:
+render(scene, imgx, imgy, &target, parallel)
+  └─ for each y in 0..imgy (rayon::into_par_iter if parallel):
+       render_one_row
+         └─ for each x in 0..imgx:
               pixel_color   ← oversample loop (2×2 by default)
                 └─ camera_ray (uses cached aspect, basis)
                 └─ ray_color
@@ -172,12 +176,18 @@ render(scene, imgx, imgy, parallel)
                           └─ light_vector  (shadow ray)
                           └─ recursive ray_color for reflections
                             (capped by Scene::reflect_limit)
+         └─ target.submit_row(0, y, &row)
 ```
 
 `nearest_hit` lives in `shapes.rs` and is shared between the renderer's
 top-level traversal and `Shape::Group`'s hit_test. The renderer doesn't know
 or care about the shape of the scene tree; it just dispatches through
 `Hittable::hit_test`.
+
+`render()` no longer returns an image — it writes finished rows of `[u8; 3]`
+pixels into the supplied `RenderTarget`. The renderer is therefore agnostic
+to where pixels eventually go (PNG file today, possibly a streaming UI in
+the future).
 
 ## Surface model
 
@@ -223,6 +233,19 @@ Approximate order of recent commits, oldest first:
    `geometry.rs`. `Camera::with_fov` provides a degrees/radians alternative.
    Aspect is now derived from image dimensions at render time, not encoded
    in the camera. `camera_ray` performs the image-y flip.
+
+6. **Pluggable render targets.** Factored the disk-writing concern out of
+   the renderer. New `output.rs` module defines the `RenderTarget` trait
+   (`submit_row(&self, x, y, &[[u8; 3]])` + default `finish()`), plus
+   `PngTarget` (Mutex-protected `image::ImageBuffer`, `save(path)` /
+   `put_pixel`) and `OffsetTarget` (wraps another target, adds an `(dx, dy)`
+   to coordinates). `render()` now takes `&impl RenderTarget` and returns
+   `()`; it writes rows directly to the target instead of building an
+   `ImageBuffer`. `main.rs` composes the four-quadrant output by sharing one
+   `PngTarget` and pointing four `OffsetTarget`s at it. The `image` crate
+   dependency now lives only inside `output.rs`. Streaming output (e.g. to
+   a windowed UI) plugs in by implementing `RenderTarget` over a channel
+   or socket; no renderer changes needed.
 
 ## Pitfalls and conventions
 
