@@ -45,10 +45,15 @@ pub struct Cuboid {
 /// The `scene_objects!` macro and the `From` impls below let scene
 /// definitions just write `Sphere { ... }` and have it auto-promoted to
 /// the right variant.
+///
+/// `Group` lets a list of children be treated as a single shape, which
+/// is what makes hierarchical scene composition possible. A group's hit
+/// is the nearest hit among its children.
 pub enum Shape {
     Sphere(Sphere),
     Plane(Plane),
     Cuboid(Cuboid),
+    Group(Vec<Shape>),
 }
 
 impl From<Sphere> for Shape {
@@ -66,11 +71,36 @@ impl From<Cuboid> for Shape {
 impl Hittable for Shape {
     fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
         match self {
-            Shape::Sphere(s) => s.hit_test(ray),
-            Shape::Plane(p)  => p.hit_test(ray),
-            Shape::Cuboid(c) => c.hit_test(ray),
+            Shape::Sphere(s)        => s.hit_test(ray),
+            Shape::Plane(p)         => p.hit_test(ray),
+            Shape::Cuboid(c)        => c.hit_test(ray),
+            Shape::Group(children)  => nearest_hit(ray, children),
         }
     }
+}
+
+/// Returns the closest hit (smallest positive `distance`) among `objects`,
+/// or `None` if none of them were hit. Shared between the scene-level
+/// traversal in `render` and the recursive case for `Shape::Group`.
+pub fn nearest_hit(ray: &Vector, objects: &[Shape]) -> Option<RayHit> {
+    objects
+        .iter()
+        .fold(None, | last_hit, obj | {
+            let hit = obj.hit_test(ray);
+
+            if hit > last_hit {
+                hit
+            } else {
+                last_hit
+            }
+        })
+}
+
+/// Wrap a list of child shapes as a single `Shape::Group`. Cheap convenience
+/// constructor — equivalent to writing `Shape::Group(children)` directly,
+/// but reads more naturally inside scene definitions.
+pub fn group(children: Vec<Shape>) -> Shape {
+    Shape::Group(children)
 }
 
 impl Hittable for Sphere {

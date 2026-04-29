@@ -26,6 +26,7 @@ use crate::render::shapes::{
     Plane,
     Cuboid,
     Shape,
+    group,
 };
 
 const REFLECT_LIMIT: u32 = 2;
@@ -296,6 +297,60 @@ pub fn scene_cuboid_test() -> Scene {
                 surface: SURFACE_YELLOW
             },
             // A reflective checkered ground plane to catch shadows.
+            Plane {
+                normal: [0.0, 0.0, 1.0],
+                p0: [0.0, 0.0, -2.0],
+                surface: SURFACE_WHITE_C
+            },
+        ],
+        reflect_limit: REFLECT_LIMIT,
+        oversample: OVERSAMPLE,
+    }
+}
+
+#[allow(dead_code)]
+pub fn scene_group_test() -> Scene {
+    // Demonstrates `Shape::Group` as a hierarchical container. Visually
+    // this looks the same as a flat scene with the same primitives —
+    // grouping has no rendering effect on its own, but it sets up the
+    // structure that transforms will hang off of in the next step.
+    Scene {
+        name: "Group Test",
+        camera: DEFAULT_CAMERA,
+        background: [0.0, 0.0, 0.0],
+        light: Light {
+            location: [10.0, 10.0, 10.0]
+        },
+        objects: scene_objects![
+            // A "snowman": three stacked spheres treated as a single child
+            // of the scene. `scene_objects!` builds a Vec<Shape> which
+            // `group(...)` then wraps as Shape::Group — the macro and the
+            // constructor compose without any extra plumbing.
+            group(scene_objects![
+                Sphere { center: [-2.0, 0.0, -1.0], r: 0.6, surface: SURFACE_WHITE },
+                Sphere { center: [-2.0, 0.0,  0.0], r: 0.5, surface: SURFACE_WHITE },
+                Sphere { center: [-2.0, 0.0,  0.8], r: 0.4, surface: SURFACE_WHITE },
+            ]),
+            // A row of three cubes, also grouped, to confirm the same
+            // mechanism works for boxes and that nearest-hit is correct
+            // when groups contain different primitive types.
+            group(scene_objects![
+                Cuboid { center: [1.0, 0.0, -1.0], size: [0.6, 0.6, 0.6], surface: SURFACE_RED    },
+                Cuboid { center: [2.0, 0.0, -1.0], size: [0.6, 0.6, 0.6], surface: SURFACE_GREEN  },
+                Cuboid { center: [3.0, 0.0, -1.0], size: [0.6, 0.6, 0.6], surface: SURFACE_BLUE   },
+            ]),
+            // A nested group: a sphere alongside an inner group of two
+            // smaller spheres. Confirms recursion through Group::hit_test
+            // works to arbitrary depth.
+            group(scene_objects![
+                Sphere { center: [0.0, -3.0, -1.0], r: 0.7, surface: SURFACE_PURPLE },
+                group(scene_objects![
+                    Sphere { center: [-0.7, -3.0, 0.2], r: 0.3, surface: SURFACE_ORANGE },
+                    Sphere { center: [ 0.7, -3.0, 0.2], r: 0.3, surface: SURFACE_YELLOW },
+                ]),
+            ]),
+            // A ground plane outside any group, to confirm flat and
+            // grouped objects coexist correctly in the same scene.
             Plane {
                 normal: [0.0, 0.0, 1.0],
                 p0: [0.0, 0.0, -2.0],

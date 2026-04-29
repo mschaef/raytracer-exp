@@ -14,7 +14,7 @@ pub mod geometry;
 pub mod color;
 pub mod shapes;
 
-use shapes::Shape;
+use shapes::{Shape, nearest_hit};
 
 use rayon::prelude::*;
 
@@ -139,22 +139,6 @@ impl PartialEq for RayHit {
         self.distance == other.distance
     }
 }
-
-fn nearest_hit(ray: &Vector, objects: &Vec<Shape>) -> Option<RayHit> {
-
-    objects
-        .iter()
-        .fold(None, | last_hit, obj | {
-            let hit = obj.hit_test(ray);
-
-            if hit > last_hit {
-                hit
-            } else {
-                last_hit
-            }
-        })
-}
-
 
 fn light_vector(point: &Point, scene: &Scene) -> Option<Vector> {
     let light_direction = subp(*point, scene.light.location);
