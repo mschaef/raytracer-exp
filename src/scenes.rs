@@ -27,6 +27,11 @@ use crate::render::shapes::{
     Cuboid,
     Shape,
     group,
+    translate,
+    scale,
+    rotate_x,
+    rotate_y,
+    rotate_z,
 };
 
 const REFLECT_LIMIT: u32 = 2;
@@ -351,6 +356,102 @@ pub fn scene_group_test() -> Scene {
             ]),
             // A ground plane outside any group, to confirm flat and
             // grouped objects coexist correctly in the same scene.
+            Plane {
+                normal: [0.0, 0.0, 1.0],
+                p0: [0.0, 0.0, -2.0],
+                surface: SURFACE_WHITE_C
+            },
+        ],
+        reflect_limit: REFLECT_LIMIT,
+        oversample: OVERSAMPLE,
+    }
+}
+
+#[allow(dead_code)]
+pub fn scene_transform_test() -> Scene {
+    // Each object exercises a different transform path. Because the
+    // checker pattern on the ground keys off world-space coordinates,
+    // shadows and reflections cast by these transformed objects should
+    // line up with the world-space silhouette of the *transformed*
+    // shape, which is the visual proof that the math is right.
+    use std::f64::consts::PI;
+
+    Scene {
+        name: "Transform Test",
+        camera: DEFAULT_CAMERA,
+        background: [0.0, 0.0, 0.0],
+        light: Light {
+            location: [10.0, 10.0, 10.0]
+        },
+        objects: scene_objects![
+            // A unit cube translated to (3, 0, 0). Should look identical
+            // to a Cuboid declared with center=[3,0,0] directly.
+            translate([3.0, 0.0, 0.0],
+                Cuboid {
+                    center: [0.0, 0.0, 0.0],
+                    size: [1.0, 1.0, 1.0],
+                    surface: SURFACE_RED
+                }),
+
+            // A unit cube rotated 30 degrees around z, then translated.
+            // The face shading should clearly show the rotation: edges
+            // and corners of the cube no longer line up with world axes.
+            translate([-3.0, 0.0, 0.0],
+                rotate_z(PI / 6.0,
+                    Cuboid {
+                        center: [0.0, 0.0, 0.0],
+                        size: [1.5, 1.5, 1.5],
+                        surface: SURFACE_GREEN
+                    })),
+
+            // A unit sphere stretched non-uniformly into an ellipsoid,
+            // then translated. The point of this case is to verify the
+            // inverse-transpose normal handling: if normals were
+            // transformed with the forward matrix instead, the lighting
+            // on the long axis would be visibly wrong.
+            translate([0.0, 3.0, 0.0],
+                scale([1.5, 0.6, 0.6],
+                    Sphere {
+                        center: [0.0, 0.0, 0.0],
+                        r: 1.0,
+                        surface: SURFACE_BLUE
+                    })),
+
+            // A grouped pair of spheres, then transformed as a unit.
+            // Confirms that Group nests correctly inside Transform —
+            // which is the whole point of having both kinds of nodes:
+            // composite objects can be transformed with one wrapper.
+            translate([0.0, -3.0, 0.5],
+                rotate_y(PI / 4.0,
+                    group(scene_objects![
+                        Sphere {
+                            center: [-0.7, 0.0, 0.0],
+                            r: 0.4,
+                            surface: SURFACE_ORANGE
+                        },
+                        Sphere {
+                            center: [ 0.7, 0.0, 0.0],
+                            r: 0.4,
+                            surface: SURFACE_YELLOW
+                        },
+                    ]))),
+
+            // Nested transforms: outer translate, inner rotate around x,
+            // and a deeper rotation around z. Each level inverse-
+            // transforms the ray as it descends, so the leaf sees the
+            // composed inverse of all three. Visually: a cube tilted in
+            // two axes, then placed off-origin.
+            translate([0.0, 0.0, 1.5],
+                rotate_x(PI / 5.0,
+                    rotate_z(PI / 7.0,
+                        Cuboid {
+                            center: [0.0, 0.0, 0.0],
+                            size: [0.8, 0.8, 0.8],
+                            surface: SURFACE_PURPLE
+                        }))),
+
+            // Reflective checkered ground plane, untransformed. Catches
+            // shadows from all the transformed objects above.
             Plane {
                 normal: [0.0, 0.0, 1.0],
                 p0: [0.0, 0.0, -2.0],

@@ -21,6 +21,13 @@ use crate::render::{
     EPSILON,
 };
 
+use crate::render::transform::{
+    Affine,
+    Mat3,
+    mat3_apply,
+    mat3_transpose,
+};
+
 pub struct Sphere {
     pub center: Point,
     pub r: f64,
@@ -49,11 +56,34 @@ pub struct Cuboid {
 /// `Group` lets a list of children be treated as a single shape, which
 /// is what makes hierarchical scene composition possible. A group's hit
 /// is the nearest hit among its children.
+///
+/// `Transform` wraps a child in an affine transformation. Hit-testing
+/// inverse-transforms the ray into the child's local space, runs the
+/// child's hit test there, and lifts the resulting hit point and normal
+/// back into world space. The `Box` is required because `Shape` is now
+/// recursive through this variant.
 pub enum Shape {
     Sphere(Sphere),
     Plane(Plane),
     Cuboid(Cuboid),
     Group(Vec<Shape>),
+    Transform(Box<Transformed>),
+}
+
+/// Storage for a `Shape::Transform` node. Cached at construction so that
+/// hit-testing only does the cheap part (matrix-vector multiplies) per ray.
+///
+/// - `inverse` is the world-to-local affine: applied to the ray on the way
+///   in, so the child sees a ray in its own coordinate system.
+/// - `normal_xform` is the inverse-transpose of the *forward* linear part
+///   (equivalently, the transpose of `inverse.linear`). It transforms the
+///   child's local-space normal back to world space. Using the
+///   inverse-transpose rather than the forward matrix is what keeps normals
+///   correct under non-uniform scale.
+pub struct Transformed {
+    pub inverse: Affine,
+    pub normal_xform: Mat3,
+    pub child: Shape,
 }
 
 impl From<Sphere> for Shape {
@@ -75,7 +105,43 @@ impl Hittable for Shape {
             Shape::Plane(p)         => p.hit_test(ray),
             Shape::Cuboid(c)        => c.hit_test(ray),
             Shape::Group(children)  => nearest_hit(ray, children),
+            Shape::Transform(t)     => t.hit_test(ray),
         }
+    }
+}
+
+impl Transformed {
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        // Inverse-transform the ray into the child's local space. Note
+        // that we deliberately do NOT renormalize `local_ray.delta`: under
+        // non-uniform scale its magnitude changes, but if we leave it
+        // alone, the parametric `t` along the local ray equals the `t`
+        // along the world ray. That preserves distance comparisons across
+        // the whole scene tree without conversions, and lets us recover
+        // the world-space hit point directly from the original ray.
+        let local_ray = Vector {
+            start: self.inverse.transform_point(ray.start),
+            delta: self.inverse.transform_vector(ray.delta),
+        };
+
+        self.child.hit_test(&local_ray).map(| hit | {
+            // Same `t` parameterizes both the world ray and the local ray,
+            // so the world-space hit point falls out without a forward
+            // matrix multiply.
+            let world_hit_point = ray_location(ray, hit.distance);
+
+            // Normals transform by the inverse-transpose of the linear
+            // part. Renormalize because non-uniform scale can change the
+            // magnitude.
+            let world_normal = normalizep(mat3_apply(self.normal_xform, hit.normal));
+
+            RayHit {
+                distance: hit.distance,
+                hit_point: world_hit_point,
+                normal: world_normal,
+                surface: hit.surface,
+            }
+        })
     }
 }
 
@@ -101,6 +167,58 @@ pub fn nearest_hit(ray: &Vector, objects: &[Shape]) -> Option<RayHit> {
 /// but reads more naturally inside scene definitions.
 pub fn group(children: Vec<Shape>) -> Shape {
     Shape::Group(children)
+}
+
+/// Wrap a child in a `Shape::Transform` node carrying an arbitrary affine.
+/// This is the lowest-level transform constructor; the per-axis helpers
+/// below (`translate`, `scale`, `rotate_x`, …) are thin wrappers around it.
+///
+/// `forward` is the local-to-world transform. The inverse and the normal
+/// transform matrix are computed once here and cached on the node, so
+/// per-ray work is just a few mat-vec multiplies.
+///
+/// The `child` argument is any type that can be converted into `Shape`
+/// (i.e. `Sphere`, `Plane`, `Cuboid`, or `Shape` itself). The `From`
+/// impls take care of promoting a leaf primitive into the right
+/// `Shape` variant automatically, so callers can write
+/// `translate([1,0,0], Sphere { ... })` without an explicit wrap.
+pub fn transform(forward: Affine, child: impl Into<Shape>) -> Shape {
+    let inverse = forward.inverse();
+    // normal_xform = (forward.linear)^{-T} = transpose(inverse.linear)
+    let normal_xform = mat3_transpose(inverse.linear);
+    Shape::Transform(Box::new(Transformed {
+        inverse,
+        normal_xform,
+        child: child.into(),
+    }))
+}
+
+pub fn translate(d: Point, child: impl Into<Shape>) -> Shape {
+    transform(Affine::translation(d), child)
+}
+
+/// Per-axis scale. For uniform scale, pass equal components, e.g.
+/// `scale([2.0, 2.0, 2.0], child)`.
+pub fn scale(s: Point, child: impl Into<Shape>) -> Shape {
+    transform(Affine::scale(s), child)
+}
+
+pub fn rotate_x(theta: f64, child: impl Into<Shape>) -> Shape {
+    transform(Affine::rotation_x(theta), child)
+}
+
+pub fn rotate_y(theta: f64, child: impl Into<Shape>) -> Shape {
+    transform(Affine::rotation_y(theta), child)
+}
+
+pub fn rotate_z(theta: f64, child: impl Into<Shape>) -> Shape {
+    transform(Affine::rotation_z(theta), child)
+}
+
+/// Rotation by `theta` radians around an arbitrary axis (which need not
+/// be unit-length).
+pub fn rotate_axis(axis: Point, theta: f64, child: impl Into<Shape>) -> Shape {
+    transform(Affine::rotation_axis(axis, theta), child)
 }
 
 impl Hittable for Sphere {

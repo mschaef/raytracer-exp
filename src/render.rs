@@ -12,6 +12,7 @@ extern crate image;
 
 pub mod geometry;
 pub mod color;
+pub mod transform;
 pub mod shapes;
 
 use shapes::{Shape, nearest_hit};
