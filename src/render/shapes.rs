@@ -33,6 +33,12 @@ pub struct Plane {
     pub surface: Surface,
 }
 
+pub struct Cuboid {
+    pub center: Point,
+    pub size: Point,
+    pub surface: Surface,
+}
+
 impl Hittable for Sphere {
     fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
         // Hit test algorithm taken from this website and translated to
@@ -85,5 +91,99 @@ impl Hittable for Plane {
                 })
             }
         }
+    }
+}
+
+impl Hittable for Cuboid {
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        // Slab method for axis-aligned box intersection.
+        //
+        // For each axis, treat the box as the intersection of two parallel
+        // planes ("slabs") and compute the parametric t values where the ray
+        // enters and exits that slab. The overall entry t is the largest of
+        // the three per-axis entry values; the overall exit t is the smallest
+        // of the per-axis exit values. If entry > exit, the ray misses.
+        //
+        // The face that was hit is the one whose entry t was the maximum,
+        // which directly gives us the surface normal.
+
+        let half = [
+            self.size[0] * 0.5,
+            self.size[1] * 0.5,
+            self.size[2] * 0.5,
+        ];
+        let min = [
+            self.center[0] - half[0],
+            self.center[1] - half[1],
+            self.center[2] - half[2],
+        ];
+        let max = [
+            self.center[0] + half[0],
+            self.center[1] + half[1],
+            self.center[2] + half[2],
+        ];
+
+        let mut t_enter = f64::NEG_INFINITY;
+        let mut t_exit = f64::INFINITY;
+        let mut enter_axis: usize = 0;
+        let mut enter_sign: f64 = 0.0;
+
+        for i in 0..3 {
+            let origin = ray.start[i];
+            let dir = ray.delta[i];
+
+            if dir.abs() < EPSILON {
+                // Ray is parallel to this pair of slabs: miss if origin is
+                // outside the slab, otherwise this axis doesn't constrain t.
+                if origin < min[i] || origin > max[i] {
+                    return None;
+                }
+                continue;
+            }
+
+            let inv = 1.0 / dir;
+            let mut t1 = (min[i] - origin) * inv;
+            let mut t2 = (max[i] - origin) * inv;
+
+            // After ordering t1 <= t2, the entering face's outward normal
+            // points along -axis if the ray was moving in +axis (dir > 0)
+            // and along +axis if the ray was moving in -axis (dir < 0).
+            let mut sign = -1.0;
+            if t1 > t2 {
+                std::mem::swap(&mut t1, &mut t2);
+                sign = 1.0;
+            }
+
+            if t1 > t_enter {
+                t_enter = t1;
+                enter_axis = i;
+                enter_sign = sign;
+            }
+            if t2 < t_exit {
+                t_exit = t2;
+            }
+
+            if t_enter > t_exit {
+                return None;
+            }
+        }
+
+        // Box is entirely behind the ray, or ray origin is on/inside the box.
+        // Treat origin-inside as a miss to avoid self-intersection on
+        // reflection and shadow rays starting at the surface.
+        if t_enter <= EPSILON {
+            return None;
+        }
+
+        let hit_point = ray_location(ray, t_enter);
+        let mut normal: Point = [0.0, 0.0, 0.0];
+        normal[enter_axis] = enter_sign;
+
+        Some(RayHit {
+            distance: t_enter,
+            hit_point,
+            normal,
+            surface: self.surface,
+        })
     }
 }

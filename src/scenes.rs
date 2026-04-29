@@ -23,6 +23,7 @@ use crate::render::color::{
 use crate::render::shapes::{
     Sphere,
     Plane,
+    Cuboid,
 };
 
 const REFLECT_LIMIT: u32 = 2;
@@ -256,6 +257,53 @@ pub fn scene_axis_spheres() -> Scene {
     }
 }
 
+
+#[allow(dead_code)]
+pub fn scene_cuboid_test() -> Scene {
+    Scene {
+        name: "Cuboid Test",
+        camera: DEFAULT_CAMERA,
+        background: [0.0, 0.0, 0.0],
+        light: Light {
+            location: [10.0, 10.0, 10.0]
+        },
+        objects: vec![
+            // A tall narrow red box at the origin.
+            Box::new(Cuboid {
+                center: [0.0, 0.0, 0.0],
+                size: [1.5, 1.5, 2.5],
+                surface: SURFACE_RED
+            }),
+            // A small green cube floating to the right.
+            Box::new(Cuboid {
+                center: [3.0, 0.0, 0.5],
+                size: [1.0, 1.0, 1.0],
+                surface: SURFACE_GREEN
+            }),
+            // A wide flat blue slab on the left.
+            Box::new(Cuboid {
+                center: [-2.5, 0.5, -0.75],
+                size: [1.5, 2.0, 0.5],
+                surface: SURFACE_BLUE
+            }),
+            // A sphere for visual reference and to confirm interaction with
+            // existing primitives still works.
+            Box::new(Sphere {
+                center: [1.0, -2.5, 0.5],
+                r: 0.6,
+                surface: SURFACE_YELLOW
+            }),
+            // A reflective checkered ground plane to catch shadows.
+            Box::new(Plane {
+                normal: [0.0, 0.0, 1.0],
+                p0: [0.0, 0.0, -2.0],
+                surface: SURFACE_WHITE_C
+            }),
+        ],
+        reflect_limit: REFLECT_LIMIT,
+        oversample: OVERSAMPLE,
+    }
+}
 
 #[allow(dead_code)]
 pub fn scene_ball_on_plane() -> Scene {
