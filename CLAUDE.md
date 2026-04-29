@@ -1,0 +1,330 @@
+# Project Notes for Claude
+
+A small ray tracer written in Rust. The README frames it as a Rust-learning
+exercise; this document is the operating manual for working on it productively
+in a Claude-assisted session.
+
+## What this is
+
+A CPU ray tracer that renders simple scenes of analytic primitives (spheres,
+planes, axis-aligned boxes) into PNGs. It supports ambient/diffuse/specular
+shading, hard shadows, mirror reflections, hierarchical scene composition with
+affine transforms, and a look-at camera. Rendering is parallelized with Rayon.
+Output is a 2048×2048 image (`render.png`) split into four quadrants, each
+showing a different scene; this is configured in `main.rs`.
+
+`cargo run --release` produces `render.png`. Set `PARALLEL=n` to disable Rayon.
+
+## Module layout
+
+```
+src/
+  main.rs              Entry point. Builds 4 scenes, lays them out in quadrants,
+                       writes render.png. Reads PARALLEL env var.
+
+  render.rs            Top-level render module. Defines:
+                         - Scene, Camera, Light, Surface, RayHit
+                         - Hittable trait
+                         - the scene_objects! macro (#[macro_export])
+                         - the rendering pipeline:
+                             render → render_into_line → pixel_color
+                                    → camera_ray, ray_color
+                                    → shade_pixel, light_vector
+                       Sub-modules:
+    render/geometry.rs   Point = [f64; 3], Vector { start, delta }, EPSILON,
+                         and pointwise ops: addp, subp, scalep, dotp, crossp,
+                         lenp, normalizep, negp.
+    render/color.rs      LinearColor and conversions to/from PNG sRGB.
+    render/transform.rs  Affine 3D transforms as (3×3 linear, 3-vec translation).
+                         Mat3 type alias, mat3_apply/multiply/transpose/inverse,
+                         and Affine constructors: identity, translation, scale,
+                         rotation_x/y/z, rotation_axis. Plus compose, inverse,
+                         transform_point, transform_vector.
+    render/shapes.rs     The Shape enum and everything related. See below.
+
+  scenes.rs            Hand-written scene definitions, surface presets,
+                       and default_camera(). Each scene is a `pub fn` returning
+                       a Scene value, marked #[allow(dead_code)] since main.rs
+                       only wires up four of them at a time.
+```
+
+## The Shape enum
+
+Central abstraction. Closed enumeration, no dynamic dispatch:
+
+```rust
+pub enum Shape {
+    Sphere(Sphere),
+    Plane(Plane),
+    Cuboid(Cuboid),                    // axis-aligned box, slab method
+    Group(Vec<Shape>),                 // hierarchical container
+    Transform(Box<Transformed>),       // affine-transformed subtree
+}
+```
+
+`Hittable for Shape` is a single match dispatching to per-variant logic.
+`Sphere`/`Plane`/`Cuboid` implement `Hittable` with the standard analytic ray
+tests. `Group::hit_test` is `nearest_hit(ray, &children)` — same fold the
+top-level scene traversal uses, so flat scenes and arbitrarily-nested groups
+share the exact same hit-testing path.
+
+The `Transformed` struct caches the inverse affine and a precomputed
+inverse-transpose `Mat3` for normal transformation. Its hit_test:
+
+1. Inverse-transforms the ray into the child's local space (deliberately
+   *without* renormalizing the local direction — see "Pitfalls" below).
+2. Recursively calls the child's hit_test.
+3. On a hit, recomputes `world_hit_point` directly from the *world* ray and
+   the returned `t` (free, since `t` is preserved across the transform), and
+   transforms the local normal back via the cached `normal_xform`, then
+   renormalizes.
+
+`Box<Transformed>` is what breaks the otherwise-recursive size of `Shape`.
+The `Group` variant is naturally recursive without an explicit Box because
+`Vec<Shape>` is heap-indirected.
+
+## Constructing scenes ergonomically
+
+Three layered conveniences let scene definitions stay clean:
+
+1. **`From<T> for Shape`** for each leaf type (`Sphere`, `Plane`, `Cuboid`).
+   Plus the standard library's reflexive `From<T> for T`, so `Shape::from(s)`
+   works on any leaf or on an existing `Shape`.
+
+2. **The `scene_objects!` macro** (defined in `render.rs`, `#[macro_export]`):
+
+   ```rust
+   scene_objects![
+       Sphere { ... },
+       Plane  { ... },
+       translate([1,0,0], Cuboid { ... }),
+   ]
+   ```
+
+   Expands each entry through `<Shape>::from(_)`, returning `Vec<Shape>`. Used
+   directly for `Scene::objects` and as the input to `group(...)`.
+
+3. **Constructor functions** (in `shapes.rs`) that accept `impl Into<Shape>`
+   for their `child` argument, so leaf primitives can be passed directly:
+
+   ```rust
+   pub fn group(children: Vec<Shape>) -> Shape;
+   pub fn transform(forward: Affine, child: impl Into<Shape>) -> Shape;
+   pub fn translate(d: Point,        child: impl Into<Shape>) -> Shape;
+   pub fn scale(s: Point,            child: impl Into<Shape>) -> Shape;
+   pub fn rotate_x(theta: f64,       child: impl Into<Shape>) -> Shape;
+   pub fn rotate_y(theta: f64,       child: impl Into<Shape>) -> Shape;
+   pub fn rotate_z(theta: f64,       child: impl Into<Shape>) -> Shape;
+   pub fn rotate_axis(axis: Point, theta: f64, child: impl Into<Shape>) -> Shape;
+   ```
+
+   Outer-most call applies last, so `translate(t, rotate_z(θ, scale(s, leaf)))`
+   reads naturally: scale first, then rotate, then translate. Each layer
+   inverse-transforms the ray on the way down; the math comes out equivalent
+   to a single composed transform without anyone having to think about
+   matrix multiplication order.
+
+   The bare `transform(matrix, child)` is the escape hatch for hand-built
+   `Affine` values via `Affine::translation(...).compose(...)` etc.
+
+## The Camera
+
+Standard look-at model with a precomputed orthonormal basis:
+
+```rust
+pub struct Camera {
+    pub location: Point,
+    pub forward: Point,    // unit
+    pub right: Point,      // unit
+    pub up: Point,         // unit, re-orthogonalized from up_hint
+    pub half_height: f64,  // half of view-plane height at unit distance
+}
+```
+
+Built via `Camera::looking_at(location, look_at, up_hint, zoom)` or
+`Camera::with_fov(location, look_at, up_hint, fov_radians)`. The user's
+`up_hint` doesn't have to be perpendicular to `forward`; the constructor
+projects out the parallel component. It will panic if `up_hint` is *parallel*
+to `forward` (no orientation degree of freedom).
+
+`zoom = 1.0` corresponds to vertical FOV ≈ 53° and matches the framing of the
+older fixed camera. `with_fov` is a thin wrapper that converts to zoom and
+forwards to `looking_at`.
+
+Aspect ratio is the renderer's concern, not the camera's. `CameraDetails`
+caches `aspect = imgx / imgy` and `camera_ray` computes `half_width` per call.
+`camera_ray` flips image-y (`sy = 1.0 - 2.0 * yt`) so pixel y=0 is the top of
+the image — required for existing scenes to render right-side-up.
+
+## Rendering pipeline
+
+```
+render(scene, imgx, imgy, parallel)
+  └─ for each row (rayon::par_bridge if parallel):
+       render_into_line
+         └─ for each pixel:
+              pixel_color   ← oversample loop (2×2 by default)
+                └─ camera_ray (uses cached aspect, basis)
+                └─ ray_color
+                     └─ nearest_hit (fold over scene.objects: &[Shape])
+                          → Hittable::hit_test on each Shape
+                     └─ shade_pixel (lambert + specular + reflection)
+                          └─ light_vector  (shadow ray)
+                          └─ recursive ray_color for reflections
+                            (capped by Scene::reflect_limit)
+```
+
+`nearest_hit` lives in `shapes.rs` and is shared between the renderer's
+top-level traversal and `Shape::Group`'s hit_test. The renderer doesn't know
+or care about the shape of the scene tree; it just dispatches through
+`Hittable::hit_test`.
+
+## Surface model
+
+`Surface { color, ambient, specular, light, checked, reflection }`. Lighting is
+Lambertian diffuse + Phong specular (50-power), with ambient as a flat
+multiplier of the surface color and a single bounce of mirror reflection
+(recursion gated by `Scene::reflect_limit`). The `checked` flag enables a
+simple world-space checker pattern keyed off `floor(x+y+z)`.
+
+Surface presets and the `surface_glossy` / `reflective` const fns live in
+`scenes.rs`. Common ones: `SURFACE_RED`, `SURFACE_GREEN`, …, `SURFACE_WHITE_C`
+(the reflective checkered ground used by most scenes).
+
+## Recent work history
+
+Approximate order of recent commits, oldest first:
+
+1. **Cuboid primitive added.** Axis-aligned box, specified by center and
+   per-axis size. Slab method intersection. Per-face normals fall out of
+   tracking which axis "won" the t_enter maximum.
+
+2. **`Box::new` boilerplate removed.** Scene definitions previously read
+   `Box::new(Sphere { ... }) as Box<dyn Hittable + Send + Sync>` for every
+   object. Replaced `Vec<Box<dyn Hittable>>` with the closed `Shape` enum,
+   added `From<T> for Shape` impls, introduced the `scene_objects!` macro.
+   Faster (no boxing, no vtable), cleaner at the call site.
+
+3. **`Group` variant added.** Hierarchical scene composition. The shared
+   `nearest_hit` helper became `pub` and got used in both places. Verifying
+   correctness was a matter of confirming a grouped scene rendered
+   identically to the same scene with no grouping.
+
+4. **`Transform` variant added.** New `transform.rs` module with the affine
+   math (Mat3, Affine, all ops). `Transformed` struct caches inverse +
+   normal_xform. Per-axis constructor functions (`translate`, `scale`,
+   `rotate_x/y/z`, `rotate_axis`) plus the `transform(affine, child)` escape
+   hatch. Took a follow-up pass to make the constructors accept
+   `impl Into<Shape>` so leaf primitives could be passed directly.
+
+5. **Camera rewrite.** Replaced the ad-hoc `(location, point_at, u, v)` form
+   (where `u`/`v` were full view-plane span vectors) with a look-at camera
+   parameterized by `(location, look_at, up_hint, zoom)`. Added `crossp` to
+   `geometry.rs`. `Camera::with_fov` provides a degrees/radians alternative.
+   Aspect is now derived from image dimensions at render time, not encoded
+   in the camera. `camera_ray` performs the image-y flip.
+
+## Pitfalls and conventions
+
+These are the things that have bitten or might bite someone working on the
+codebase. Keep them in mind.
+
+**Don't renormalize ray.delta inside `Transformed::hit_test`.** Under
+non-uniform scale the inverse-transformed direction's magnitude changes; if
+you renormalize, the local-space `t` and the world-space `t` diverge, and
+nearest-hit selection across mixed transformed/untransformed objects breaks.
+The convention in this codebase is that all primitive `hit_test`s already
+handle non-unit-magnitude directions correctly (sphere uses
+`a = dot(delta, delta)`; plane and cuboid are scale-invariant in `t`). This
+is a load-bearing property — be careful adding new primitives.
+
+**Normals transform by the inverse-transpose, not by the forward matrix.**
+Cached as `normal_xform` on `Transformed`. Equal to `transpose(inverse.linear)`.
+If you see "lit faces dark and dark faces lit" or "highlight in the wrong
+place under non-uniform scale," this is the suspect.
+
+**`EPSILON = 0.0001` is in local-ray-t units.** For typical scale factors near
+1, equivalent to 0.0001 world units. Under extreme non-uniform scale (1e-3 or
+1e3), the self-intersection rejection threshold drifts in world terms. Hasn't
+been an issue yet.
+
+**`scene_objects!` macro requires explicit import in submodules.** It's
+`#[macro_export]` so it lives at the crate root; modules using it need
+`use crate::scene_objects;` at the top. This is already in place in
+`scenes.rs`.
+
+**Image-y is inverted.** `camera_ray` uses `sy = 1.0 - 2.0 * yt` so that
+pixel y=0 is the top of the image. Don't "fix" this unless you also flip
+every existing scene's `up_hint`.
+
+**There are no unit tests.** Verification is visual: render and look. When
+making changes, the smell test is "does the output look the same as before
+for cases that shouldn't have changed, and right for cases that should?" The
+default `main.rs` quadrant layout is useful for side-by-side comparisons.
+
+**`#[allow(dead_code)]` on every scene fn.** `main.rs` only references four
+scenes at a time; the unused ones generate warnings without it. When
+introducing a new scene, swap it into the `scene` array in `main.rs` to view
+it (or comment one out — the existing pattern shows both styles).
+
+## Future directions
+
+The README's own "Potential Futures" list overlaps these but is now somewhat
+out of date.
+
+**Performance: BVH (bounding-volume hierarchy).** `nearest_hit` is currently
+O(n) in the number of objects per ray. The hierarchical `Group` structure is
+exactly what makes adding a BVH straightforward: precompute an AABB per
+`Group` (or per subtree), early-out if the ray misses the AABB. This is the
+single largest perf improvement available for non-trivial scenes.
+
+**Transform collapsing.** A nested `translate(rotate(scale(leaf)))` produces
+three separate `Transform` nodes, each doing its own ray-transform on the way
+down. `transform()` could peek at its child and, if it's already a
+`Shape::Transform`, multiply the inverse affines and skip a level. Trivial
+local optimization.
+
+**More primitives.** Cylinder, cone, torus, triangle / mesh. Triangle is the
+gateway to importing actual 3D models. Each is a struct + `Hittable` impl + a
+new `Shape` variant + `From` impl + match arm.
+
+**Multiple lights per scene.** Currently `Scene::light: Light` is a single
+point. Generalizing to `Vec<Light>` is straightforward; `shade_pixel` and
+`light_vector` would loop over them and sum contributions.
+
+**Refraction / transparency.** Substantially more involved — requires Fresnel
+equations, IOR per surface, and accounting for the medium the ray is
+currently traveling through.
+
+**Depth of field.** Aperture-based ray jittering at `camera_ray` time, with a
+focus distance on the camera. The existing `oversample` loop is the right
+place to integrate aperture sampling.
+
+**Text-based scene definition language.** Mentioned in the README. The
+current scene-definition style (Rust source, with `scene_objects!` and
+constructor functions) is already pretty close to a DSL; a parser that
+produces `Shape` values from text would slot in cleanly. The
+`impl Into<Shape>` ergonomics would not survive a parser, but `Shape::from`
++ `scene_objects!` over runtime data does.
+
+**Camera animation.** Now that `default_camera()` is a function returning a
+fresh `Camera`, varying its parameters per frame is one new function call.
+Render multiple frames, encode as video.
+
+**Refactor: `Scene::objects: Vec<Shape>` → `Scene::root: Shape`.** The scene
+is conceptually a top-level group; making it literally one would remove a
+small special case in the renderer (top-level fold vs. recursive Group case).
+Cosmetic, not load-bearing.
+
+## Build / dev notes
+
+- Edition: check `Cargo.toml`. The `#[macro_export]` + `use crate::macro;`
+  idiom requires Rust 2018 or later.
+- Dependencies: `image` for PNG output, `rayon` for parallelism. No math
+  crate — everything is hand-rolled on `[f64; 3]` arrays via `geometry.rs`.
+- This sandbox typically does not have `cargo` available, so cargo check /
+  build / run must be done on the user's machine. Past sessions have caught
+  compile issues by careful reading; verification is the user's job.
+- Branch naming convention: recent feature work has been merged onto
+  `ai-main`. The README mentions a `scene-definition-language` branch as
+  a future direction.
