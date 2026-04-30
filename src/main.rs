@@ -21,8 +21,10 @@ use scenes::{
     //scene_sphere_occlusion_test,
     //scene_sphere_surface_test,
     scene_cuboid_test,
-    scene_axis_spheres,
-    scene_one_sphere,
+    //scene_axis_spheres,
+    scene_multi_light_test,
+    //scene_one_sphere,
+    scene_transform_test,
     scene_ball_on_plane
 };
 
@@ -58,8 +60,10 @@ fn main() {
         //scene_sphere_occlusion_test(),
         //scene_sphere_surface_test(),
         scene_cuboid_test(),
-        scene_axis_spheres(),
-        scene_one_sphere(),
+        //scene_axis_spheres(),
+        scene_multi_light_test(),
+        //scene_one_sphere(),
+        scene_transform_test(),
         scene_ball_on_plane()
     ];
 
