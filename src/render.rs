@@ -49,6 +49,7 @@ use color::{
     LinearColor,
     scale_linear_color,
     add_linear_color,
+    multiply_linear_color,
     to_png_color,
 };
 
@@ -64,8 +65,32 @@ pub struct Surface {
     pub reflection: f64
 }
 
+/// A point light source. Carries an emitted color and a scalar intensity
+/// so that scenes can use multiple visually distinct lights for testing
+/// and artistic control. The current shading model is white-implicit
+/// when `color = [1.0, 1.0, 1.0]` and `intensity = 1.0`, so existing
+/// scenes can be ported by wrapping their location in `Light::white`.
 pub struct Light {
-    pub location: Point
+    pub location: Point,
+    pub color: LinearColor,
+    pub intensity: f64,
+}
+
+impl Light {
+    /// Full-intensity white point light at `location`. Equivalent to the
+    /// implicit light parameters in earlier versions of this codebase.
+    pub const fn white(location: Point) -> Light {
+        Light {
+            location,
+            color: [1.0, 1.0, 1.0],
+            intensity: 1.0,
+        }
+    }
+
+    /// Point light with an explicit color and intensity.
+    pub const fn point(location: Point, color: LinearColor, intensity: f64) -> Light {
+        Light { location, color, intensity }
+    }
 }
 
 /// Look-at camera in pre-computed form.
@@ -161,7 +186,7 @@ struct CameraDetails {
 pub struct Scene {
     pub name: &'static str,
     pub camera: Camera,
-    pub light: Light,
+    pub lights: Vec<Light>,
     pub objects: Vec<Shape>,
     pub background: LinearColor,
 
@@ -231,13 +256,13 @@ impl PartialEq for RayHit {
     }
 }
 
-fn light_vector(point: &Point, scene: &Scene) -> Option<Vector> {
-    let light_direction = subp(*point, scene.light.location);
+fn light_vector(point: &Point, scene: &Scene, light: &Light) -> Option<Vector> {
+    let light_direction = subp(*point, light.location);
 
     let light_distance = lenp(light_direction);
 
     let ray = Vector {
-        start: scene.light.location,
+        start: light.location,
         delta: normalizep(light_direction)
     };
 
@@ -280,16 +305,37 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) ->
         [0.0, 0.0, 0.0]
     };
 
-    let light: LinearColor = match light_vector(&hit.hit_point, scene) {
-        Some(lv) => {
-            let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0) as f64;
+    // Sum direct lighting contributions from every light in the scene
+    // that can see this surface point. Each visible light contributes
+    // a Phong specular highlight and a Lambertian diffuse term, both
+    // tinted by `light.color * light.intensity`. With one white,
+    // unit-intensity light this is identical to the earlier behavior;
+    // with multiple lights the contributions just add. Empty `lights`
+    // gives a pure ambient + reflection render, useful as a debug mode.
+    let mut light: LinearColor = [0.0, 0.0, 0.0];
+    for l in &scene.lights {
+        if let Some(lv) = light_vector(&hit.hit_point, scene, l) {
+            let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0);
+            let lambert = dotp(hit.normal, negp(lv.delta));
 
-            add_linear_color(&scale_linear_color(&[1.0, 1.0, 1.0], kspecular * hit.surface.specular),
-                             &scale_linear_color(&scolor, hit.surface.light * dotp(hit.normal, negp(lv.delta)) as f64))
+            // Per-light tint that scales every contribution by this
+            // light's color and intensity.
+            let light_tint = scale_linear_color(&l.color, l.intensity);
 
-        },
-        None => [0.0, 0.0, 0.0]
-    };
+            // Specular: highlight takes the color of the light.
+            let spec_term = scale_linear_color(&light_tint, kspecular * hit.surface.specular);
+
+            // Diffuse: surface color is modulated by light color
+            // (component-wise), then scaled by the Lambert factor and
+            // the surface's diffuse coefficient.
+            let diff_term = scale_linear_color(
+                &multiply_linear_color(&scolor, &light_tint),
+                hit.surface.light * lambert,
+            );
+
+            light = add_linear_color(&light, &add_linear_color(&spec_term, &diff_term));
+        }
+    }
 
     add_linear_color(&reflected, &add_linear_color(&ambient, &light))
 }

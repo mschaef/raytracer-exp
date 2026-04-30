@@ -126,9 +126,7 @@ pub fn scene_sphere_occlusion_test() -> Scene {
         name: "Occlusion Test",
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
-        light: Light {
-            location: [5.0, 5.0, 5.0]
-        },
+        lights: vec![Light::white([5.0, 5.0, 5.0])],
         objects: scene_objects![
             Sphere {
                 center: [1.5, 2.0, 0.0],
@@ -185,9 +183,7 @@ pub fn scene_sphere_surface_test() -> Scene {
         name: "Surface Finish Test",
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
-        light: Light {
-            location: [5.0, 5.0, 5.0]
-        },
+        lights: vec![Light::white([5.0, 5.0, 5.0])],
         objects: (0..25).map(| x | Shape::from(Sphere {
             center: [
                 0.0 + ((x % 5) - 2) as f64,
@@ -208,9 +204,7 @@ pub fn scene_one_sphere() -> Scene {
         name: "Single Sphere, Reflective Planes",
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
-        light: Light {
-            location: [10.0, 10.0, 10.0]
-        },
+        lights: vec![Light::white([10.0, 10.0, 10.0])],
         objects: scene_objects![
             Sphere {
                 center: [0.0, 0.0, 0.0],
@@ -245,9 +239,7 @@ pub fn scene_axis_spheres() -> Scene {
         name: "Axis Spheres",
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
-        light: Light {
-            location: [10.0, 10.0, 10.0]
-        },
+        lights: vec![Light::white([10.0, 10.0, 10.0])],
         objects: scene_objects![
             Sphere {
                 center: [0.0, 0.0, 0.0],
@@ -282,9 +274,7 @@ pub fn scene_cuboid_test() -> Scene {
         name: "Cuboid Test",
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
-        light: Light {
-            location: [10.0, 10.0, 10.0]
-        },
+        lights: vec![Light::white([10.0, 10.0, 10.0])],
         objects: scene_objects![
             // A tall narrow red box at the origin.
             Cuboid {
@@ -333,9 +323,7 @@ pub fn scene_group_test() -> Scene {
         name: "Group Test",
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
-        light: Light {
-            location: [10.0, 10.0, 10.0]
-        },
+        lights: vec![Light::white([10.0, 10.0, 10.0])],
         objects: scene_objects![
             // A "snowman": three stacked spheres treated as a single child
             // of the scene. `scene_objects!` builds a Vec<Shape> which
@@ -390,9 +378,7 @@ pub fn scene_transform_test() -> Scene {
         name: "Transform Test",
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
-        light: Light {
-            location: [10.0, 10.0, 10.0]
-        },
+        lights: vec![Light::white([10.0, 10.0, 10.0])],
         objects: scene_objects![
             // A unit cube translated to (3, 0, 0). Should look identical
             // to a Cuboid declared with center=[3,0,0] directly.
@@ -474,14 +460,63 @@ pub fn scene_transform_test() -> Scene {
 }
 
 #[allow(dead_code)]
+pub fn scene_multi_light_test() -> Scene {
+    // Two colored point lights flanking a white sphere. The center
+    // sphere should show a clear red-on-the-left, blue-on-the-right
+    // gradient with a magenta band where both lights reach. The smaller
+    // accent spheres confirm the contributions still sum correctly when
+    // multiple objects are present, and the ground catches color-tinted
+    // shadows from each light cast in opposite directions.
+    Scene {
+        name: "Multi-Light Test",
+        camera: default_camera(),
+        background: [0.0, 0.0, 0.0],
+        lights: vec![
+            // Red light coming from image-left, slightly behind the camera.
+            Light::point([-5.0, 5.0, 5.0], [1.0, 0.2, 0.2], 1.0),
+            // Blue light coming from image-right, lower intensity so the
+            // asymmetry between the two contributions is visible.
+            Light::point([ 5.0, 5.0, 5.0], [0.2, 0.4, 1.0], 0.7),
+        ],
+        objects: scene_objects![
+            // Central white sphere — picks up whatever color the lights
+            // throw at it without bias.
+            Sphere {
+                center: [0.0, 0.0, 0.0],
+                r: 1.0,
+                surface: SURFACE_WHITE
+            },
+            // Smaller accent spheres for visual reference and to confirm
+            // shadows from one occluder don't affect another.
+            Sphere {
+                center: [-2.5, 0.0, -0.5],
+                r: 0.4,
+                surface: SURFACE_WHITE
+            },
+            Sphere {
+                center: [ 2.5, 0.0, -0.5],
+                r: 0.4,
+                surface: SURFACE_WHITE
+            },
+            // Reflective checkered ground plane.
+            Plane {
+                normal: [0.0, 0.0, 1.0],
+                p0: [0.0, 0.0, -1.5],
+                surface: SURFACE_WHITE_C
+            },
+        ],
+        reflect_limit: REFLECT_LIMIT,
+        oversample: OVERSAMPLE,
+    }
+}
+
+#[allow(dead_code)]
 pub fn scene_ball_on_plane() -> Scene {
     Scene {
         name: "Ball on Plane",
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
-        light: Light {
-            location: [10.0, 10.0, 10.0]
-        },
+        lights: vec![Light::white([10.0, 10.0, 10.0])],
         objects: scene_objects![
             Sphere {
                 center: [0.0, -2.0, -1.0],

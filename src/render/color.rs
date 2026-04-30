@@ -26,6 +26,18 @@ pub fn add_linear_color(colora: &LinearColor, colorb: &LinearColor) -> LinearCol
     ]
 }
 
+/// Component-wise color multiplication. Used for modulating one color
+/// by another — e.g. tinting a surface's diffuse color by a light's
+/// emitted color. Distinct from `scale_linear_color`, which multiplies
+/// by a scalar.
+pub fn multiply_linear_color(colora: &LinearColor, colorb: &LinearColor) -> LinearColor {
+    [
+        colora[0] * colorb[0],
+        colora[1] * colorb[1],
+        colora[2] * colorb[2],
+    ]
+}
+
 fn linear_to_srgb(x: f64) -> f64 {
     if x < 0.0 {
         0.0

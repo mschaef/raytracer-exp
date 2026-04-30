@@ -201,6 +201,25 @@ Surface presets and the `surface_glossy` / `reflective` const fns live in
 `scenes.rs`. Common ones: `SURFACE_RED`, `SURFACE_GREEN`, …, `SURFACE_WHITE_C`
 (the reflective checkered ground used by most scenes).
 
+## Lights
+
+`Light { location, color, intensity }`. Point lights only (no directional /
+spotlight / area light variants yet). `color` is the emitted color; `intensity`
+is a scalar multiplier. The two are conceptually distinct knobs even though
+their numerical effect overlaps — color is hue, intensity is brightness.
+Convenience constructors: `Light::white(location)` for full-intensity white
+(matches the legacy implicit defaults), `Light::point(location, color,
+intensity)` for the general case.
+
+`Scene::lights: Vec<Light>` is a list, summed in `shade_pixel`. Each visible
+light contributes a Phong specular highlight and a Lambertian diffuse term,
+both multiplied by `light.color * light.intensity`. The diffuse term has the
+surface color modulated component-wise by the light tint; the specular term
+takes on the pure light color (i.e. a red light produces a red highlight on
+any surface, regardless of body color, which is physically right for
+microfacet specularity). Empty `lights: vec![]` yields ambient + reflection
+only — useful as a debug mode.
+
 ## Recent work history
 
 Approximate order of recent commits, oldest first:
@@ -246,6 +265,18 @@ Approximate order of recent commits, oldest first:
    dependency now lives only inside `output.rs`. Streaming output (e.g. to
    a windowed UI) plugs in by implementing `RenderTarget` over a channel
    or socket; no renderer changes needed.
+
+7. **Multiple lights with color and intensity.** `Scene::light: Light` was
+   replaced with `Scene::lights: Vec<Light>`. The `Light` struct gained
+   `color: LinearColor` and `intensity: f64` fields, with `Light::white(loc)`
+   and `Light::point(loc, color, intensity)` const-fn constructors so
+   existing scenes can stay one-line. `shade_pixel` now loops over visible
+   lights and sums their contributions; `light_vector` takes a `&Light`
+   parameter instead of pulling from `scene.light`. Added
+   `multiply_linear_color` to `color.rs` for component-wise color
+   modulation. New `scene_multi_light_test` puts a red and a blue light
+   on opposite sides of a white sphere as a visual smoke test for the
+   summed-contribution and shadow-tinting math.
 
 ## Pitfalls and conventions
 
@@ -311,9 +342,20 @@ local optimization.
 gateway to importing actual 3D models. Each is a struct + `Hittable` impl + a
 new `Shape` variant + `From` impl + match arm.
 
-**Multiple lights per scene.** Currently `Scene::light: Light` is a single
-point. Generalizing to `Vec<Light>` is straightforward; `shade_pixel` and
-`light_vector` would loop over them and sum contributions.
+**Shadow-ray "any-hit" optimization.** `light_vector` currently uses
+`nearest_hit` to test occlusion, but a shadow ray only needs to know
+*whether* something is in the way, not what's nearest. Splitting the helper
+into an `any_hit` variant that early-exits on the first occluder would
+speed up shadow tests substantially, especially in scenes with many lights
+or many objects. Independent of any other work; cleanly self-contained.
+
+**Light types beyond point.** `Light` is currently a single struct. To
+add directional lights (parallel rays from infinity, like the sun),
+spotlights (cones), or area lights (sampled emitters for soft shadows),
+turn `Light` into an enum following the same pattern as `Shape`. Each
+variant gets its own `light_vector` arm; the rest of the pipeline doesn't
+change. Area lights specifically open the door to soft shadows and
+require multiple shadow-ray samples per shading point.
 
 **Refraction / transparency.** Substantially more involved — requires Fresnel
 equations, IOR per surface, and accounting for the medium the ray is
