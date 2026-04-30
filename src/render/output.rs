@@ -180,3 +180,113 @@ impl<'a, T: RenderTarget + ?Sized + 'a> RenderTarget for ProgressTarget<'a, T> {
         self.inner.finish();
     }
 }
+
+/// Where per-pixel timing data goes when a heat-map render is requested.
+///
+/// Parallel to `RenderTarget` but separate: the renderer can run with no
+/// heatmap (zero overhead), with one, or — eventually — with multiple
+/// kinds of diagnostic targets without the pixel target needing to know.
+///
+/// Times are passed as `u32` nanoseconds. A pixel that takes longer than
+/// `u32::MAX` ns (~4.29 s) saturates at `u32::MAX` rather than wrapping;
+/// the renderer uses `try_from` for the cast so a runaway pixel still
+/// shows up as the brightest possible value rather than silently aliasing
+/// to a small one.
+pub trait HeatmapTarget: Send + Sync {
+    /// Hand a finished row of per-pixel timings to the target. Coordinates
+    /// follow the same convention as `RenderTarget::submit_row`.
+    fn submit_timing_row(&self, x: u32, y: u32, timings_ns: &[u32]);
+
+    /// Called once by `render()` after every timing row has been submitted.
+    /// Default no-op; PNG-on-disk heatmap targets ignore it because saving
+    /// is an explicit user action.
+    fn finish(&self) {}
+}
+
+/// Heatmap target backed by an in-memory buffer of per-pixel timings.
+/// Stores `u32` nanoseconds per pixel — 4 bytes per pixel, so a 2048²
+/// render uses 16 MB of timing data, comparable to one channel of a
+/// rendered PNG.
+///
+/// `save(path)` finds the maximum across the whole buffer, normalizes
+/// linearly into `[0, 255]`, and writes a single-channel grayscale PNG
+/// where black = fastest pixel and white = slowest. Linear normalization
+/// is the simplest mapping; for pathological scenes where a few
+/// expensive pixels swamp the rest, log-scaling or percentile clamping
+/// would compress the bright end. Easy enhancement to add later.
+pub struct PngHeatmapTarget {
+    buffer: Mutex<Vec<u32>>,
+    width: u32,
+    height: u32,
+}
+
+impl PngHeatmapTarget {
+    pub fn new(width: u32, height: u32) -> Self {
+        let n = (width as usize) * (height as usize);
+        PngHeatmapTarget {
+            buffer: Mutex::new(vec![0u32; n]),
+            width,
+            height,
+        }
+    }
+
+    /// Save the accumulated timing buffer as a grayscale PNG. Consumes
+    /// the target.
+    pub fn save(self, path: impl AsRef<Path>) -> ImageResult<()> {
+        let buffer = self.buffer.into_inner().unwrap();
+
+        // Max for normalization. Guard against an all-zero buffer (e.g.
+        // a render that never emitted any timings) so we don't divide
+        // by zero — every pixel ends up black in that case, which is
+        // the right answer.
+        let max = *buffer.iter().max().unwrap_or(&0);
+        let max = max.max(1);
+
+        let mut img = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::new(
+            self.width, self.height,
+        );
+
+        for (i, &t) in buffer.iter().enumerate() {
+            // `t * 255 / max` in u64 to avoid u32 overflow on the multiply.
+            let v = ((t as u64) * 255 / (max as u64)) as u8;
+            let x = (i as u32) % self.width;
+            let y = (i as u32) / self.width;
+            img.put_pixel(x, y, image::Luma([v]));
+        }
+
+        img.save(path)
+    }
+}
+
+impl HeatmapTarget for PngHeatmapTarget {
+    fn submit_timing_row(&self, x: u32, y: u32, timings_ns: &[u32]) {
+        let mut buf = self.buffer.lock().unwrap();
+        let row_start = (y as usize) * (self.width as usize) + (x as usize);
+        // Single slice copy per row — same cost characteristics as
+        // PngTarget's row write, just to a different backing buffer.
+        buf[row_start..row_start + timings_ns.len()].copy_from_slice(timings_ns);
+    }
+}
+
+/// Wraps a `HeatmapTarget` and offsets every submitted row's coordinates
+/// by `(dx, dy)`. Same role and same convention as `OffsetTarget` (the
+/// `RenderTarget` analogue): does not propagate `finish()` to the inner
+/// target, since multiple offset wrappers commonly share one inner.
+pub struct OffsetHeatmapTarget<'a, H: HeatmapTarget + ?Sized + 'a> {
+    inner: &'a H,
+    dx: u32,
+    dy: u32,
+}
+
+impl<'a, H: HeatmapTarget + ?Sized + 'a> OffsetHeatmapTarget<'a, H> {
+    pub fn new(inner: &'a H, dx: u32, dy: u32) -> Self {
+        OffsetHeatmapTarget { inner, dx, dy }
+    }
+}
+
+impl<'a, H: HeatmapTarget + ?Sized + 'a> HeatmapTarget for OffsetHeatmapTarget<'a, H> {
+    fn submit_timing_row(&self, x: u32, y: u32, timings_ns: &[u32]) {
+        self.inner.submit_timing_row(x + self.dx, y + self.dy, timings_ns);
+    }
+    // finish() intentionally not propagated — see struct doc.
+}

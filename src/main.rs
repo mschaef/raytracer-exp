@@ -15,7 +15,15 @@ mod render;
 mod scenes;
 
 use render::{render, Scene};
-use render::output::{PngTarget, OffsetTarget, ProgressTarget, RenderTarget};
+use render::output::{
+    PngTarget,
+    OffsetTarget,
+    ProgressTarget,
+    RenderTarget,
+    HeatmapTarget,
+    PngHeatmapTarget,
+    OffsetHeatmapTarget,
+};
 
 use scenes::{
     //scene_sphere_occlusion_test,
@@ -37,7 +45,9 @@ fn is_parallel() -> bool {
 }
 
 fn render_into<T: RenderTarget + ?Sized>(
-    target: &T, scene: &Scene, sx: u32, sy: u32,
+    target: &T,
+    heatmap: Option<&dyn HeatmapTarget>,
+    scene: &Scene, sx: u32, sy: u32,
 ) {
     let parallel = is_parallel();
 
@@ -48,7 +58,7 @@ fn render_into<T: RenderTarget + ?Sized>(
     let progress = ProgressTarget::new(target, sy, scene.name);
 
     let start = Instant::now();
-    render(scene, sx, sy, &progress, parallel);
+    render(scene, sx, sy, &progress, heatmap, parallel);
     let duration = start.elapsed();
 
     println!("Time elapsed in {} is: {:?} (parallel: {})", scene.name, duration, parallel);
@@ -63,6 +73,13 @@ fn main() {
     // no intermediate sub-buffers are allocated.
     let target = PngTarget::new(imgdim, imgdim);
 
+    // Parallel heatmap target: same shape as the pixel target, accumulating
+    // per-pixel render times in nanoseconds. Saved as a separate
+    // single-channel PNG (`render-heatmap.png`) at the end. The renderer
+    // currently always populates this; if heatmap collection ever needs to
+    // be opt-in, swap `Some(&heatmap_offset)` for `None` in the calls below.
+    let heatmap = PngHeatmapTarget::new(imgdim, imgdim);
+
     let scene = [
         //scene_sphere_occlusion_test(),
         //scene_sphere_surface_test(),
@@ -75,10 +92,26 @@ fn main() {
         scene_teapot()
     ];
 
-    render_into(&OffsetTarget::new(&target, 0,    0   ), &scene[0], half, half);
-    render_into(&OffsetTarget::new(&target, half, 0   ), &scene[1], half, half);
-    render_into(&OffsetTarget::new(&target, 0,    half), &scene[2], half, half);
-    render_into(&OffsetTarget::new(&target, half, half), &scene[3], half, half);
+    render_into(
+        &OffsetTarget::new(&target, 0, 0),
+        Some(&OffsetHeatmapTarget::new(&heatmap, 0, 0)),
+        &scene[0], half, half,
+    );
+    render_into(
+        &OffsetTarget::new(&target, half, 0),
+        Some(&OffsetHeatmapTarget::new(&heatmap, half, 0)),
+        &scene[1], half, half,
+    );
+    render_into(
+        &OffsetTarget::new(&target, 0, half),
+        Some(&OffsetHeatmapTarget::new(&heatmap, 0, half)),
+        &scene[2], half, half,
+    );
+    render_into(
+        &OffsetTarget::new(&target, half, half),
+        Some(&OffsetHeatmapTarget::new(&heatmap, half, half)),
+        &scene[3], half, half,
+    );
 
     // Crosshair lines between quadrants. PngTarget exposes put_pixel for
     // exactly this kind of compositing operation that doesn't fit the
@@ -89,4 +122,5 @@ fn main() {
     }
 
     target.save("render.png").unwrap();
+    heatmap.save("render-heatmap.png").unwrap();
 }

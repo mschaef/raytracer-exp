@@ -46,9 +46,12 @@ src/
                          meshes integrate with the rest of the scene tree
                          without any special-casing.
     render/output.rs     The `RenderTarget` trait plus the `PngTarget`,
-                         `OffsetTarget`, and `ProgressTarget` impls. The
+                         `OffsetTarget`, and `ProgressTarget` impls, AND
+                         the parallel `HeatmapTarget` trait with
+                         `PngHeatmapTarget` and `OffsetHeatmapTarget`. The
                          renderer pushes finished rows into a target rather
-                         than returning an image; `image` crate use is
+                         than returning an image, and (optionally) per-pixel
+                         timings into a heatmap target; `image` crate use is
                          fully encapsulated here.
 
   scenes.rs            Hand-written scene definitions, surface presets,
@@ -316,6 +319,25 @@ Approximate order of recent commits, oldest first:
    multiple offsets share one inner). `main.rs::render_into` now
    constructs a `ProgressTarget` per scene with `scene.name` as the
    label.
+
+10. **Per-pixel render-time heatmap.** Second observability piece. New
+    `HeatmapTarget` trait alongside `RenderTarget`, with `PngHeatmapTarget`
+    (Mutex-protected `Vec<u32>` of nanoseconds per pixel; `save(path)`
+    finds max, normalizes linearly, writes a single-channel grayscale
+    PNG) and `OffsetHeatmapTarget` (same role and convention as
+    `OffsetTarget` — does not propagate `finish()` because multiple
+    offsets share one inner). `render()` gained an
+    `Option<&dyn HeatmapTarget>` parameter; when `Some`, it brackets
+    each `pixel_color` call with `Instant::now()` and submits per-row
+    timing arrays. Pixels exceeding `u32::MAX` ns saturate via
+    `try_from` rather than wrapping silently. The disabled
+    (`heatmap = None`) path branches outside the per-pixel loop so the
+    no-heatmap case has zero per-pixel overhead — same machine code as
+    before this feature existed. `main.rs` now creates a
+    `PngHeatmapTarget` alongside the `PngTarget` and saves the
+    accompanying file as `render-heatmap.png`. Color mapping is linear
+    grayscale today; log-scale or percentile-clamping would compress
+    the bright end if outliers wash everything out.
 
 ## Pitfalls and conventions
 

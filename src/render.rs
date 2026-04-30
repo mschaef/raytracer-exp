@@ -15,8 +15,11 @@ pub mod shapes;
 pub mod mesh;
 pub mod output;
 
+use std::convert::TryFrom;
+use std::time::Instant;
+
 use shapes::{Shape, nearest_hit};
-use output::RenderTarget;
+use output::{RenderTarget, HeatmapTarget};
 
 use rayon::prelude::*;
 
@@ -378,32 +381,64 @@ fn pixel_color(
 
 fn render_one_row<T: RenderTarget + ?Sized>(
     target: &T,
+    heatmap: Option<&dyn HeatmapTarget>,
     camera: &CameraDetails,
     scene: &Scene,
     imgx: u32,
     y: u32,
 ) {
     let mut row = vec![[0u8; 3]; imgx as usize];
-    for x in 0..imgx {
-        let pc = pixel_color(camera, scene, x, y);
-        row[x as usize] = to_png_color(&pc);
+
+    // Branch outside the per-pixel loop so the heatmap-disabled case
+    // compiles to the same machine code as before this feature existed
+    // — no Instant::now calls, no per-pixel allocation, no extra
+    // bookkeeping. The hot path stays hot when the user isn't asking
+    // for a heat map.
+    if let Some(h) = heatmap {
+        let mut timings = vec![0u32; imgx as usize];
+        for x in 0..imgx {
+            let start = Instant::now();
+            let pc = pixel_color(camera, scene, x, y);
+            // Saturate at u32::MAX nanoseconds (~4.29 s) rather than
+            // wrapping silently. A pixel that takes longer than that
+            // shows up as "max-bright" on the heat map, which is
+            // accurate; wrapping would alias it to a small value and
+            // misreport an outlier as a fast pixel.
+            let elapsed_ns = start.elapsed().as_nanos();
+            timings[x as usize] = u32::try_from(elapsed_ns).unwrap_or(u32::MAX);
+            row[x as usize] = to_png_color(&pc);
+        }
+        target.submit_row(0, y, &row);
+        h.submit_timing_row(0, y, &timings);
+    } else {
+        for x in 0..imgx {
+            let pc = pixel_color(camera, scene, x, y);
+            row[x as usize] = to_png_color(&pc);
+        }
+        target.submit_row(0, y, &row);
     }
-    target.submit_row(0, y, &row);
 }
 
 /// Render `scene` at resolution `imgx`×`imgy`, pushing finished pixel rows
 /// into `target`. The renderer no longer allocates an image of its own —
 /// where pixels go and what becomes of them is the target's concern.
 ///
+/// If `heatmap` is `Some(_)`, the renderer additionally measures the wall
+/// time of each `pixel_color` call and submits per-pixel timings as `u32`
+/// nanoseconds to the heatmap target. With `heatmap = None` there is zero
+/// per-pixel overhead — no `Instant::now` calls, no extra allocation, and
+/// no extra branching in the hot loop.
+///
 /// Under `parallel = true`, rows are computed across Rayon's thread pool;
 /// `target.submit_row` will be called concurrently from multiple threads
-/// (in unspecified order). The trait's `Send + Sync` bound is what makes
-/// this safe.
+/// (in unspecified order). The traits' `Send + Sync` bounds are what
+/// make this safe.
 pub fn render<T: RenderTarget + ?Sized>(
     scene: &Scene,
     imgx: u32,
     imgy: u32,
     target: &T,
+    heatmap: Option<&dyn HeatmapTarget>,
     parallel: bool,
 ) {
     let camera = CameraDetails {
@@ -416,11 +451,11 @@ pub fn render<T: RenderTarget + ?Sized>(
 
     if parallel {
         (0..imgy).into_par_iter().for_each(
-            | y | render_one_row(target, &camera, scene, imgx, y)
+            | y | render_one_row(target, heatmap, &camera, scene, imgx, y)
         );
     } else {
         (0..imgy).for_each(
-            | y | render_one_row(target, &camera, scene, imgx, y)
+            | y | render_one_row(target, heatmap, &camera, scene, imgx, y)
         );
     }
 
@@ -428,5 +463,8 @@ pub fn render<T: RenderTarget + ?Sized>(
     // ProgressTarget uses this to emit a final newline, future
     // streaming targets will use it to send a "done" message, etc.
     target.finish();
+    if let Some(h) = heatmap {
+        h.finish();
+    }
 }
 
