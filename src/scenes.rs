@@ -34,6 +34,8 @@ use crate::render::shapes::{
     rotate_z,
 };
 
+use crate::render::mesh::load_obj;
+
 const REFLECT_LIMIT: u32 = 2;
 const OVERSAMPLE: u32 = 2;
 
@@ -504,6 +506,46 @@ pub fn scene_multi_light_test() -> Scene {
                 p0: [0.0, 0.0, -1.5],
                 surface: SURFACE_WHITE_C
             },
+        ],
+        reflect_limit: REFLECT_LIMIT,
+        oversample: OVERSAMPLE,
+    }
+}
+
+#[allow(dead_code)]
+pub fn scene_teapot() -> Scene {
+    // Loads `models/teapot.obj` from the working directory and renders
+    // it as a transformed mesh. The teapot is the classic raytracer
+    // test model — a few thousand triangles with curved surfaces, so
+    // the smooth-shading vertex-normal interpolation is visually
+    // obvious if it's working.
+    //
+    // Without a BVH this is going to render slowly: the teapot has on
+    // the order of 6000 triangles and `nearest_hit` is currently O(n).
+    // Acceptable as a correctness check while we work toward acceleration.
+    //
+    // The OBJ file is not committed to the repo. Download a Utah teapot
+    // OBJ (e.g. from Morgan McGuire's archive or any public model
+    // collection) and place it at `models/teapot.obj`. The translate
+    // and scale below are tuned for a teapot that's roughly 3 units
+    // tall in its native coordinate space; adjust as needed for whatever
+    // OBJ you drop in.
+    Scene {
+        name: "Utah Teapot",
+        camera: default_camera(),
+        background: [0.0, 0.0, 0.0],
+        lights: vec![Light::white([10.0, 10.0, 10.0])],
+        objects: scene_objects![
+            // Reflective checkered ground.
+            Plane {
+                normal: [0.0, 0.0, 1.0],
+                p0: [0.0, 0.0, -2.0],
+                surface: SURFACE_WHITE_C
+            },
+            // Loaded mesh, scaled and positioned to sit on the ground.
+            translate([0.0, 0.0, -2.0],
+                scale([0.5, 0.5, 0.5],
+                    load_obj("models/utah_teapot.obj", SURFACE_BLUE))),
         ],
         reflect_limit: REFLECT_LIMIT,
         oversample: OVERSAMPLE,

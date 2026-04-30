@@ -12,6 +12,7 @@ pub mod geometry;
 pub mod color;
 pub mod transform;
 pub mod shapes;
+pub mod mesh;
 pub mod output;
 
 use shapes::{Shape, nearest_hit};

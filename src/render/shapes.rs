@@ -16,6 +16,7 @@ use crate::render::{
     RayHit,
     subp,
     dotp,
+    crossp,
     ray_location,
     normalizep,
     EPSILON,
@@ -46,6 +47,17 @@ pub struct Cuboid {
     pub surface: Surface,
 }
 
+/// One triangle of a mesh. Carries three vertices and three per-vertex
+/// normals (which may all be the same in the flat-shading case if the
+/// source mesh didn't supply per-vertex normals). Surface is per-triangle
+/// here; mesh loaders typically clone one surface across every triangle
+/// in a mesh, but the representation supports per-triangle materials too.
+pub struct Triangle {
+    pub vertices: [Point; 3],
+    pub normals: [Point; 3],
+    pub surface: Surface,
+}
+
 /// Closed enumeration of all shape primitives the renderer knows how to
 /// hit-test. Stored inline in `Scene::objects` (no boxing, no vtable).
 ///
@@ -66,6 +78,7 @@ pub enum Shape {
     Sphere(Sphere),
     Plane(Plane),
     Cuboid(Cuboid),
+    Triangle(Triangle),
     Group(Vec<Shape>),
     Transform(Box<Transformed>),
 }
@@ -98,12 +111,17 @@ impl From<Cuboid> for Shape {
     fn from(c: Cuboid) -> Self { Shape::Cuboid(c) }
 }
 
+impl From<Triangle> for Shape {
+    fn from(t: Triangle) -> Self { Shape::Triangle(t) }
+}
+
 impl Hittable for Shape {
     fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
         match self {
             Shape::Sphere(s)        => s.hit_test(ray),
             Shape::Plane(p)         => p.hit_test(ray),
             Shape::Cuboid(c)        => c.hit_test(ray),
+            Shape::Triangle(t)      => t.hit_test(ray),
             Shape::Group(children)  => nearest_hit(ray, children),
             Shape::Transform(t)     => t.hit_test(ray),
         }
@@ -141,6 +159,74 @@ impl Transformed {
                 normal: world_normal,
                 surface: hit.surface,
             }
+        })
+    }
+}
+
+impl Hittable for Triangle {
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        // Möller–Trumbore ray-triangle intersection.
+        // Returns the parametric t plus barycentric coordinates (u, v) of
+        // the hit. The third barycentric (w = 1 - u - v) corresponds to
+        // vertex 0; u corresponds to vertex 1; v corresponds to vertex 2.
+        // Per-vertex normals are interpolated by these weights to give
+        // smooth shading; for flat-shaded triangles all three vertex
+        // normals are equal so the interpolation is a no-op.
+
+        let v0 = self.vertices[0];
+        let v1 = self.vertices[1];
+        let v2 = self.vertices[2];
+
+        let edge1 = subp(v1, v0);
+        let edge2 = subp(v2, v0);
+
+        let h = crossp(ray.delta, edge2);
+        let a = dotp(edge1, h);
+
+        // Ray (nearly) parallel to triangle plane.
+        if a.abs() < EPSILON {
+            return None;
+        }
+
+        let f = 1.0 / a;
+        let s = subp(ray.start, v0);
+        let u = f * dotp(s, h);
+
+        if u < 0.0 || u > 1.0 {
+            return None;
+        }
+
+        let q = crossp(s, edge1);
+        let v = f * dotp(ray.delta, q);
+
+        if v < 0.0 || u + v > 1.0 {
+            return None;
+        }
+
+        let t = f * dotp(edge2, q);
+
+        // Hit must be in front of the ray origin (and not coincident with
+        // it, for self-intersection avoidance on shadow / reflection rays).
+        if t <= EPSILON {
+            return None;
+        }
+
+        // Interpolate per-vertex normals using barycentric weights.
+        let w = 1.0 - u - v;
+        let n0 = self.normals[0];
+        let n1 = self.normals[1];
+        let n2 = self.normals[2];
+        let normal = normalizep([
+            w * n0[0] + u * n1[0] + v * n2[0],
+            w * n0[1] + u * n1[1] + v * n2[1],
+            w * n0[2] + u * n1[2] + v * n2[2],
+        ]);
+
+        Some(RayHit {
+            distance: t,
+            hit_point: ray_location(ray, t),
+            normal,
+            surface: self.surface,
         })
     }
 }

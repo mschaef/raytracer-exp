@@ -41,6 +41,10 @@ src/
                          rotation_x/y/z, rotation_axis. Plus compose, inverse,
                          transform_point, transform_vector.
     render/shapes.rs     The Shape enum and everything related. See below.
+    render/mesh.rs       Wavefront OBJ loader (`load_obj`). Returns a
+                         `Shape::Group` of `Shape::Triangle`s, so loaded
+                         meshes integrate with the rest of the scene tree
+                         without any special-casing.
     render/output.rs     The `RenderTarget` trait plus the `PngTarget` and
                          `OffsetTarget` impls. The renderer pushes finished
                          rows into a target rather than returning an image;
@@ -61,6 +65,7 @@ pub enum Shape {
     Sphere(Sphere),
     Plane(Plane),
     Cuboid(Cuboid),                    // axis-aligned box, slab method
+    Triangle(Triangle),                // Möller–Trumbore, smooth normals
     Group(Vec<Shape>),                 // hierarchical container
     Transform(Box<Transformed>),       // affine-transformed subtree
 }
@@ -68,9 +73,12 @@ pub enum Shape {
 
 `Hittable for Shape` is a single match dispatching to per-variant logic.
 `Sphere`/`Plane`/`Cuboid` implement `Hittable` with the standard analytic ray
-tests. `Group::hit_test` is `nearest_hit(ray, &children)` — same fold the
-top-level scene traversal uses, so flat scenes and arbitrarily-nested groups
-share the exact same hit-testing path.
+tests. `Triangle` uses Möller–Trumbore and interpolates per-vertex normals
+via the barycentric coordinates returned by the test (smooth shading falls
+out for free; flat shading is the same algorithm with all three vertex
+normals equal). `Group::hit_test` is `nearest_hit(ray, &children)` — same
+fold the top-level scene traversal uses, so flat scenes and arbitrarily-nested
+groups share the exact same hit-testing path.
 
 The `Transformed` struct caches the inverse affine and a precomputed
 inverse-transpose `Mat3` for normal transformation. Its hit_test:
@@ -278,6 +286,21 @@ Approximate order of recent commits, oldest first:
    on opposite sides of a white sphere as a visual smoke test for the
    summed-contribution and shadow-tinting math.
 
+8. **Triangle primitive and OBJ mesh loading.** Added `Triangle` as a
+   `Shape` variant with three vertices, three per-vertex normals, and a
+   surface. Hit test is Möller–Trumbore; barycentric weights from the
+   intersection are reused to interpolate per-vertex normals (smooth
+   shading). New `render/mesh.rs` module exports `load_obj(path, surface)`
+   which uses the `tobj` crate to parse a Wavefront OBJ file and produces
+   a `Shape::Group` of `Shape::Triangle`s. Polygon faces are
+   fan-triangulated by tobj; OBJs without per-vertex normals get
+   geometric face normals computed at load time (flat shading). Loading
+   panics on I/O or parse error — scene definition is part of program
+   startup, so a missing model is a fatal config error. Will revisit
+   error handling when the scene DSL lands. New `scene_teapot` loads
+   `models/teapot.obj`. Note that without a BVH this will be slow:
+   `nearest_hit` is O(n) and the teapot is ~6000 triangles.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -338,9 +361,14 @@ down. `transform()` could peek at its child and, if it's already a
 `Shape::Transform`, multiply the inverse affines and skip a level. Trivial
 local optimization.
 
-**More primitives.** Cylinder, cone, torus, triangle / mesh. Triangle is the
-gateway to importing actual 3D models. Each is a struct + `Hittable` impl + a
-new `Shape` variant + `From` impl + match arm.
+**More primitives.** Cylinder, cone, torus. Triangle is already in.
+Each new primitive is a struct + `Hittable` impl + a new `Shape` variant
++ `From` impl + match arm.
+
+**More mesh formats.** PLY would be a clean addition (fits academic
+test models like the Stanford bunny); the loader interface is already
+shaped right — add a `load_ply` to `mesh.rs` that returns `Shape` the
+same way `load_obj` does.
 
 **Shadow-ray "any-hit" optimization.** `light_vector` currently uses
 `nearest_hit` to test occlusion, but a shadow ray only needs to know

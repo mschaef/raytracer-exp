@@ -25,7 +25,8 @@ use scenes::{
     scene_multi_light_test,
     //scene_one_sphere,
     scene_transform_test,
-    scene_ball_on_plane
+    //scene_ball_on_plane
+    scene_teapot
 };
 
 fn is_parallel() -> bool {
@@ -64,7 +65,8 @@ fn main() {
         scene_multi_light_test(),
         //scene_one_sphere(),
         scene_transform_test(),
-        scene_ball_on_plane()
+        //scene_ball_on_plane()
+        scene_teapot()
     ];
 
     render_into(&OffsetTarget::new(&target, 0,    0   ), &scene[0], half, half);
