@@ -423,5 +423,10 @@ pub fn render<T: RenderTarget + ?Sized>(
             | y | render_one_row(target, &camera, scene, imgx, y)
         );
     }
+
+    // Signal end-of-render to the target. Default impl is a no-op;
+    // ProgressTarget uses this to emit a final newline, future
+    // streaming targets will use it to send a "done" message, etc.
+    target.finish();
 }
 

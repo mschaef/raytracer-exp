@@ -15,7 +15,7 @@ mod render;
 mod scenes;
 
 use render::{render, Scene};
-use render::output::{PngTarget, OffsetTarget, RenderTarget};
+use render::output::{PngTarget, OffsetTarget, ProgressTarget, RenderTarget};
 
 use scenes::{
     //scene_sphere_occlusion_test,
@@ -41,8 +41,14 @@ fn render_into<T: RenderTarget + ?Sized>(
 ) {
     let parallel = is_parallel();
 
+    // Wrap the destination in a ProgressTarget so the user sees live
+    // row-completion updates while the render is in flight. The wrapper
+    // forwards every submit_row to the underlying target unchanged and
+    // emits a closing newline via finish() (called by render() at end).
+    let progress = ProgressTarget::new(target, sy, scene.name);
+
     let start = Instant::now();
-    render(scene, sx, sy, target, parallel);
+    render(scene, sx, sy, &progress, parallel);
     let duration = start.elapsed();
 
     println!("Time elapsed in {} is: {:?} (parallel: {})", scene.name, duration, parallel);

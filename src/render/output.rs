@@ -23,8 +23,10 @@
 
 extern crate image;
 
+use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use image::ImageResult;
 
@@ -42,9 +44,12 @@ pub trait RenderTarget: Send + Sync {
     /// in any order.
     fn submit_row(&self, x: u32, y: u32, row: &[[u8; 3]]);
 
-    /// Optional end-of-render hook. Default no-op. Streaming targets can
-    /// override this to send a "render complete" signal; PNG targets
-    /// don't need it because saving is an explicit user action.
+    /// Called once by `render()` after every row has been submitted.
+    /// Default no-op. Streaming targets override this to send a
+    /// "render complete" signal; `ProgressTarget` uses it to emit a
+    /// final newline so subsequent stdout/stderr output starts cleanly.
+    /// PNG-on-disk targets ignore it because saving is an explicit
+    /// user action.
     fn finish(&self) {}
 }
 
@@ -116,4 +121,62 @@ impl<'a, T: RenderTarget + ?Sized + 'a> RenderTarget for OffsetTarget<'a, T> {
         self.inner.submit_row(x + self.dx, y + self.dy, row);
     }
     // finish() intentionally not propagated — see struct doc.
+}
+
+/// Wraps another `RenderTarget` and prints in-place progress to stderr
+/// as rows complete. Forwards every `submit_row` to the inner target,
+/// then increments a row counter and rewrites the progress line via
+/// carriage-return overwrite. `finish()` emits a closing newline so
+/// subsequent output starts cleanly.
+///
+/// The print is serialized via `stderr().lock()` so output from
+/// concurrent worker threads doesn't interleave. Lock contention is
+/// negligible: even at thousands of rows per render the lock is held
+/// for microseconds at a time, and the rendering work that surrounds
+/// each call dominates by orders of magnitude.
+///
+/// `finish()` propagates to the inner target so that wrapping a
+/// streaming target with progress reporting still gets the underlying
+/// "done" signal delivered. (`OffsetTarget` is the asymmetric case —
+/// it does not propagate because multiple offsets typically share one
+/// underlying target.)
+pub struct ProgressTarget<'a, T: RenderTarget + ?Sized + 'a> {
+    inner: &'a T,
+    total_rows: u32,
+    completed: AtomicU32,
+    label: &'a str,
+}
+
+impl<'a, T: RenderTarget + ?Sized + 'a> ProgressTarget<'a, T> {
+    pub fn new(inner: &'a T, total_rows: u32, label: &'a str) -> Self {
+        ProgressTarget {
+            inner,
+            total_rows,
+            completed: AtomicU32::new(0),
+            label,
+        }
+    }
+}
+
+impl<'a, T: RenderTarget + ?Sized + 'a> RenderTarget for ProgressTarget<'a, T> {
+    fn submit_row(&self, x: u32, y: u32, row: &[[u8; 3]]) {
+        self.inner.submit_row(x, y, row);
+
+        let n = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
+
+        let stderr = std::io::stderr();
+        let mut handle = stderr.lock();
+        // Trailing space pads over any previous longer line under \r.
+        let _ = write!(handle, "\r  {}: {}/{} rows ", self.label, n, self.total_rows);
+        let _ = handle.flush();
+    }
+
+    fn finish(&self) {
+        // Newline so the next println from the application starts on
+        // its own line rather than overwriting the progress text.
+        eprintln!();
+        // Propagate so the inner target's own end-of-render hook fires
+        // (e.g. a streaming target sending "Done").
+        self.inner.finish();
+    }
 }

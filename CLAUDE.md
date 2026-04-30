@@ -45,10 +45,11 @@ src/
                          `Shape::Group` of `Shape::Triangle`s, so loaded
                          meshes integrate with the rest of the scene tree
                          without any special-casing.
-    render/output.rs     The `RenderTarget` trait plus the `PngTarget` and
-                         `OffsetTarget` impls. The renderer pushes finished
-                         rows into a target rather than returning an image;
-                         `image` crate use is fully encapsulated here.
+    render/output.rs     The `RenderTarget` trait plus the `PngTarget`,
+                         `OffsetTarget`, and `ProgressTarget` impls. The
+                         renderer pushes finished rows into a target rather
+                         than returning an image; `image` crate use is
+                         fully encapsulated here.
 
   scenes.rs            Hand-written scene definitions, surface presets,
                        and default_camera(). Each scene is a `pub fn` returning
@@ -300,6 +301,21 @@ Approximate order of recent commits, oldest first:
    error handling when the scene DSL lands. New `scene_teapot` loads
    `models/teapot.obj`. Note that without a BVH this will be slow:
    `nearest_hit` is O(n) and the teapot is ~6000 triangles.
+
+9. **Live progress reporting.** First step of an observability program
+   intended to inform performance work. New `ProgressTarget` in
+   `output.rs` wraps another `RenderTarget` and prints
+   `"  {label}: {n}/{total} rows"` to stderr with `\r` for in-place
+   updates as rows complete. Print is serialized via `stderr().lock()`
+   to keep concurrent worker output from interleaving. Renderer now
+   calls `target.finish()` at the end of `render()`; `ProgressTarget`'s
+   override emits a closing newline so the subsequent "Time elapsed"
+   line lands cleanly. `ProgressTarget` propagates `finish()` to the
+   inner target (so a future streaming target wrapped in progress still
+   gets its "done" signal); `OffsetTarget` does not propagate (because
+   multiple offsets share one inner). `main.rs::render_into` now
+   constructs a `ProgressTarget` per scene with `scene.name` as the
+   label.
 
 ## Pitfalls and conventions
 
