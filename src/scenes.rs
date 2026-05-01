@@ -32,6 +32,7 @@ use crate::render::shapes::{
     rotate_x,
     rotate_y,
     rotate_z,
+    bounded,
 };
 
 use crate::render::mesh::load_obj;
@@ -543,9 +544,16 @@ pub fn scene_teapot() -> Scene {
                 surface: SURFACE_WHITE_C
             },
             // Loaded mesh, scaled and positioned to sit on the ground.
+            // The mesh is wrapped in `bounded(...)` so that rays missing
+            // the teapot's bounding box skip all of its triangles
+            // wholesale. The bound is computed in the mesh's local
+            // coordinate space (before the surrounding scale/translate)
+            // and the surrounding Transform inverse-transforms the ray
+            // before the AABB test happens, so the math works out even
+            // though `Transform::bounds` is currently `None`.
             translate([0.0, 0.0, -2.0],
                 scale([0.5, 0.5, 0.5],
-                    load_obj("models/utah_teapot.obj", SURFACE_BLUE))),
+                    bounded(load_obj("models/utah_teapot.obj", SURFACE_BLUE)))),
         ],
         reflect_limit: REFLECT_LIMIT,
         oversample: OVERSAMPLE,

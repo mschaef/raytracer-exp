@@ -58,6 +58,112 @@ pub struct Triangle {
     pub surface: Surface,
 }
 
+/// Axis-aligned bounding box. Used as the acceleration primitive for the
+/// `Bounded` variant: a ray that misses the AABB doesn't need to recurse
+/// into the wrapped subtree at all.
+///
+/// Geometrically identical to `Cuboid` — same min/max corners — but kept
+/// as a separate type because its job is different. `AABB::intersects`
+/// returns just a bool (no surface, no normal, no hit point), which is
+/// meaningfully cheaper than `Cuboid::hit_test`. The `to_cuboid` method
+/// converts an AABB into a renderable `Cuboid` for visualization, which
+/// is useful for diagnosing bounds.
+#[derive(Copy, Clone)]
+pub struct AABB {
+    pub min: Point,
+    pub max: Point,
+}
+
+impl AABB {
+    pub fn new(min: Point, max: Point) -> Self {
+        AABB { min, max }
+    }
+
+    /// Smallest AABB that encloses both `self` and `other`. Used to
+    /// compute group bounds by accumulating across children.
+    pub fn union(&self, other: &AABB) -> AABB {
+        AABB {
+            min: [
+                self.min[0].min(other.min[0]),
+                self.min[1].min(other.min[1]),
+                self.min[2].min(other.min[2]),
+            ],
+            max: [
+                self.max[0].max(other.max[0]),
+                self.max[1].max(other.max[1]),
+                self.max[2].max(other.max[2]),
+            ],
+        }
+    }
+
+    /// Boolean ray-AABB test using the slab method. Returns true if the
+    /// ray either originates inside the box or hits it in front of the
+    /// origin; false if the ray misses the box or the box is entirely
+    /// behind the ray. No hit-distance, normal, or surface — the only
+    /// question we need to answer here is "should the renderer recurse
+    /// into this subtree?"
+    pub fn intersects(&self, ray: &Vector) -> bool {
+        let mut t_enter = f64::NEG_INFINITY;
+        let mut t_exit = f64::INFINITY;
+
+        for i in 0..3 {
+            let origin = ray.start[i];
+            let dir = ray.delta[i];
+
+            if dir.abs() < EPSILON {
+                // Ray parallel to this slab pair: miss if origin is
+                // outside the slab, otherwise this axis doesn't constrain
+                // the t range.
+                if origin < self.min[i] || origin > self.max[i] {
+                    return false;
+                }
+                continue;
+            }
+
+            let inv = 1.0 / dir;
+            let mut t1 = (self.min[i] - origin) * inv;
+            let mut t2 = (self.max[i] - origin) * inv;
+
+            if t1 > t2 {
+                std::mem::swap(&mut t1, &mut t2);
+            }
+
+            if t1 > t_enter {
+                t_enter = t1;
+            }
+            if t2 < t_exit {
+                t_exit = t2;
+            }
+
+            if t_enter > t_exit {
+                return false;
+            }
+        }
+
+        // Box is in front of the ray, or contains the ray's origin.
+        // (t_exit < 0 means box is entirely behind the ray.)
+        t_exit > 0.0
+    }
+
+    /// Convert the AABB into a renderable `Cuboid` carrying the supplied
+    /// surface. Bridge for visualization — lets you compute a bound,
+    /// wrap one copy in `Bounded(...)` for acceleration, and place
+    /// another copy in the scene as a visible box for diagnosis.
+    pub fn to_cuboid(&self, surface: Surface) -> Cuboid {
+        let center = [
+            (self.min[0] + self.max[0]) * 0.5,
+            (self.min[1] + self.max[1]) * 0.5,
+            (self.min[2] + self.max[2]) * 0.5,
+        ];
+        let size = [
+            self.max[0] - self.min[0],
+            self.max[1] - self.min[1],
+            self.max[2] - self.min[2],
+        ];
+        Cuboid { center, size, surface }
+    }
+}
+
 /// Closed enumeration of all shape primitives the renderer knows how to
 /// hit-test. Stored inline in `Scene::objects` (no boxing, no vtable).
 ///
@@ -74,6 +180,13 @@ pub struct Triangle {
 /// child's hit test there, and lifts the resulting hit point and normal
 /// back into world space. The `Box` is required because `Shape` is now
 /// recursive through this variant.
+///
+/// `Bounded` wraps a child in an axis-aligned bounding box for hit-test
+/// acceleration. The ray is first tested against the AABB; if it misses,
+/// the entire wrapped subtree is skipped without recursion. This is the
+/// primitive the BVH builder will compose; for now scenes use it directly
+/// (e.g. wrap a loaded mesh in `bounded(...)`). The `Box` keeps `Shape`
+/// finite-sized.
 pub enum Shape {
     Sphere(Sphere),
     Plane(Plane),
@@ -81,6 +194,17 @@ pub enum Shape {
     Triangle(Triangle),
     Group(Vec<Shape>),
     Transform(Box<Transformed>),
+    Bounded(Box<Bounded>),
+}
+
+/// Storage for a `Shape::Bounded` node. Holds the bounding AABB and the
+/// child subtree it accelerates. Construction via `bounded(...)` (which
+/// auto-computes the bound from the child) or `bounded_with(bounds, child)`
+/// (which uses a caller-supplied bound — handy when the same bound is
+/// being used for both acceleration and visualization).
+pub struct Bounded {
+    pub bounds: AABB,
+    pub child: Shape,
 }
 
 /// Storage for a `Shape::Transform` node. Cached at construction so that
@@ -124,6 +248,91 @@ impl Hittable for Shape {
             Shape::Triangle(t)      => t.hit_test(ray),
             Shape::Group(children)  => nearest_hit(ray, children),
             Shape::Transform(t)     => t.hit_test(ray),
+            Shape::Bounded(b)       => b.hit_test(ray),
+        }
+    }
+}
+
+impl Bounded {
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        // Skip the entire wrapped subtree if the ray misses our box.
+        // This is the whole point of the BVH primitive: one cheap AABB
+        // test eliminates an arbitrarily large amount of recursive work.
+        if !self.bounds.intersects(ray) {
+            None
+        } else {
+            self.child.hit_test(ray)
+        }
+    }
+}
+
+impl Shape {
+    /// Return the smallest axis-aligned bounding box that encloses this
+    /// shape. `None` indicates the shape is unbounded — only `Plane` is
+    /// genuinely infinite, but a `Group` containing a Plane (or other
+    /// unbounded shape) is also unbounded, and `Transform` returns
+    /// `None` for now since computing its world-space bounds requires
+    /// the forward affine which we don't currently store (see phase 3).
+    ///
+    /// Used by `bounded(...)` to auto-compute the bound for an arbitrary
+    /// child shape. Also useful directly for visualization: get the
+    /// bound, convert it to a `Cuboid` via `AABB::to_cuboid`, and place
+    /// it in the scene.
+    pub fn bounds(&self) -> Option<AABB> {
+        match self {
+            Shape::Sphere(s) => Some(AABB::new(
+                [s.center[0] - s.r, s.center[1] - s.r, s.center[2] - s.r],
+                [s.center[0] + s.r, s.center[1] + s.r, s.center[2] + s.r],
+            )),
+            Shape::Plane(_) => None,
+            Shape::Cuboid(c) => {
+                let h = [c.size[0] * 0.5, c.size[1] * 0.5, c.size[2] * 0.5];
+                Some(AABB::new(
+                    [c.center[0] - h[0], c.center[1] - h[1], c.center[2] - h[2]],
+                    [c.center[0] + h[0], c.center[1] + h[1], c.center[2] + h[2]],
+                ))
+            }
+            Shape::Triangle(t) => {
+                let v0 = t.vertices[0];
+                let v1 = t.vertices[1];
+                let v2 = t.vertices[2];
+                Some(AABB::new(
+                    [
+                        v0[0].min(v1[0]).min(v2[0]),
+                        v0[1].min(v1[1]).min(v2[1]),
+                        v0[2].min(v1[2]).min(v2[2]),
+                    ],
+                    [
+                        v0[0].max(v1[0]).max(v2[0]),
+                        v0[1].max(v1[1]).max(v2[1]),
+                        v0[2].max(v1[2]).max(v2[2]),
+                    ],
+                ))
+            }
+            Shape::Group(items) => {
+                // Union of children's bounds. Any unbounded child makes
+                // the whole group unbounded — that's the right
+                // semantics, since you genuinely can't put a finite box
+                // around a group containing an infinite plane.
+                let mut acc: Option<AABB> = None;
+                for item in items {
+                    let b = item.bounds()?;
+                    acc = Some(match acc {
+                        None    => b,
+                        Some(a) => a.union(&b),
+                    });
+                }
+                acc
+            }
+            // Transformed bounds need the forward affine, which
+            // `Transformed` doesn't currently cache. Phase 3 will add it.
+            // For now, callers can wrap the inner (untransformed) shape
+            // in `bounded(...)` and put the Transform on the outside,
+            // which works correctly because the Transform's hit_test
+            // inverse-transforms the ray before dispatching to the
+            // Bounded child.
+            Shape::Transform(_) => None,
+            Shape::Bounded(b) => Some(b.bounds),
         }
     }
 }
@@ -253,6 +462,39 @@ pub fn nearest_hit(ray: &Vector, objects: &[Shape]) -> Option<RayHit> {
 /// but reads more naturally inside scene definitions.
 pub fn group(children: Vec<Shape>) -> Shape {
     Shape::Group(children)
+}
+
+/// Wrap a child in a `Shape::Bounded` node, auto-computing the bounding
+/// box from the child itself. Panics if the child is unbounded (e.g. a
+/// `Plane`, or a `Group` containing one) — bounding an infinite shape is
+/// a programming error, not a recoverable condition.
+///
+/// For acceleration, use this on any subtree that has well-defined finite
+/// bounds and may be missed by many rays. The classic case is a loaded
+/// mesh: `bounded(load_obj("teapot.obj", surface))` gives a single AABB
+/// test that skips all of the teapot's triangles for any ray that misses
+/// the box. (A multi-level BVH from `bvh(...)` will further accelerate
+/// rays that *do* hit the box; that's phase 2.)
+pub fn bounded(child: impl Into<Shape>) -> Shape {
+    let child = child.into();
+    let bounds = child.bounds()
+        .expect("bounded() requires a shape with finite bounds (no Plane, no untransformed-bound Transform)");
+    Shape::Bounded(Box::new(Bounded { bounds, child }))
+}
+
+/// Wrap a child in a `Shape::Bounded` node with a caller-supplied bound.
+/// Useful when the same bound is being used for both acceleration and
+/// visualization: compute the bound once via `child.bounds()`, pass it
+/// here for the wrapped subtree, and pass it to `AABB::to_cuboid` for a
+/// renderable Cuboid that shows where the box is.
+///
+/// The supplied bound is trusted — it should genuinely contain the
+/// child's geometry. A bound that's too small will cause valid hits to
+/// be missed (rays that should have hit the geometry get rejected at the
+/// box test). A bound that's too large just costs a small amount of
+/// performance and is otherwise harmless.
+pub fn bounded_with(bounds: AABB, child: impl Into<Shape>) -> Shape {
+    Shape::Bounded(Box::new(Bounded { bounds, child: child.into() }))
 }
 
 /// Wrap a child in a `Shape::Transform` node carrying an arbitrary affine.

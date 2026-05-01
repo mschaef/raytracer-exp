@@ -72,6 +72,7 @@ pub enum Shape {
     Triangle(Triangle),                // Möller–Trumbore, smooth normals
     Group(Vec<Shape>),                 // hierarchical container
     Transform(Box<Transformed>),       // affine-transformed subtree
+    Bounded(Box<Bounded>),             // AABB-accelerated subtree
 }
 ```
 
@@ -83,6 +84,21 @@ out for free; flat shading is the same algorithm with all three vertex
 normals equal). `Group::hit_test` is `nearest_hit(ray, &children)` — same
 fold the top-level scene traversal uses, so flat scenes and arbitrarily-nested
 groups share the exact same hit-testing path.
+
+`Bounded::hit_test` does a cheap boolean ray-AABB test first (slab method,
+no normal/distance computation); if the ray misses the box the entire
+subtree is skipped without recursing. This is the BVH primitive — both
+the single-level "wrap a mesh in bounded()" usage and any future
+multi-level BVH built by `bvh(...)` compose out of `Bounded(Group(...))`
+nodes.
+
+`Shape::bounds() -> Option<AABB>` returns the smallest AABB enclosing a
+shape, or `None` if the shape is genuinely unbounded. Plane returns
+`None` (infinite); Group returns `None` if any child is unbounded;
+Transform currently returns `None` because `Transformed` doesn't cache
+the forward affine needed to bound the transformed corners (deferred to
+phase 3). Used by `bounded(...)` to auto-compute bounds, and useful
+directly for visualization via `AABB::to_cuboid(surface)`.
 
 The `Transformed` struct caches the inverse affine and a precomputed
 inverse-transpose `Mat3` for normal transformation. Its hit_test:
@@ -132,6 +148,8 @@ Three layered conveniences let scene definitions stay clean:
    pub fn rotate_y(theta: f64,       child: impl Into<Shape>) -> Shape;
    pub fn rotate_z(theta: f64,       child: impl Into<Shape>) -> Shape;
    pub fn rotate_axis(axis: Point, theta: f64, child: impl Into<Shape>) -> Shape;
+   pub fn bounded(child: impl Into<Shape>) -> Shape;
+   pub fn bounded_with(bounds: AABB, child: impl Into<Shape>) -> Shape;
    ```
 
    Outer-most call applies last, so `translate(t, rotate_z(θ, scale(s, leaf)))`
@@ -389,11 +407,26 @@ it (or comment one out — the existing pattern shows both styles).
 The README's own "Potential Futures" list overlaps these but is now somewhat
 out of date.
 
-**Performance: BVH (bounding-volume hierarchy).** `nearest_hit` is currently
-O(n) in the number of objects per ray. The hierarchical `Group` structure is
-exactly what makes adding a BVH straightforward: precompute an AABB per
-`Group` (or per subtree), early-out if the ray misses the AABB. This is the
-single largest perf improvement available for non-trivial scenes.
+**Performance: real BVH (bounding-volume hierarchy).** Phase 1 of BVH
+support is in: `Shape::Bounded` is the wrapper that does a ray-AABB test
+before recursing, and `bounded(...)` auto-computes the bound. What's
+missing is a BVH *builder*: a `bvh(children: Vec<Shape>) -> Shape`
+function that recursively splits a flat list of children into a balanced
+tree of `Bounded(Group(...))` nodes. Standard splitting heuristic is
+"median split along the longest axis" — find the axis with the largest
+spread of centroid positions, sort by centroid on that axis, split at
+the median, recurse until leaves are small enough (typically 4–8 items).
+That turns the teapot from O(n) per ray into O(log n), which is what
+makes large meshes pleasant to render.
+
+**Transformed bounds (BVH phase 3).** `Shape::Transform::bounds()`
+currently returns `None` because `Transformed` only caches the inverse
+affine, not the forward one. Adding the forward affine (12 extra f64s
+per Transform node — trivial) and computing the bound from the eight
+transformed AABB corners would let scenes wrap whole transformed
+subtrees in `bounded(...)`, useful when assembling complex scenes with
+many transformed sub-meshes. About 20 lines of code; deferred until
+phase 2 (the real BVH builder) is in.
 
 **Transform collapsing.** A nested `translate(rotate(scale(leaf)))` produces
 three separate `Transform` nodes, each doing its own ray-transform on the way
