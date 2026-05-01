@@ -208,12 +208,16 @@ pub trait HeatmapTarget: Send + Sync {
 /// render uses 16 MB of timing data, comparable to one channel of a
 /// rendered PNG.
 ///
-/// `save(path)` finds the maximum across the whole buffer, normalizes
-/// linearly into `[0, 255]`, and writes a single-channel grayscale PNG
-/// where black = fastest pixel and white = slowest. Linear normalization
-/// is the simplest mapping; for pathological scenes where a few
-/// expensive pixels swamp the rest, log-scaling or percentile clamping
-/// would compress the bright end. Easy enhancement to add later.
+/// `save(path)` normalizes against the 99th percentile of timings (not
+/// the absolute max) and writes a single-channel grayscale PNG where
+/// black = fastest pixel and white = at-or-above the 99th percentile.
+/// The percentile clamp keeps a handful of pathologically slow pixels
+/// (e.g. pixels hitting the silhouette of a complex mesh) from
+/// dominating the linear range and washing the rest of the heatmap to
+/// black. The brightest 1% saturate at white, which is fine: that's
+/// exactly the part of the distribution we already know is unusual.
+/// Log-scaling is the obvious next step if even the body of the
+/// distribution turns out to be too heavy-tailed; not done here.
 pub struct PngHeatmapTarget {
     buffer: Mutex<Vec<u32>>,
     width: u32,
@@ -235,20 +239,37 @@ impl PngHeatmapTarget {
     pub fn save(self, path: impl AsRef<Path>) -> ImageResult<()> {
         let buffer = self.buffer.into_inner().unwrap();
 
-        // Max for normalization. Guard against an all-zero buffer (e.g.
-        // a render that never emitted any timings) so we don't divide
-        // by zero — every pixel ends up black in that case, which is
-        // the right answer.
-        let max = *buffer.iter().max().unwrap_or(&0);
-        let max = max.max(1);
+        // Normalize against the 99th percentile rather than the absolute
+        // max. A small clone + `select_nth_unstable` pass partitions
+        // around the percentile in O(n) average time; the original
+        // buffer is left in row-major order so we can write the image
+        // in a single pass below.
+        //
+        // The `.max(1)` guards against a degenerate all-zero render —
+        // without it we'd divide by zero. Black-everywhere is the
+        // right output in that case.
+        let cutoff = if buffer.is_empty() {
+            1
+        } else {
+            let mut sorted = buffer.clone();
+            let percentile_idx = (sorted.len() * 99) / 100;
+            let (_, p99, _) = sorted.select_nth_unstable(percentile_idx);
+            (*p99).max(1)
+        };
 
         let mut img = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::new(
             self.width, self.height,
         );
 
         for (i, &t) in buffer.iter().enumerate() {
-            // `t * 255 / max` in u64 to avoid u32 overflow on the multiply.
-            let v = ((t as u64) * 255 / (max as u64)) as u8;
+            // Pixels at or above the 99th percentile clamp to white;
+            // everything else normalizes linearly across [0, cutoff].
+            // The multiply is done in u64 to avoid u32 overflow.
+            let v = if t >= cutoff {
+                255
+            } else {
+                ((t as u64) * 255 / (cutoff as u64)) as u8
+            };
             let x = (i as u32) % self.width;
             let y = (i as u32) / self.width;
             img.put_pixel(x, y, image::Luma([v]));

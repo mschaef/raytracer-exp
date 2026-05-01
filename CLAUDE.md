@@ -323,10 +323,12 @@ Approximate order of recent commits, oldest first:
 10. **Per-pixel render-time heatmap.** Second observability piece. New
     `HeatmapTarget` trait alongside `RenderTarget`, with `PngHeatmapTarget`
     (Mutex-protected `Vec<u32>` of nanoseconds per pixel; `save(path)`
-    finds max, normalizes linearly, writes a single-channel grayscale
-    PNG) and `OffsetHeatmapTarget` (same role and convention as
-    `OffsetTarget` — does not propagate `finish()` because multiple
-    offsets share one inner). `render()` gained an
+    normalizes against the 99th percentile of timings via
+    `select_nth_unstable`, clamping the brightest 1% to white so a few
+    outlier pixels don't wash the rest of the image to black, and writes
+    a single-channel grayscale PNG) and `OffsetHeatmapTarget` (same role
+    and convention as `OffsetTarget` — does not propagate `finish()`
+    because multiple offsets share one inner). `render()` gained an
     `Option<&dyn HeatmapTarget>` parameter; when `Some`, it brackets
     each `pixel_color` call with `Instant::now()` and submits per-row
     timing arrays. Pixels exceeding `u32::MAX` ns saturate via
@@ -336,8 +338,8 @@ Approximate order of recent commits, oldest first:
     before this feature existed. `main.rs` now creates a
     `PngHeatmapTarget` alongside the `PngTarget` and saves the
     accompanying file as `render-heatmap.png`. Color mapping is linear
-    grayscale today; log-scale or percentile-clamping would compress
-    the bright end if outliers wash everything out.
+    grayscale below the 99th percentile; log-scaling would be the next
+    step if even that distribution turns out to be too heavy-tailed.
 
 ## Pitfalls and conventions
 
