@@ -210,6 +210,9 @@ pub struct Bounded {
 /// Storage for a `Shape::Transform` node. Cached at construction so that
 /// hit-testing only does the cheap part (matrix-vector multiplies) per ray.
 ///
+/// - `forward` is the local-to-world affine: applied to the eight corners
+///   of the child's local-space AABB to compute world-space bounds for
+///   `Shape::bounds()`. Not used in `hit_test`.
 /// - `inverse` is the world-to-local affine: applied to the ray on the way
 ///   in, so the child sees a ray in its own coordinate system.
 /// - `normal_xform` is the inverse-transpose of the *forward* linear part
@@ -218,6 +221,7 @@ pub struct Bounded {
 ///   inverse-transpose rather than the forward matrix is what keeps normals
 ///   correct under non-uniform scale.
 pub struct Transformed {
+    pub forward: Affine,
     pub inverse: Affine,
     pub normal_xform: Mat3,
     pub child: Shape,
@@ -324,14 +328,40 @@ impl Shape {
                 }
                 acc
             }
-            // Transformed bounds need the forward affine, which
-            // `Transformed` doesn't currently cache. Phase 3 will add it.
-            // For now, callers can wrap the inner (untransformed) shape
-            // in `bounded(...)` and put the Transform on the outside,
-            // which works correctly because the Transform's hit_test
-            // inverse-transforms the ray before dispatching to the
-            // Bounded child.
-            Shape::Transform(_) => None,
+            Shape::Transform(t) => {
+                // Transform the eight corners of the child's local-space
+                // AABB into world space and take the AABB enclosing the
+                // resulting points. This gives a conservative bound — it
+                // is not the *tightest* possible world-space AABB for
+                // the transformed geometry (a 45°-rotated unit cube has
+                // a diagonal world-space extent that the corner method
+                // captures correctly, but rotated spheres would get a
+                // looser bound than necessary), but it is always
+                // sufficient: the actual geometry never escapes the
+                // returned AABB.
+                let local = t.child.bounds()?;
+                let corners = [
+                    [local.min[0], local.min[1], local.min[2]],
+                    [local.max[0], local.min[1], local.min[2]],
+                    [local.min[0], local.max[1], local.min[2]],
+                    [local.max[0], local.max[1], local.min[2]],
+                    [local.min[0], local.min[1], local.max[2]],
+                    [local.max[0], local.min[1], local.max[2]],
+                    [local.min[0], local.max[1], local.max[2]],
+                    [local.max[0], local.max[1], local.max[2]],
+                ];
+                let p0 = t.forward.transform_point(corners[0]);
+                let mut min = p0;
+                let mut max = p0;
+                for corner in &corners[1..] {
+                    let p = t.forward.transform_point(*corner);
+                    for i in 0..3 {
+                        if p[i] < min[i] { min[i] = p[i]; }
+                        if p[i] > max[i] { max[i] = p[i]; }
+                    }
+                }
+                Some(AABB::new(min, max))
+            }
             Shape::Bounded(b) => Some(b.bounds),
         }
     }
@@ -515,6 +545,7 @@ pub fn transform(forward: Affine, child: impl Into<Shape>) -> Shape {
     // normal_xform = (forward.linear)^{-T} = transpose(inverse.linear)
     let normal_xform = mat3_transpose(inverse.linear);
     Shape::Transform(Box::new(Transformed {
+        forward,
         inverse,
         normal_xform,
         child: child.into(),

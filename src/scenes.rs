@@ -543,17 +543,18 @@ pub fn scene_teapot() -> Scene {
                 p0: [0.0, 0.0, -2.0],
                 surface: SURFACE_WHITE_C
             },
-            // Loaded mesh, scaled and positioned to sit on the ground.
-            // The mesh is wrapped in `bounded(...)` so that rays missing
-            // the teapot's bounding box skip all of its triangles
-            // wholesale. The bound is computed in the mesh's local
-            // coordinate space (before the surrounding scale/translate)
-            // and the surrounding Transform inverse-transforms the ray
-            // before the AABB test happens, so the math works out even
-            // though `Transform::bounds` is currently `None`.
-            translate([0.0, 0.0, -2.0],
+            // Loaded mesh, scaled and positioned to sit on the ground,
+            // with the bounding box wrapped *outside* the transforms.
+            // `Shape::Transform::bounds()` now (phase 3) computes a
+            // world-space AABB by transforming the eight corners of the
+            // child's local-space bound, so this composes correctly
+            // and is slightly cheaper than wrapping inside the
+            // transforms: rays that miss the world-space AABB don't
+            // even pay for the per-Transform ray inverse-transform
+            // before the test happens.
+            bounded(translate([0.0, 0.0, -2.0],
                 scale([0.5, 0.5, 0.5],
-                    bounded(load_obj("models/utah_teapot.obj", SURFACE_BLUE)))),
+                    load_obj("models/utah_teapot.obj", SURFACE_BLUE)))),
         ],
         reflect_limit: REFLECT_LIMIT,
         oversample: OVERSAMPLE,

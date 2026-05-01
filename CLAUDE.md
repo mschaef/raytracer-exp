@@ -95,13 +95,17 @@ nodes.
 `Shape::bounds() -> Option<AABB>` returns the smallest AABB enclosing a
 shape, or `None` if the shape is genuinely unbounded. Plane returns
 `None` (infinite); Group returns `None` if any child is unbounded;
-Transform currently returns `None` because `Transformed` doesn't cache
-the forward affine needed to bound the transformed corners (deferred to
-phase 3). Used by `bounded(...)` to auto-compute bounds, and useful
-directly for visualization via `AABB::to_cuboid(surface)`.
+Transform transforms the eight corners of the child's local AABB by the
+cached forward affine and takes the AABB enclosing the result (a
+conservative bound — not the tightest possible for shapes other than
+boxes, but always sufficient). Used by `bounded(...)` to auto-compute
+bounds, and useful directly for visualization via `AABB::to_cuboid(surface)`.
 
-The `Transformed` struct caches the inverse affine and a precomputed
-inverse-transpose `Mat3` for normal transformation. Its hit_test:
+The `Transformed` struct caches the forward affine, the inverse affine,
+and a precomputed inverse-transpose `Mat3` for normal transformation.
+The forward is used by `Shape::bounds()` to compute world-space bounds
+from the child's local-space AABB (transform the 8 corners, take min/max);
+hit-testing only uses the inverse and `normal_xform`. Its hit_test:
 
 1. Inverse-transforms the ray into the child's local space (deliberately
    *without* renormalizing the local direction — see "Pitfalls" below).
@@ -359,6 +363,38 @@ Approximate order of recent commits, oldest first:
     grayscale below the 99th percentile; log-scaling would be the next
     step if even that distribution turns out to be too heavy-tailed.
 
+11. **BVH primitive: `Bounded` variant + `Shape::bounds()`.** Phase 1 of
+    BVH support: a new `AABB` type in `shapes.rs` (separate from the
+    renderable `Cuboid` despite identical geometry — `AABB::intersects`
+    is a boolean slab test, faster than `Cuboid::hit_test` because it
+    skips normal/distance/surface computation), a `Shape::Bounded`
+    variant that does the AABB test before recursing into its child,
+    and a `Shape::bounds() -> Option<AABB>` method covering every
+    variant. Plane returns `None` (genuinely infinite); Group returns
+    `None` if any child is unbounded. Constructors: `bounded(child)`
+    auto-computes the bound (panics on unbounded child) and
+    `bounded_with(bounds, child)` lets callers reuse a precomputed bound
+    for both acceleration and visualization. `AABB::to_cuboid(surface)`
+    is the visualization bridge: turns a bound into a renderable
+    `Cuboid` for diagnosing bounds. `scene_teapot` was updated to wrap
+    the loaded mesh in `bounded(...)`.
+
+12. **Transformed bounds (BVH phase 3).** `Transformed` now caches the
+    forward affine alongside the inverse and `normal_xform` (a single
+    `Affine`-by-value field, ~96 bytes per Transform node).
+    `Shape::Transform::bounds()` transforms the eight corners of the
+    child's local-space AABB by the forward affine and takes the
+    enclosing world-space AABB. The bound is conservative — for shapes
+    other than boxes (especially rotated spheres), it can be looser
+    than the optimal world-space bound, but it is always a valid
+    enclosing bound, which is what correctness requires. Lets scenes
+    wrap whole transformed subtrees in `bounded(...)`, which is
+    slightly faster than wrapping inside the transforms because rays
+    that miss the world-space AABB skip the per-Transform inverse-ray
+    work entirely. `scene_teapot` updated to demonstrate this form.
+    Phase 2 (the BVH builder) deferred — manual annotation is fine
+    for the model sizes this codebase handles.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -407,26 +443,21 @@ it (or comment one out — the existing pattern shows both styles).
 The README's own "Potential Futures" list overlaps these but is now somewhat
 out of date.
 
-**Performance: real BVH (bounding-volume hierarchy).** Phase 1 of BVH
-support is in: `Shape::Bounded` is the wrapper that does a ray-AABB test
-before recursing, and `bounded(...)` auto-computes the bound. What's
-missing is a BVH *builder*: a `bvh(children: Vec<Shape>) -> Shape`
-function that recursively splits a flat list of children into a balanced
-tree of `Bounded(Group(...))` nodes. Standard splitting heuristic is
-"median split along the longest axis" — find the axis with the largest
-spread of centroid positions, sort by centroid on that axis, split at
-the median, recurse until leaves are small enough (typically 4–8 items).
-That turns the teapot from O(n) per ray into O(log n), which is what
-makes large meshes pleasant to render.
-
-**Transformed bounds (BVH phase 3).** `Shape::Transform::bounds()`
-currently returns `None` because `Transformed` only caches the inverse
-affine, not the forward one. Adding the forward affine (12 extra f64s
-per Transform node — trivial) and computing the bound from the eight
-transformed AABB corners would let scenes wrap whole transformed
-subtrees in `bounded(...)`, useful when assembling complex scenes with
-many transformed sub-meshes. About 20 lines of code; deferred until
-phase 2 (the real BVH builder) is in.
+**Performance: real BVH (bounding-volume hierarchy).** Phases 1 and 3 of
+BVH support are in: `Shape::Bounded` is the wrapper that does a ray-AABB
+test before recursing, `bounded(...)` auto-computes the bound, and
+`Shape::Transform` correctly bounds itself by transforming the child's
+eight AABB corners. What's missing is a BVH *builder*: a
+`bvh(children: Vec<Shape>) -> Shape` function that recursively splits a
+flat list of children into a balanced tree of `Bounded(Group(...))`
+nodes. Standard splitting heuristic is "median split along the longest
+axis" — find the axis with the largest spread of centroid positions,
+sort by centroid on that axis, split at the median, recurse until
+leaves are small enough (typically 4–8 items). That turns the teapot
+from O(n) per ray into O(log n), which is what makes large meshes
+pleasant to render. Manual annotation (wrapping a known mesh in
+`bounded(...)`) is the workaround until then; for the kinds of models
+this codebase deals with, that's tractable.
 
 **Transform collapsing.** A nested `translate(rotate(scale(leaf)))` produces
 three separate `Transform` nodes, each doing its own ray-transform on the way
