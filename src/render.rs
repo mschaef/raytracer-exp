@@ -295,7 +295,7 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) ->
 
     let ambient: LinearColor = scale_linear_color(&scolor, hit.surface.ambient);
 
-    let reflected: LinearColor = if (hit.surface.reflection > EPSILON) && (reflect_count >= scene.reflect_limit) {
+    let reflected: LinearColor = if (hit.surface.reflection > EPSILON) && (reflect_count < scene.reflect_limit) {
         let rvec = subp(negp(ray.delta), scalep(hit.normal, 2.0 * dotp(negp(ray.delta), hit.normal)));
 
         let rcolor = ray_color(&Vector {

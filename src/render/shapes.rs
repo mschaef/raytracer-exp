@@ -597,6 +597,17 @@ impl Hittable for Sphere {
             None
         } else {
             let t = (-b - discriminant.sqrt()) / (2.0*a);
+
+            // Reject hits behind or coincident with the ray origin. Without
+            // this, a ray starting on (reflection / shadow) or inside a
+            // sphere returns a negative-`t` "hit" that beats every legitimate
+            // forward hit in `nearest_hit`'s distance comparison. The other
+            // primitives (Plane, Cuboid, Triangle) already do this — Sphere
+            // was the outlier.
+            if t <= EPSILON {
+                return None;
+            }
+
             let hit_point = ray_location(ray, t);
 
             Some(RayHit {
