@@ -15,8 +15,21 @@
 //! What the target does with those rows is its own business — write into a
 //! PNG buffer, forward to a streaming UI, log to stdout, whatever.
 //!
+//! The trait carries pixels as `LinearColor` (`[f64; 3]`) — the same linear,
+//! unbounded representation used throughout the renderer. Display-space
+//! encoding (sRGB transfer, quantization to 8-bit, tone mapping, etc.) is
+//! the target's responsibility, not the renderer's. `PngTarget` does the
+//! linear → sRGB encode in its own `submit_row`; a future EXR or 16-bit
+//! target can keep the float values, and a tone-mapping wrapper can do its
+//! work *before* any encode is applied (which is the only place it's
+//! mathematically correct to do).
+//!
+//! Values may be at or below 0.0 and at or above 1.0; the renderer itself
+//! never produces negatives, but the trait makes no promise either way and
+//! downstream targets are expected to handle the full range.
+//!
 //! The trait deliberately exposes only what `render()` produces: a starting
-//! `(x, y)` coordinate and a contiguous slice of `[u8; 3]` pixels. Order of
+//! `(x, y)` coordinate and a contiguous slice of pixels. Order of
 //! `submit_row` calls is unspecified — under parallel rendering, rows arrive
 //! in whatever order Rayon's worker threads happen to produce them, so any
 //! impl must tolerate out-of-order rows.
@@ -30,6 +43,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use image::ImageResult;
 
+use super::color::{LinearColor, to_png_color};
+
 /// Where rendered pixels go.
 ///
 /// Required to be `Send + Sync` because `render()` calls `submit_row` from
@@ -42,7 +57,11 @@ pub trait RenderTarget: Send + Sync {
     /// pixels `(x, y)` through `(x + row.len() - 1, y)` inclusive. Rows
     /// from different `submit_row` calls do not overlap, but may arrive
     /// in any order.
-    fn submit_row(&self, x: u32, y: u32, row: &[[u8; 3]]);
+    ///
+    /// Pixel values are linear-space `LinearColor` (`[f64; 3]`), unclamped.
+    /// Targets that ultimately render to a display-space format are
+    /// responsible for the appropriate encode.
+    fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]);
 
     /// Called once by `render()` after every row has been submitted.
     /// Default no-op. Streaming targets override this to send a
@@ -76,9 +95,12 @@ impl PngTarget {
 
     /// Write a single pixel directly. Useful for compositing operations
     /// that don't fit the row-at-a-time pattern (e.g. drawing a crosshair).
-    pub fn put_pixel(&self, x: u32, y: u32, color: [u8; 3]) {
+    /// Color is in the same linear space as `submit_row`; sRGB encoding
+    /// happens internally.
+    pub fn put_pixel(&self, x: u32, y: u32, color: LinearColor) {
+        let encoded = to_png_color(&color);
         let mut buf = self.buffer.lock().unwrap();
-        buf.put_pixel(x, y, image::Rgb(color));
+        buf.put_pixel(x, y, image::Rgb(encoded));
     }
 
     /// Save the accumulated buffer as a PNG. Consumes the target.
@@ -88,9 +110,16 @@ impl PngTarget {
 }
 
 impl RenderTarget for PngTarget {
-    fn submit_row(&self, x: u32, y: u32, row: &[[u8; 3]]) {
+    fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]) {
+        // Encode outside the lock so concurrent workers can do the
+        // linear → sRGB conversion in parallel and only contend for the
+        // pixel-buffer write itself. The temporary Vec is per-call, on
+        // the order of a few KB at typical row widths — invisible
+        // against ray-tracing cost.
+        let encoded: Vec<[u8; 3]> = row.iter().map(to_png_color).collect();
+
         let mut buf = self.buffer.lock().unwrap();
-        for (i, p) in row.iter().enumerate() {
+        for (i, p) in encoded.iter().enumerate() {
             buf.put_pixel(x + i as u32, y, image::Rgb(*p));
         }
     }
@@ -117,7 +146,7 @@ impl<'a, T: RenderTarget + ?Sized + 'a> OffsetTarget<'a, T> {
 }
 
 impl<'a, T: RenderTarget + ?Sized + 'a> RenderTarget for OffsetTarget<'a, T> {
-    fn submit_row(&self, x: u32, y: u32, row: &[[u8; 3]]) {
+    fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]) {
         self.inner.submit_row(x + self.dx, y + self.dy, row);
     }
     // finish() intentionally not propagated — see struct doc.
@@ -159,7 +188,7 @@ impl<'a, T: RenderTarget + ?Sized + 'a> ProgressTarget<'a, T> {
 }
 
 impl<'a, T: RenderTarget + ?Sized + 'a> RenderTarget for ProgressTarget<'a, T> {
-    fn submit_row(&self, x: u32, y: u32, row: &[[u8; 3]]) {
+    fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]) {
         self.inner.submit_row(x, y, row);
 
         let n = self.completed.fetch_add(1, Ordering::Relaxed) + 1;

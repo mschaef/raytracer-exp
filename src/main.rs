@@ -116,10 +116,11 @@ fn main() {
 
     // Crosshair lines between quadrants. PngTarget exposes put_pixel for
     // exactly this kind of compositing operation that doesn't fit the
-    // row-at-a-time pattern.
+    // row-at-a-time pattern. Color is linear, same as submit_row;
+    // PngTarget handles the sRGB encode internally.
     for ii in 0..imgdim - 1 {
-        target.put_pixel(ii, imgdim / 2, [255, 255, 255]);
-        target.put_pixel(imgdim / 2, ii, [255, 255, 255]);
+        target.put_pixel(ii, imgdim / 2, [1.0, 1.0, 1.0]);
+        target.put_pixel(imgdim / 2, ii, [1.0, 1.0, 1.0]);
     }
 
     target.save("render.png").unwrap();

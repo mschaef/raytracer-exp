@@ -54,7 +54,6 @@ use color::{
     scale_linear_color,
     add_linear_color,
     multiply_linear_color,
-    to_png_color,
 };
 
 use std::cmp::Ordering;
@@ -387,7 +386,7 @@ fn render_one_row<T: RenderTarget + ?Sized>(
     imgx: u32,
     y: u32,
 ) {
-    let mut row = vec![[0u8; 3]; imgx as usize];
+    let mut row = vec![[0.0f64; 3]; imgx as usize];
 
     // Branch outside the per-pixel loop so the heatmap-disabled case
     // compiles to the same machine code as before this feature existed
@@ -406,14 +405,13 @@ fn render_one_row<T: RenderTarget + ?Sized>(
             // misreport an outlier as a fast pixel.
             let elapsed_ns = start.elapsed().as_nanos();
             timings[x as usize] = u32::try_from(elapsed_ns).unwrap_or(u32::MAX);
-            row[x as usize] = to_png_color(&pc);
+            row[x as usize] = pc;
         }
         target.submit_row(0, y, &row);
         h.submit_timing_row(0, y, &timings);
     } else {
         for x in 0..imgx {
-            let pc = pixel_color(camera, scene, x, y);
-            row[x as usize] = to_png_color(&pc);
+            row[x as usize] = pixel_color(camera, scene, x, y);
         }
         target.submit_row(0, y, &row);
     }
