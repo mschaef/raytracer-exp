@@ -21,6 +21,7 @@ use render::output::{
     ProgressTarget,
     RenderTarget,
     HeatmapTarget,
+    HeatmapScale,
     PngHeatmapTarget,
     OffsetHeatmapTarget,
 };
@@ -122,5 +123,10 @@ fn main() {
     }
 
     target.save("render.png").unwrap();
-    heatmap.save("render-heatmap.png").unwrap();
+
+    // `HeatmapScale::Log` compresses the bright end so the body of the
+    // distribution gets more grayscale gradient — useful when scenes
+    // contain a complex mesh alongside cheap primitives. Swap to
+    // `HeatmapScale::Linear` to see direct proportional brightness.
+    heatmap.save("render-heatmap.png", HeatmapScale::Log).unwrap();
 }

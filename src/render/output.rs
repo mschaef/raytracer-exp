@@ -203,21 +203,39 @@ pub trait HeatmapTarget: Send + Sync {
     fn finish(&self) {}
 }
 
+/// How a `PngHeatmapTarget` maps timing values to grayscale brightness
+/// when saving. Both modes apply the same 99th-percentile clamp first
+/// (so the brightest 1% of pixels saturate at white in either case);
+/// the difference is how values *below* the cutoff are mapped onto
+/// `[0, 254]`.
+///
+/// - `Linear`: brightness scales directly with timing relative to the
+///   cutoff. Cheapest mathematically; faithfully represents a roughly
+///   uniform distribution.
+/// - `Log`: brightness scales as `ln(1 + t) / ln(1 + cutoff)`. The
+///   `+1` keeps the formula well-defined at `t = 0`. Compresses the
+///   bright end and expands gradient detail in the body of the
+///   distribution. Useful when the timing distribution is heavy-tailed
+///   even after the percentile clamp — typical of scenes containing
+///   complex meshes alongside cheap primitives.
+#[derive(Copy, Clone, Debug)]
+pub enum HeatmapScale {
+    Linear,
+    Log,
+}
+
 /// Heatmap target backed by an in-memory buffer of per-pixel timings.
 /// Stores `u32` nanoseconds per pixel — 4 bytes per pixel, so a 2048²
 /// render uses 16 MB of timing data, comparable to one channel of a
 /// rendered PNG.
 ///
-/// `save(path)` normalizes against the 99th percentile of timings (not
-/// the absolute max) and writes a single-channel grayscale PNG where
-/// black = fastest pixel and white = at-or-above the 99th percentile.
-/// The percentile clamp keeps a handful of pathologically slow pixels
-/// (e.g. pixels hitting the silhouette of a complex mesh) from
-/// dominating the linear range and washing the rest of the heatmap to
-/// black. The brightest 1% saturate at white, which is fine: that's
-/// exactly the part of the distribution we already know is unusual.
-/// Log-scaling is the obvious next step if even the body of the
-/// distribution turns out to be too heavy-tailed; not done here.
+/// `save(path, scale)` normalizes against the 99th percentile of
+/// timings (not the absolute max) and writes a single-channel grayscale
+/// PNG where black = fastest pixel and white = at-or-above the 99th
+/// percentile. The percentile clamp keeps a handful of pathologically
+/// slow pixels from dominating the dynamic range; the `scale` parameter
+/// chooses how the rest of the distribution gets mapped to grayscale.
+/// See `HeatmapScale` for the two options.
 pub struct PngHeatmapTarget {
     buffer: Mutex<Vec<u32>>,
     width: u32,
@@ -235,8 +253,10 @@ impl PngHeatmapTarget {
     }
 
     /// Save the accumulated timing buffer as a grayscale PNG. Consumes
-    /// the target.
-    pub fn save(self, path: impl AsRef<Path>) -> ImageResult<()> {
+    /// the target. `scale` chooses how values below the 99th-percentile
+    /// cutoff get mapped to `[0, 254]`; pixels at or above the cutoff
+    /// always clamp to 255 (white) regardless of mode.
+    pub fn save(self, path: impl AsRef<Path>, scale: HeatmapScale) -> ImageResult<()> {
         let buffer = self.buffer.into_inner().unwrap();
 
         // Normalize against the 99th percentile rather than the absolute
@@ -257,18 +277,35 @@ impl PngHeatmapTarget {
             (*p99).max(1)
         };
 
+        // Precompute `ln(1 + cutoff)` once for log scaling.
+        let log_cutoff_plus_one = ((cutoff as f64) + 1.0).ln();
+
         let mut img = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::new(
             self.width, self.height,
         );
 
         for (i, &t) in buffer.iter().enumerate() {
-            // Pixels at or above the 99th percentile clamp to white;
-            // everything else normalizes linearly across [0, cutoff].
-            // The multiply is done in u64 to avoid u32 overflow.
+            // Pixels at or above the 99th percentile clamp to white in
+            // both modes; everything else normalizes against the cutoff
+            // according to `scale`.
             let v = if t >= cutoff {
                 255
             } else {
-                ((t as u64) * 255 / (cutoff as u64)) as u8
+                match scale {
+                    HeatmapScale::Linear => {
+                        // u64 multiply to avoid u32 overflow.
+                        ((t as u64) * 255 / (cutoff as u64)) as u8
+                    }
+                    HeatmapScale::Log => {
+                        // ln(1 + t) / ln(1 + cutoff) * 255. The `+ 1`
+                        // keeps the numerator finite at t = 0; for
+                        // t = cutoff the ratio would equal 1.0, but
+                        // values that high already took the clamp
+                        // branch above so we never hit that case here.
+                        let num = ((t as f64) + 1.0).ln();
+                        ((num / log_cutoff_plus_one) * 255.0) as u8
+                    }
+                }
             };
             let x = (i as u32) % self.width;
             let y = (i as u32) / self.width;

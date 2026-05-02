@@ -359,9 +359,14 @@ Approximate order of recent commits, oldest first:
     no-heatmap case has zero per-pixel overhead — same machine code as
     before this feature existed. `main.rs` now creates a
     `PngHeatmapTarget` alongside the `PngTarget` and saves the
-    accompanying file as `render-heatmap.png`. Color mapping is linear
-    grayscale below the 99th percentile; log-scaling would be the next
-    step if even that distribution turns out to be too heavy-tailed.
+    accompanying file as `render-heatmap.png`. Color mapping below the
+    99th percentile is selectable via a `HeatmapScale` enum passed to
+    `save`: `Linear` for direct proportional brightness, `Log` for
+    `ln(1 + t) / ln(1 + cutoff)` which compresses the bright end and
+    brings out gradient detail in the body of the distribution.
+    `main.rs` currently uses `Log` since scenes mixing a teapot with
+    cheap primitives are still heavy-tailed even after percentile
+    clamping; flip to `Linear` to see direct proportional brightness.
 
 11. **BVH primitive: `Bounded` variant + `Shape::bounds()`.** Phase 1 of
     BVH support: a new `AABB` type in `shapes.rs` (separate from the
