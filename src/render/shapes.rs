@@ -14,9 +14,12 @@ use crate::render::{
     Hittable,
     Vector,
     RayHit,
+    addp,
     subp,
     dotp,
     crossp,
+    lenp,
+    scalep,
     ray_location,
     normalizep,
     EPSILON,
@@ -55,6 +58,27 @@ pub struct Cuboid {
 pub struct Triangle {
     pub vertices: [Point; 3],
     pub normals: [Point; 3],
+    pub surface: Surface,
+}
+
+/// A finite cylinder, parameterized by the centers of its two end caps and a
+/// radius. The axis is the segment from `p0` to `p1`; the curved side surface
+/// is the set of points at distance `r` from that segment.
+///
+/// This first cut is an *open tube* — only the curved side surface is
+/// hit-tested. Rays passing off the open ends miss. End caps will be added
+/// in a follow-up commit, at which point the same struct will represent a
+/// closed, solid cylinder.
+///
+/// A note for future-you on transforms: a uniformly-scaled cylinder is still
+/// a cylinder, but a non-uniformly-scaled cylinder is an *elliptical*
+/// cylinder, which this primitive can't represent. Wrap cylinders in
+/// `Transform` (rotate, translate, uniform scale) and the math stays correct;
+/// don't try to bake a non-uniform scale into `r` or `(p1 - p0)`.
+pub struct Cylinder {
+    pub p0: Point,
+    pub p1: Point,
+    pub r: f64,
     pub surface: Surface,
 }
 
@@ -192,6 +216,7 @@ pub enum Shape {
     Plane(Plane),
     Cuboid(Cuboid),
     Triangle(Triangle),
+    Cylinder(Cylinder),
     Group(Vec<Shape>),
     Transform(Box<Transformed>),
     Bounded(Box<Bounded>),
@@ -243,6 +268,10 @@ impl From<Triangle> for Shape {
     fn from(t: Triangle) -> Self { Shape::Triangle(t) }
 }
 
+impl From<Cylinder> for Shape {
+    fn from(c: Cylinder) -> Self { Shape::Cylinder(c) }
+}
+
 impl Hittable for Shape {
     fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
         match self {
@@ -250,6 +279,7 @@ impl Hittable for Shape {
             Shape::Plane(p)         => p.hit_test(ray),
             Shape::Cuboid(c)        => c.hit_test(ray),
             Shape::Triangle(t)      => t.hit_test(ray),
+            Shape::Cylinder(c)      => c.hit_test(ray),
             Shape::Group(children)  => nearest_hit(ray, children),
             Shape::Transform(t)     => t.hit_test(ray),
             Shape::Bounded(b)       => b.hit_test(ray),
@@ -312,6 +342,48 @@ impl Shape {
                         v0[2].max(v1[2]).max(v2[2]),
                     ],
                 ))
+            }
+            Shape::Cylinder(c) => {
+                // Tight world-space AABB. Per axis i, the radial extent
+                // contributed by the round body is r * sqrt(1 - axis_unit[i]²)
+                // — i.e. zero on the axis the cylinder is aligned with, and
+                // exactly r perpendicular to it. The clamp to 0 absorbs the
+                // small negative values that fall out of floating-point
+                // rounding when axis_unit isn't *quite* unit length.
+                let axis = subp(c.p1, c.p0);
+                let axis_len = lenp(axis);
+                if axis_len < EPSILON {
+                    // Degenerate cylinder (p0 == p1). Construction should
+                    // reject this, but bounds() must remain total — fall
+                    // back to a sphere-of-radius-r bound at p0.
+                    Some(AABB::new(
+                        [c.p0[0] - c.r, c.p0[1] - c.r, c.p0[2] - c.r],
+                        [c.p0[0] + c.r, c.p0[1] + c.r, c.p0[2] + c.r],
+                    ))
+                } else {
+                    let axis_unit = [
+                        axis[0] / axis_len,
+                        axis[1] / axis_len,
+                        axis[2] / axis_len,
+                    ];
+                    let radial = [
+                        c.r * (1.0 - axis_unit[0] * axis_unit[0]).max(0.0).sqrt(),
+                        c.r * (1.0 - axis_unit[1] * axis_unit[1]).max(0.0).sqrt(),
+                        c.r * (1.0 - axis_unit[2] * axis_unit[2]).max(0.0).sqrt(),
+                    ];
+                    Some(AABB::new(
+                        [
+                            c.p0[0].min(c.p1[0]) - radial[0],
+                            c.p0[1].min(c.p1[1]) - radial[1],
+                            c.p0[2].min(c.p1[2]) - radial[2],
+                        ],
+                        [
+                            c.p0[0].max(c.p1[0]) + radial[0],
+                            c.p0[1].max(c.p1[1]) + radial[1],
+                            c.p0[2].max(c.p1[2]) + radial[2],
+                        ],
+                    ))
+                }
             }
             Shape::Group(items) => {
                 // Union of children's bounds. Any unbounded child makes
@@ -733,6 +805,102 @@ impl Hittable for Cuboid {
 
         Some(RayHit {
             distance: t_enter,
+            hit_point,
+            normal,
+            surface: self.surface,
+        })
+    }
+}
+
+impl Hittable for Cylinder {
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        // Side-surface ray-cylinder intersection — open-tube form (no caps).
+        // The closed cylinder will be added in a follow-up commit.
+        //
+        // Decompose `ray.delta` and `(ray.start - p0)` into components
+        // parallel to the cylinder axis and perpendicular to it. The side
+        // hit reduces to a 2D ray-circle intersection in the perpendicular
+        // plane. The parallel projection then tells us whether the hit
+        // falls between the two end caps (s ∈ [0, axis_len]); points
+        // outside that range are off the open ends of the tube and are
+        // rejected here. Once caps land, those rays will instead be tested
+        // against the cap disks.
+
+        let axis = subp(self.p1, self.p0);
+        let axis_len = lenp(axis);
+        // Defensive: a degenerate (zero-length-axis) cylinder is a
+        // construction error, but the renderer shouldn't divide-by-zero
+        // if one slips through.
+        if axis_len < EPSILON {
+            return None;
+        }
+        let axis_unit = scalep(axis, 1.0 / axis_len);
+
+        let delta = subp(ray.start, self.p0);
+        let d_dot_a = dotp(ray.delta, axis_unit);
+        let delta_dot_a = dotp(delta, axis_unit);
+
+        // Perpendicular components of ray.delta and (ray.start - p0).
+        let d_perp = subp(ray.delta, scalep(axis_unit, d_dot_a));
+        let delta_perp = subp(delta, scalep(axis_unit, delta_dot_a));
+
+        let a = dotp(d_perp, d_perp);
+        // Ray nearly parallel to axis — it can only hit caps, not the
+        // side surface. Side-only hit test is therefore a miss.
+        if a < EPSILON {
+            return None;
+        }
+
+        let b = 2.0 * dotp(delta_perp, d_perp);
+        let c = dotp(delta_perp, delta_perp) - self.r * self.r;
+        let discriminant = b * b - 4.0 * a * c;
+
+        if discriminant < 0.0 {
+            return None;
+        }
+
+        let sqrt_disc = discriminant.sqrt();
+        // a > 0 here, so t_near < t_far.
+        let t_near = (-b - sqrt_disc) / (2.0 * a);
+        let t_far  = (-b + sqrt_disc) / (2.0 * a);
+
+        // We want the smallest t > EPSILON whose hit point falls between
+        // the cap planes. `s = (P - p0) · axis_unit` expanded to skip
+        // computing P:
+        //   s = delta_dot_a + t * d_dot_a
+        // Rejecting on s out-of-range is what makes this an open tube
+        // rather than an infinite cylinder.
+        let pick = |t: f64| -> Option<f64> {
+            if t <= EPSILON {
+                return None;
+            }
+            let s = delta_dot_a + t * d_dot_a;
+            if s < 0.0 || s > axis_len {
+                None
+            } else {
+                Some(s)
+            }
+        };
+
+        let (t, s) = match pick(t_near) {
+            Some(s) => (t_near, s),
+            None => match pick(t_far) {
+                Some(s) => (t_far, s),
+                None => return None,
+            },
+        };
+
+        let hit_point = ray_location(ray, t);
+        // Side normal: radial direction from the axis at the hit point.
+        // (P - (p0 + s * axis_unit)) has magnitude r in exact arithmetic,
+        // so dividing by r would already give a unit normal — but
+        // accumulated floating-point error can leave it slightly off, and
+        // the rest of the shading pipeline expects unit normals.
+        let center_on_axis = addp(self.p0, scalep(axis_unit, s));
+        let normal = normalizep(subp(hit_point, center_on_axis));
+
+        Some(RayHit {
+            distance: t,
             hit_point,
             normal,
             surface: self.surface,
