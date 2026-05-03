@@ -25,6 +25,7 @@ use crate::render::shapes::{
     Sphere,
     Plane,
     Cuboid,
+    Cylinder,
     Shape,
     group,
     translate,
@@ -574,6 +575,71 @@ pub fn scene_ball_on_plane() -> Scene {
                 r: 0.66,
                 surface: SURFACE_BLUE
             },
+            Plane {
+                normal: [0.0, 0.0, 1.0],
+                p0: [0.0, 0.0, -2.0],
+                surface: SURFACE_WHITE_C
+            },
+        ],
+        reflect_limit: REFLECT_LIMIT,
+        oversample: OVERSAMPLE,
+    }
+}
+
+#[allow(dead_code)]
+pub fn scene_cylinder_test() -> Scene {
+    // Smoke-test scene for the Cylinder primitive. Three cylinders in
+    // distinct orientations exercise the side surface, both end caps, and
+    // the interaction between them:
+    //
+    //   - A vertical red cylinder on the left, axis along +z. Sits on the
+    //     ground; the top cap is fully visible flat-shaded, the side
+    //     curves around with smooth shading and a wrap-around highlight.
+    //
+    //   - A green cylinder pointing end-on at the camera in the middle.
+    //     Camera is at [0, 10, 0] looking at the origin, so the +y cap
+    //     (at p1) faces the lens. This is the headline regression test
+    //     for closed cylinders: it should render as a solid flat disk,
+    //     not the see-through ring you'd get with caps disabled.
+    //
+    //   - A diagonal blue reflective cylinder on the right. Tilts in all
+    //     three axes, so both caps are partially visible from the camera
+    //     along with the curved side. Reflection on the curved surface
+    //     picks up the checker ground.
+    //
+    // Reflective checker plane underneath catches the cylinder shadows
+    // and gives the reflective cylinder something to reflect.
+    Scene {
+        name: "Cylinder Test",
+        camera: default_camera(),
+        background: [0.0, 0.0, 0.0],
+        lights: vec![Light::white([10.0, 10.0, 10.0])],
+        objects: scene_objects![
+            // Vertical, axis along +z. Bottom cap on the ground.
+            Cylinder {
+                p0: [-2.5, 0.0, -2.0],
+                p1: [-2.5, 0.0,  1.0],
+                r: 0.6,
+                surface: SURFACE_RED
+            },
+            // End-on, axis along +y. p1 (near end) cap normal is +y,
+            // pointing back toward the camera at [0, 10, 0].
+            Cylinder {
+                p0: [0.0, -1.0,  0.0],
+                p1: [0.0,  2.5,  0.0],
+                r: 0.7,
+                surface: SURFACE_GREEN
+            },
+            // Diagonal, reflective. p0 sits on the ground at the back-right;
+            // p1 floats above and forward. Tilts in all three axes so neither
+            // cap is hidden from the camera.
+            Cylinder {
+                p0: [2.0, -1.0, -2.0],
+                p1: [3.5,  1.5,  1.0],
+                r: 0.4,
+                surface: reflective(SURFACE_BLUE)
+            },
+            // Reflective checkered ground plane.
             Plane {
                 normal: [0.0, 0.0, 1.0],
                 p0: [0.0, 0.0, -2.0],

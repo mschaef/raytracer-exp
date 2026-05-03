@@ -33,8 +33,9 @@ use scenes::{
     //scene_axis_spheres,
     scene_multi_light_test,
     //scene_one_sphere,
-    scene_transform_test,
+    //scene_transform_test,
     //scene_ball_on_plane
+    scene_cylinder_test,
     scene_teapot
 };
 
@@ -88,8 +89,9 @@ fn main() {
         //scene_axis_spheres(),
         scene_multi_light_test(),
         //scene_one_sphere(),
-        scene_transform_test(),
+        //scene_transform_test(),
         //scene_ball_on_plane()
+        scene_cylinder_test(),
         scene_teapot()
     ];
 
