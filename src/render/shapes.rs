@@ -19,6 +19,7 @@ use crate::render::{
     dotp,
     crossp,
     lenp,
+    negp,
     scalep,
     ray_location,
     normalizep,
@@ -61,14 +62,12 @@ pub struct Triangle {
     pub surface: Surface,
 }
 
-/// A finite cylinder, parameterized by the centers of its two end caps and a
-/// radius. The axis is the segment from `p0` to `p1`; the curved side surface
-/// is the set of points at distance `r` from that segment.
-///
-/// This first cut is an *open tube* — only the curved side surface is
-/// hit-tested. Rays passing off the open ends miss. End caps will be added
-/// in a follow-up commit, at which point the same struct will represent a
-/// closed, solid cylinder.
+/// A finite, closed, solid cylinder, parameterized by the centers of its two
+/// end caps and a radius. The axis is the segment from `p0` to `p1`; the
+/// curved side surface is the set of points at distance `r` from that
+/// segment, and the two end caps are flat disks of radius `r` centered at
+/// `p0` and `p1`. Rays are tested against all three surfaces; the nearest
+/// qualifying hit wins.
 ///
 /// A note for future-you on transforms: a uniformly-scaled cylinder is still
 /// a cylinder, but a non-uniformly-scaled cylinder is an *elliptical*
@@ -814,17 +813,20 @@ impl Hittable for Cuboid {
 
 impl Hittable for Cylinder {
     fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
-        // Side-surface ray-cylinder intersection — open-tube form (no caps).
-        // The closed cylinder will be added in a follow-up commit.
+        // Closed-cylinder ray intersection. Three sub-tests run against
+        // three surfaces — the curved side and the two flat end caps —
+        // and the nearest qualifying hit wins.
         //
-        // Decompose `ray.delta` and `(ray.start - p0)` into components
-        // parallel to the cylinder axis and perpendicular to it. The side
-        // hit reduces to a 2D ray-circle intersection in the perpendicular
-        // plane. The parallel projection then tells us whether the hit
-        // falls between the two end caps (s ∈ [0, axis_len]); points
-        // outside that range are off the open ends of the tube and are
-        // rejected here. Once caps land, those rays will instead be tested
-        // against the cap disks.
+        // Side: decompose `ray.delta` and `(ray.start - p0)` into axis-
+        // parallel and axis-perpendicular components, solve the resulting
+        // 2D ray-circle equation, then verify the hit's projection along
+        // the axis falls between the caps (s ∈ [0, axis_len]).
+        //
+        // Caps: each cap is a disk — a ray-plane intersection followed by
+        // a radial-distance check. Cap at p0 has outward normal -axis_unit;
+        // cap at p1 has outward normal +axis_unit. Caps are tested against
+        // the running best-`t` so cap hits beyond the current best are
+        // rejected without doing the radial check.
 
         let axis = subp(self.p1, self.p0);
         let axis_len = lenp(axis);
@@ -840,68 +842,101 @@ impl Hittable for Cylinder {
         let d_dot_a = dotp(ray.delta, axis_unit);
         let delta_dot_a = dotp(delta, axis_unit);
 
-        // Perpendicular components of ray.delta and (ray.start - p0).
+        // Best hit found so far. Tracks `(t, normal)`; the hit point is
+        // recovered from t at the end via `ray_location`.
+        let mut best: Option<(f64, Point)> = None;
+
+        // --- Side surface ----------------------------------------------
         let d_perp = subp(ray.delta, scalep(axis_unit, d_dot_a));
         let delta_perp = subp(delta, scalep(axis_unit, delta_dot_a));
 
         let a = dotp(d_perp, d_perp);
-        // Ray nearly parallel to axis — it can only hit caps, not the
-        // side surface. Side-only hit test is therefore a miss.
-        if a < EPSILON {
-            return None;
+        // a < EPSILON means the ray is parallel to the axis — it can hit
+        // caps but not the side surface, so we just skip the side test.
+        if a >= EPSILON {
+            let b = 2.0 * dotp(delta_perp, d_perp);
+            let c = dotp(delta_perp, delta_perp) - self.r * self.r;
+            let discriminant = b * b - 4.0 * a * c;
+
+            if discriminant >= 0.0 {
+                let sqrt_disc = discriminant.sqrt();
+                // a > 0 here, so t_near < t_far.
+                let t_near = (-b - sqrt_disc) / (2.0 * a);
+                let t_far  = (-b + sqrt_disc) / (2.0 * a);
+
+                // Smallest t > EPSILON whose hit point falls between the
+                // cap planes. `s = (P - p0) · axis_unit` is computed as
+                // `delta_dot_a + t * d_dot_a` to skip computing P.
+                let pick = |t: f64| -> Option<f64> {
+                    if t <= EPSILON {
+                        return None;
+                    }
+                    let s = delta_dot_a + t * d_dot_a;
+                    if s < 0.0 || s > axis_len {
+                        None
+                    } else {
+                        Some(s)
+                    }
+                };
+
+                let side_hit = pick(t_near)
+                    .map(|s| (t_near, s))
+                    .or_else(|| pick(t_far).map(|s| (t_far, s)));
+
+                if let Some((t, s)) = side_hit {
+                    let hit_point = ray_location(ray, t);
+                    // (P - (p0 + s * axis_unit)) has magnitude r in exact
+                    // arithmetic — the divide would give a unit normal,
+                    // but we renormalize anyway because floating-point
+                    // error can leave it slightly off and the rest of the
+                    // shading pipeline expects unit normals.
+                    let center_on_axis = addp(self.p0, scalep(axis_unit, s));
+                    let normal = normalizep(subp(hit_point, center_on_axis));
+                    best = Some((t, normal));
+                }
+            }
         }
 
-        let b = 2.0 * dotp(delta_perp, d_perp);
-        let c = dotp(delta_perp, delta_perp) - self.r * self.r;
-        let discriminant = b * b - 4.0 * a * c;
-
-        if discriminant < 0.0 {
-            return None;
-        }
-
-        let sqrt_disc = discriminant.sqrt();
-        // a > 0 here, so t_near < t_far.
-        let t_near = (-b - sqrt_disc) / (2.0 * a);
-        let t_far  = (-b + sqrt_disc) / (2.0 * a);
-
-        // We want the smallest t > EPSILON whose hit point falls between
-        // the cap planes. `s = (P - p0) · axis_unit` expanded to skip
-        // computing P:
-        //   s = delta_dot_a + t * d_dot_a
-        // Rejecting on s out-of-range is what makes this an open tube
-        // rather than an infinite cylinder.
-        let pick = |t: f64| -> Option<f64> {
+        // --- End caps --------------------------------------------------
+        // Each cap is a flat disk: ray-plane intersection, then check that
+        // the hit point is within radius r of the cap center. The loop
+        // checks against the running best-t first to skip the radial test
+        // for cap hits we already have a closer hit than.
+        //
+        // Cap normals point outward — `-axis_unit` at p0, `+axis_unit` at
+        // p1 — so a hit with the cap normal coming out of the cap plane
+        // toward the camera shades correctly without further work.
+        let r_sq = self.r * self.r;
+        for (cap_center, cap_normal) in [
+            (self.p0, negp(axis_unit)),
+            (self.p1, axis_unit),
+        ] {
+            let denom = dotp(cap_normal, ray.delta);
+            if denom.abs() < EPSILON {
+                // Ray parallel to cap plane — no intersection.
+                continue;
+            }
+            let t = dotp(subp(cap_center, ray.start), cap_normal) / denom;
             if t <= EPSILON {
-                return None;
+                continue;
             }
-            let s = delta_dot_a + t * d_dot_a;
-            if s < 0.0 || s > axis_len {
-                None
-            } else {
-                Some(s)
+            if let Some((t_best, _)) = best {
+                if t >= t_best {
+                    continue;
+                }
             }
-        };
+            let hit_point = ray_location(ray, t);
+            let radial = subp(hit_point, cap_center);
+            // Squared-distance comparison — saves a sqrt vs. computing the
+            // actual distance.
+            if dotp(radial, radial) <= r_sq {
+                best = Some((t, cap_normal));
+            }
+        }
 
-        let (t, s) = match pick(t_near) {
-            Some(s) => (t_near, s),
-            None => match pick(t_far) {
-                Some(s) => (t_far, s),
-                None => return None,
-            },
-        };
-
-        let hit_point = ray_location(ray, t);
-        // Side normal: radial direction from the axis at the hit point.
-        // (P - (p0 + s * axis_unit)) has magnitude r in exact arithmetic,
-        // so dividing by r would already give a unit normal — but
-        // accumulated floating-point error can leave it slightly off, and
-        // the rest of the shading pipeline expects unit normals.
-        let center_on_axis = addp(self.p0, scalep(axis_unit, s));
-        let normal = normalizep(subp(hit_point, center_on_axis));
-
-        Some(RayHit {
+        best.map(|(t, normal)| RayHit {
             distance: t,
-            hit_point,
+            hit_point: ray_location(ray, t),
             normal,
             surface: self.surface,
         })
