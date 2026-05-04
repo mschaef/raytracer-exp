@@ -2,4 +2,11 @@
 *~
 *#
 render.png
+received.png
+render-heatmap.png
 .DS_Store
+
+# rtview Swift Package build artefacts
+rtview/.build/
+rtview/.swiftpm/
+rtview/Package.resolved
