@@ -35,8 +35,8 @@ import Cocoa
 /// counter-flip transform around the `ctx.draw` to undo the resulting
 /// double inversion, with no benefit.
 class PixelView: NSView {
-    private let imageWidth: Int
-    private let imageHeight: Int
+    private var imageWidth: Int
+    private var imageHeight: Int
 
     private var linearBuffer: [Float]   // size = w*h*3
     private var displayBuffer: [UInt8]  // size = w*h*4 (RGBA)
@@ -45,13 +45,7 @@ class PixelView: NSView {
         self.imageWidth = width
         self.imageHeight = height
         self.linearBuffer = [Float](repeating: 0.0, count: width * height * 3)
-        // Pre-fill alpha to opaque; subsequent setPixel calls update RGB
-        // only, so the alpha byte stays at 255 throughout.
-        var disp = [UInt8](repeating: 0, count: width * height * 4)
-        for i in 0..<(width * height) {
-            disp[i * 4 + 3] = 255
-        }
-        self.displayBuffer = disp
+        self.displayBuffer = Self.makeDisplayBuffer(width: width, height: height)
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
         // Resize with the window: the content view occupies the full
         // window and we letterbox internally to preserve aspect ratio.
@@ -64,13 +58,61 @@ class PixelView: NSView {
 
     override var isOpaque: Bool { true }
 
-    /// Set one pixel from a linear-color triple. Mirrors the per-pixel
-    /// path the stream parser will take in stage three: write into the
-    /// linear buffer, then update the display buffer with the encoded
-    /// value. Marking the view dirty is the caller's responsibility —
-    /// for stage two we draw the whole pattern up front and call
-    /// `setNeedsDisplay(_:)` once when the pattern is finished.
-    func setPixel(x: Int, y: Int, r: Float, g: Float, b: Float) {
+    /// Reallocate the pixel buffers for a new image size. Called by the
+    /// app delegate when the stream parser parses a new render's header
+    /// — typically followed by a window resize so the new image displays
+    /// at native resolution. Resets all pixels to black; subsequent
+    /// `setRow` calls fill the new buffer in.
+    func resize(width: Int, height: Int) {
+        self.imageWidth = width
+        self.imageHeight = height
+        self.linearBuffer = [Float](repeating: 0.0, count: width * height * 3)
+        self.displayBuffer = Self.makeDisplayBuffer(width: width, height: height)
+        needsDisplay = true
+    }
+
+    /// Helper: build a freshly-zeroed RGBA buffer with the alpha byte
+    /// pre-filled to opaque so per-pixel writes only need to touch RGB.
+    /// Static so it can be called from both `init` and `resize`
+    /// without going through `self`.
+    private static func makeDisplayBuffer(width: Int, height: Int) -> [UInt8] {
+        var disp = [UInt8](repeating: 0, count: width * height * 4)
+        for i in 0..<(width * height) {
+            disp[i * 4 + 3] = 255
+        }
+        return disp
+    }
+
+    /// Write a contiguous row of `count = pixels.count / 3` pixels
+    /// starting at `(x, y)`. `pixels` is a flat triple-per-pixel array
+    /// `[r0, g0, b0, r1, g1, b1, ...]` in linear color, matching what
+    /// `RenderServer.decodePixels` produces. Out-of-bounds pixels are
+    /// silently dropped — the network input is untrusted, and a bad
+    /// row shouldn't crash the GUI.
+    ///
+    /// Marks the view dirty after the write; AppKit coalesces multiple
+    /// `needsDisplay = true` calls into a single redraw per frame, so
+    /// even a flood of arriving rows turns into ~display-rate paints.
+    func setRow(x: Int, y: Int, pixels: [Float]) {
+        guard y >= 0, y < imageHeight else { return }
+        let count = pixels.count / 3
+        for i in 0..<count {
+            let px = x + i
+            guard px >= 0, px < imageWidth else { continue }
+            setPixel(
+                x: px, y: y,
+                r: pixels[i * 3],
+                g: pixels[i * 3 + 1],
+                b: pixels[i * 3 + 2]
+            )
+        }
+        needsDisplay = true
+    }
+
+    /// Set one pixel from a linear-color triple. Internal helper used by
+    /// `setRow`; not exposed to the network parser, which always works
+    /// in row-sized batches.
+    private func setPixel(x: Int, y: Int, r: Float, g: Float, b: Float) {
         let i = y * imageWidth + x
         let li = i * 3
         linearBuffer[li] = r

@@ -8,72 +8,44 @@
 
 import Cocoa
 
-// rtview — minimal Cocoa app that displays a pixel buffer in a single
-// resizable window. Stage two of the rtview integration: no networking
-// yet; on launch the view is filled with a hardcoded test pattern so we
-// can validate orientation, channel order, and the linear → sRGB
-// encoding path before plugging in the stream parser.
+// rtview — Cocoa GUI that displays the raytracer's streamed render.
+//
+// Stage three: a `RenderServer` listens on TCP for the raytracer's
+// `StreamTarget` wire format, parses the header + row stream, and
+// updates a single `PixelView` filling the application window. The
+// window resizes itself to match the incoming image dimensions
+// (capped to 80% of screen). Successive renders replace the displayed
+// image without restarting the app.
 //
 // Run with `swift run` from the rtview/ directory.
-
-/// Diagnostic test pattern — four horizontal bands top to bottom, each a
-/// linear gradient from 0.0 on the left to 1.0 on the right:
-///
-///   1. Red gradient   (top)
-///   2. Green gradient
-///   3. Blue gradient
-///   4. Gray gradient  (bottom)
-///
-/// What this verifies, all in one glance:
-///
-/// - Y-axis orientation: red band on top, gray on the bottom. If they're
-///   reversed, `isFlipped` is wrong or the CGImage draw is upside down.
-/// - X-axis orientation: each band darkens to the left, brightens to
-///   the right. If reversed, the row indexing is wrong.
-/// - Channel order: each colored band is its named color. If green
-///   shows up in the red band, R/B are swapped (likely BGRA vs RGBA).
-/// - Linear → sRGB encoding: the gradient should look perceptually
-///   roughly uniform (the midpoint visually around the middle of the
-///   bar). If it looks crushed dark with most of the gradient bunched
-///   into the right third, the encoding step isn't running.
-func generateTestPattern(into view: PixelView, width: Int, height: Int) {
-    let bandHeight = height / 4
-    for y in 0..<height {
-        let band = min(y / bandHeight, 3)
-        for x in 0..<width {
-            // Linear ramp 0..1 across the row. (W-1) so the right edge
-            // hits exactly 1.0 rather than just below it.
-            let u = Float(x) / Float(width - 1)
-            let r: Float, g: Float, b: Float
-            switch band {
-            case 0: (r, g, b) = (u,  0,  0)
-            case 1: (r, g, b) = (0,  u,  0)
-            case 2: (r, g, b) = (0,  0,  u)
-            default: (r, g, b) = (u,  u,  u)
-            }
-            view.setPixel(x: x, y: y, r: r, g: g, b: b)
-        }
-    }
-}
+//
+// Listening port comes from `RTVIEW_ADDR` (matching the Rust side's env
+// var). The host portion is ignored — the listener accepts on all local
+// interfaces — but the port after the colon is parsed out so the same
+// `RTVIEW_ADDR=127.0.0.1:9999` value can be set in both shells.
+// Defaults to 9999 when unset.
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var pixelView: PixelView!
+    var server: RenderServer!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Stage-two image size is hardcoded. Stage three reads it from
-        // the StreamTarget header and resizes the view + window then.
-        let imageWidth = 512
-        let imageHeight = 512
+        // Placeholder dimensions for the window+view before any
+        // connection arrives. The first header replaces these via
+        // `handleHeader(width:height:)`. Picking 512×512 keeps the
+        // window visibly present (so the user knows the app is running)
+        // without committing to anything that'll likely be the right
+        // size for the first render.
+        let placeholderW = 512
+        let placeholderH = 512
 
-        pixelView = PixelView(width: imageWidth, height: imageHeight)
-        generateTestPattern(into: pixelView, width: imageWidth, height: imageHeight)
+        pixelView = PixelView(width: placeholderW, height: placeholderH)
 
-        // Initial window size matches the image at 1:1. The view
-        // letterboxes if the user resizes the window to a different
-        // aspect ratio, so resizing remains visually clean.
-        let contentRect = NSRect(x: 200, y: 200,
-                                 width: imageWidth, height: imageHeight)
+        let contentRect = NSRect(
+            x: 0, y: 0,
+            width: placeholderW, height: placeholderH
+        )
         window = NSWindow(
             contentRect: contentRect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -85,11 +57,67 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         window.center()
 
+        let port = Self.parsePort()
+        do {
+            server = try RenderServer(port: port)
+            server.onHeader = { [weak self] w, h in
+                self?.handleHeader(width: w, height: h)
+            }
+            server.onRow = { [weak self] x, y, pixels in
+                self?.pixelView.setRow(x: x, y: y, pixels: pixels)
+            }
+            server.onDone = {
+                NSLog("rtview: render complete")
+            }
+            server.start()
+        } catch {
+            NSLog("rtview: failed to start server on port \(port): \(error)")
+        }
+
         // Bring the app to the front and give it a Dock icon. Without
-        // setActivationPolicy(.regular), a swift-run executable lands
-        // as a background process and the window appears behind other
-        // apps with no menu bar.
+        // setActivationPolicy(.regular) earlier, a swift-run executable
+        // lands as a background process and the window appears behind
+        // other apps with no menu bar.
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Resize the window and pixel buffers to match a newly-arrived
+    /// render. Caps the displayed window to 80% of the screen's visible
+    /// frame so a 2K-square render doesn't open a window bigger than
+    /// the screen, and never scales up beyond 1:1 (rendering at less
+    /// than native resolution to fill a bigger window would just show
+    /// a blurry image and waste pixels).
+    private func handleHeader(width: Int, height: Int) {
+        let screenSize = NSScreen.main?.visibleFrame.size
+            ?? NSSize(width: 1280, height: 720)
+        let maxW = screenSize.width * 0.8
+        let maxH = screenSize.height * 0.8
+        let scale = min(
+            maxW / CGFloat(width),
+            maxH / CGFloat(height),
+            1.0
+        )
+        let displayW = CGFloat(width) * scale
+        let displayH = CGFloat(height) * scale
+
+        window.setContentSize(NSSize(width: displayW, height: displayH))
+        window.center()
+        pixelView.resize(width: width, height: height)
+    }
+
+    /// Parse the port number from the optional `RTVIEW_ADDR` env var.
+    /// Accepts any of `"9999"`, `"127.0.0.1:9999"`, `"[::1]:9999"`, etc.
+    /// — anything after the last colon is interpreted as the port. Falls
+    /// back to 9999 if unset or unparseable.
+    private static func parsePort() -> UInt16 {
+        guard let addr = ProcessInfo.processInfo.environment["RTVIEW_ADDR"]
+        else { return 9999 }
+        if let colon = addr.lastIndex(of: ":") {
+            let portStr = addr[addr.index(after: colon)...]
+            if let p = UInt16(portStr) { return p }
+        }
+        if let p = UInt16(addr) { return p }
+        return 9999
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
