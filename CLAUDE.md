@@ -443,6 +443,152 @@ scenes at a time; the unused ones generate warnings without it. When
 introducing a new scene, swap it into the `scene` array in `main.rs` to view
 it (or comment one out — the existing pattern shows both styles).
 
+## Scene definition language: implementation plan
+
+The next major piece of work is a script-driven layer for building and
+rendering scenes. This section captures the design and a phased delivery
+plan; once each phase ships, its summary moves into "Recent work history"
+and the corresponding plan content here is trimmed.
+
+### Goals and shape
+
+The SDL is **lower-level than a POV-Ray-style declarative scene file**.
+A script owns control flow: it constructs surfaces, lights, cameras, and
+geometry, builds a render target, and explicitly calls `render`. This is
+what enables the existing four-quadrant style of output, and eventually
+animation — where a script builds geometry once and drives it across a
+frame loop into a streaming target.
+
+The language is a small Clojure-subset Lisp:
+
+- **Syntax:** s-expressions. `;` line comments. The reader supports
+  Clojure-style literals — vector `[...]`, map `{...}`, keyword `:foo`,
+  string `"..."` — and the `'x` reader macro for `(quote x)`. No other
+  reader macros.
+- **Types:** `Int (i64)`, `Float (f64)`, `Bool`, `String`, `Keyword`,
+  `Symbol`, `Vec` (`Rc<Vec<Value>>`), `Map` (`Rc<HashMap<Key, Value>>`),
+  `Nil`, `Fn` (interpreted or native), plus the ray tracer's host types
+  as enumerated `Value` variants. No seq abstraction, no full numeric
+  tower (auto-promotion in arithmetic only), no rationals or bignums.
+- **Special forms:** `def`, `let`, `fn`, `if`, `do`, `quote`, `recur`.
+- **Evaluation:** eager, single-threaded, downward closures only via
+  parent-linked `Rc<RefCell<Environment>>`.
+- **Memory:** reference counting via `Rc`. Process lifetime is short.
+- **Ergonomics:** vector destructuring in `let` bindings and `fn`
+  parameter lists, including nesting (essential for 3D math). AST nodes
+  carry source positions for line/column error reporting.
+- **Error model:** panics on script errors with a reported source
+  position, matching the rest of the codebase. No `Result` plumbing
+  through the interpreter.
+- **Skipped:** macros, dynamic vars, namespaces, multimethods,
+  protocols, lazy seqs, transducers, varargs, atoms.
+
+### Module layout
+
+A new top-level module `sdl` alongside `render`. Approximate breakdown:
+
+```
+src/sdl/
+  mod.rs      Re-exports and the public entry point: read + eval a file.
+  reader.rs   Tokenizer + s-expression reader producing AST with source positions.
+  ast.rs      AST node definitions (literal, symbol, list, vector, map, ...).
+  value.rs    The runtime Value enum, including host-type variants.
+  env.rs      Environment: parent-linked Rc<RefCell<HashMap>>.
+  eval.rs     Evaluator: dispatch on AST node type, special forms, apply.
+  builtins.rs Pure-language built-in functions (arithmetic, vec, map, etc.).
+  bindings.rs Native function bindings to the ray tracer API.
+  error.rs    Error type with source positions; pretty printer.
+```
+
+The `render` module's public API is unchanged; the SDL is a layer above it.
+
+### Test suite
+
+A unit-test convention is introduced specifically for the SDL. This is a
+deliberate departure from the rest of the codebase, which is verified
+visually. The interpreter's correctness is too detailed to verify by render
+comparison, and the language is too small not to test thoroughly.
+
+- Test scripts live in `tests/sdl/` with one file per topic (e.g.
+  `arithmetic.lisp`, `let_destructuring.lisp`, `recur.lisp`,
+  `closures.lisp`).
+- Each script uses `(assert <expr>)` and `(assert= <actual> <expected>)`,
+  which are built-in forms. A failed assertion panics with the source
+  position.
+- A Rust integration test (`tests/sdl_suite.rs`) walks the directory,
+  evaluates each file in a fresh interpreter, and fails the test run if
+  any script panics.
+- Each phase grows the suite. A phase is "done" when its tests pass and
+  prior phases' tests still pass.
+
+For Phase 3 onward, tests additionally cover constructor output (build a
+value from script, debug-format it, compare to an expected snapshot) and
+end-to-end rendering (render a known scene to a temp path; assert file
+existence, dimensions, and a handful of pixel values).
+
+### Phases
+
+**Phase 1 — Language core (no host bindings).** Reader and AST with source
+positions. `Value` enum without host variants. Environment. Evaluator with
+all special forms. Built-ins: arithmetic and comparison with int/float
+auto-promotion; logic (`and`, `or`, `not`); vec literals and operations
+(`nth`, `count`, `first`, `rest`, `conj`); map literals and operations
+(`get`, `assoc`, `dissoc`, `keys`, `vals`); `print`/`println`;
+`assert`/`assert=`. Vector destructuring in `let` and `fn`. `recur` in
+`fn` bodies as a same-frame jump. Optional CLI binary `sdl-run` for ad-hoc
+evaluation. Phase ends when the language test suite (literals, arithmetic,
+all special forms, lexical scoping, closures, destructuring, `recur`,
+error positions) passes.
+
+**Phase 2 — Host bindings: scene construction.** `Value` variants for
+`Surface`, `Light`, `Camera`, `Shape`, `Scene`. Native function registration
+mechanism with typed argument unwrapping. Bindings for: the `Surface`
+constructor (likely map-keyed); `light-white`, `light-point`;
+`camera-looking-at`, `camera-with-fov`; `sphere`, `plane`, `cuboid`;
+`group`, `transform`, `translate`, `scale`, `rotate-x`/`y`/`z`,
+`rotate-axis`, `bounded`, `bounded-with`; `scene`. Tests assert that
+script-built values match Rust-built equivalents. No rendering yet — phase
+ends when an SDL script can produce a `Scene` value identical to one
+assembled in Rust.
+
+**Phase 3 — Render dispatch.** `Value` variants for render targets.
+Bindings for: `png-target`, `offset-target`, `progress-target`; `render`;
+`save-png`. Tests extend with end-to-end rendering: a small known scene
+in script, assert file existence, dimensions, and spot-check pixels.
+
+**Phase 4 — Standard library and ergonomics.** In-language conveniences:
+`cond`, `when`, `when-not`, `->`, `->>`, `map`, `filter`, `reduce`,
+`range`, `repeat`, `apply`. Math helpers: `pi`, `tau`, `deg->rad`, `min`,
+`max`, `abs`, `sqrt`, basic trig. Point helpers: `point`, `x`, `y`, `z`,
+point arithmetic. Tests cover library-level behavior.
+
+**Phase 5 — Port a real scene.** Re-express one of the existing
+`scenes.rs` scenes in the SDL. Render side-by-side with the Rust version
+and assert visual equivalence (pixel match within tolerance). Phase
+ending criterion: scenes are pleasant to write in the SDL, and at least
+one real scene runs end-to-end.
+
+**Phase 6+ (deferred).** `load-obj` mesh binding; heatmap target binding;
+animation (timestep loops, a video or sequence-of-PNGs target, per-frame
+mutation of geometry); transform collapsing and other interpreter
+optimizations.
+
+### Decisions still open
+
+To be settled when each phase begins, not committed to in this plan:
+
+- File extension for SDL scripts: `.lisp`, `.scene`, `.rt`, or other.
+- `Surface` construction syntax: positional vs. map-keyed (or both).
+  Map-keyed is more readable; positional is shorter.
+- Whether `Value` carries host types directly (`Value::Shape(Shape)`)
+  or via a small wrapper to keep `Value` cheap to clone. Likely direct,
+  but the `Shape` enum is largish — measure first.
+- Map key types: keyword-only or also string/symbol/number. Keyword-only
+  is simplest.
+- Whether scripts have a "result" value (returned by the top-level form)
+  or are evaluated purely for side effects. Rendering is a side effect
+  either way.
+
 ## Future directions
 
 The README's own "Potential Futures" list overlaps these but is now somewhat
@@ -502,12 +648,10 @@ currently traveling through.
 focus distance on the camera. The existing `oversample` loop is the right
 place to integrate aperture sampling.
 
-**Text-based scene definition language.** Mentioned in the README. The
-current scene-definition style (Rust source, with `scene_objects!` and
-constructor functions) is already pretty close to a DSL; a parser that
-produces `Shape` values from text would slot in cleanly. The
-`impl Into<Shape>` ergonomics would not survive a parser, but `Shape::from`
-+ `scene_objects!` over runtime data does.
+**Scene definition language.** See the dedicated "Scene definition
+language: implementation plan" section above — this is the next major
+piece of work, and the design and phasing are captured there rather than
+in this list.
 
 **Camera animation.** Now that `default_camera()` is a function returning a
 fresh `Camera`, varying its parameters per frame is one new function call.
