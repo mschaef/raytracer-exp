@@ -36,7 +36,8 @@
 
 extern crate image;
 
-use std::io::Write;
+use std::io::{self, Write};
+use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -122,6 +123,105 @@ impl RenderTarget for PngTarget {
         for (i, p) in encoded.iter().enumerate() {
             buf.put_pixel(x + i as u32, y, image::Rgb(*p));
         }
+    }
+}
+
+/// TCP-streaming target. Opens a connection on construction, sends a
+/// fixed-size header with the image dimensions, then writes one
+/// length-prefixed message per `submit_row` call. The receiver (e.g. the
+/// `rtview` GUI, or the `rtview_receiver` test binary) reads the header
+/// to size its buffer and then consumes row messages until the connection
+/// closes.
+///
+/// Wire format (all integers little-endian):
+///
+/// ```text
+/// Header (16 bytes, sent once):
+///   magic   [u8; 4]  "RTVW"
+///   width   u32
+///   height  u32
+///   flags   u32      0 = linear-color f32 payload (only variant today)
+///
+/// Row message (variable, sent per submit_row):
+///   y       u32
+///   x       u32
+///   count   u32
+///   pixels  [f32; count * 3]    R, G, B in linear space
+/// ```
+///
+/// Linear color is sent on the wire — `LinearColor` (`[f64; 3]`) is
+/// narrowed to `f32` per channel at the wire boundary. f32 carries ~7
+/// decimal digits, far more than any 8-bit display encoding needs, and
+/// keeps the bandwidth tractable for typical 2K-square renders. The
+/// receiver is responsible for whatever display-space encoding it wants
+/// to do (sRGB, tone mapping, HDR pass-through).
+///
+/// `submit_row` packs y/x/count + payload into a single `Vec<u8>` and
+/// issues a single `write_all` under the lock. The pack-then-write idiom
+/// keeps the critical section short (no per-pixel syscalls) and pairs
+/// well with `TCP_NODELAY` to avoid Nagle-induced stalls on loopback.
+///
+/// The `Mutex<TcpStream>` is the simplest correct choice — Rayon workers
+/// call `submit_row` concurrently and the kernel write needs serialization
+/// regardless. If loopback contention ever becomes measurable, a future
+/// improvement is an mpsc channel feeding a dedicated writer thread; the
+/// trait surface stays the same.
+pub struct StreamTarget {
+    inner: Mutex<TcpStream>,
+}
+
+impl StreamTarget {
+    /// Connect to the receiver at `addr` (e.g. `"127.0.0.1:9999"`) and
+    /// send the header. Subsequent `submit_row` calls stream rows on the
+    /// same connection. Returns an `io::Error` if the connection or the
+    /// header write fails — the renderer can decide how to react (today,
+    /// `main.rs` aborts with a clear message).
+    pub fn connect(addr: &str, width: u32, height: u32) -> io::Result<Self> {
+        let mut stream = TcpStream::connect(addr)?;
+        // Disable Nagle: rows are already packed into a single write
+        // each, and we'd rather have them on the wire promptly than
+        // batched into 40ms windows.
+        stream.set_nodelay(true)?;
+
+        let mut hdr = Vec::with_capacity(16);
+        hdr.extend_from_slice(b"RTVW");
+        hdr.extend_from_slice(&width.to_le_bytes());
+        hdr.extend_from_slice(&height.to_le_bytes());
+        hdr.extend_from_slice(&0u32.to_le_bytes()); // flags: linear f32
+        stream.write_all(&hdr)?;
+
+        Ok(StreamTarget { inner: Mutex::new(stream) })
+    }
+}
+
+impl RenderTarget for StreamTarget {
+    fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]) {
+        // 12-byte row header + 12 bytes per pixel (3 × f32). Sized exactly
+        // so the Vec allocates once and the write is a single contiguous
+        // payload.
+        let mut buf = Vec::with_capacity(12 + row.len() * 12);
+        buf.extend_from_slice(&y.to_le_bytes());
+        buf.extend_from_slice(&x.to_le_bytes());
+        buf.extend_from_slice(&(row.len() as u32).to_le_bytes());
+        for px in row {
+            buf.extend_from_slice(&(px[0] as f32).to_le_bytes());
+            buf.extend_from_slice(&(px[1] as f32).to_le_bytes());
+            buf.extend_from_slice(&(px[2] as f32).to_le_bytes());
+        }
+        // Errors are silently dropped to match the `RenderTarget` API
+        // (which has no `Result`). A dropped connection mid-render means
+        // the receiver gets a partial image and the renderer keeps going;
+        // for stage one that's acceptable. If we ever want hard failure,
+        // it's a single-line API change across all targets.
+        let _ = self.inner.lock().unwrap().write_all(&buf);
+    }
+
+    fn finish(&self) {
+        // Flush isn't strictly necessary (no BufWriter sits in front of
+        // the socket) but keeps the door open for later buffering. Drop
+        // closes the connection, which the receiver reads as EOF and
+        // treats as "render complete".
+        let _ = self.inner.lock().unwrap().flush();
     }
 }
 
