@@ -127,7 +127,7 @@ const SURFACE_WHITE_C: Surface = Surface {
 #[allow(dead_code)]
 pub fn scene_sphere_occlusion_test() -> Scene {
     Scene {
-        name: "Occlusion Test",
+        name: "Occlusion Test".to_string(),
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         lights: vec![Light::white([5.0, 5.0, 5.0])],
@@ -184,7 +184,7 @@ fn test_surface(light: f64, specular: f64) -> Surface {
 #[allow(dead_code)]
 pub fn scene_sphere_surface_test() -> Scene {
     Scene {
-        name: "Surface Finish Test",
+        name: "Surface Finish Test".to_string(),
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         lights: vec![Light::white([5.0, 5.0, 5.0])],
@@ -205,7 +205,7 @@ pub fn scene_sphere_surface_test() -> Scene {
 #[allow(dead_code)]
 pub fn scene_one_sphere() -> Scene {
     Scene {
-        name: "Single Sphere, Reflective Planes",
+        name: "Single Sphere, Reflective Planes".to_string(),
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         lights: vec![Light::white([10.0, 10.0, 10.0])],
@@ -240,7 +240,7 @@ pub fn scene_one_sphere() -> Scene {
 #[allow(dead_code)]
 pub fn scene_axis_spheres() -> Scene {
     Scene {
-        name: "Axis Spheres",
+        name: "Axis Spheres".to_string(),
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         lights: vec![Light::white([10.0, 10.0, 10.0])],
@@ -275,7 +275,7 @@ pub fn scene_axis_spheres() -> Scene {
 #[allow(dead_code)]
 pub fn scene_cuboid_test() -> Scene {
     Scene {
-        name: "Cuboid Test",
+        name: "Cuboid Test".to_string(),
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         lights: vec![Light::white([10.0, 10.0, 10.0])],
@@ -324,7 +324,7 @@ pub fn scene_group_test() -> Scene {
     // grouping has no rendering effect on its own, but it sets up the
     // structure that transforms will hang off of in the next step.
     Scene {
-        name: "Group Test",
+        name: "Group Test".to_string(),
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         lights: vec![Light::white([10.0, 10.0, 10.0])],
@@ -379,7 +379,7 @@ pub fn scene_transform_test() -> Scene {
     use std::f64::consts::PI;
 
     Scene {
-        name: "Transform Test",
+        name: "Transform Test".to_string(),
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         lights: vec![Light::white([10.0, 10.0, 10.0])],
@@ -472,7 +472,7 @@ pub fn scene_multi_light_test() -> Scene {
     // multiple objects are present, and the ground catches color-tinted
     // shadows from each light cast in opposite directions.
     Scene {
-        name: "Multi-Light Test",
+        name: "Multi-Light Test".to_string(),
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         lights: vec![
@@ -533,7 +533,7 @@ pub fn scene_teapot() -> Scene {
     // tall in its native coordinate space; adjust as needed for whatever
     // OBJ you drop in.
     Scene {
-        name: "Utah Teapot",
+        name: "Utah Teapot".to_string(),
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         lights: vec![Light::white([10.0, 10.0, 10.0])],
@@ -565,7 +565,7 @@ pub fn scene_teapot() -> Scene {
 #[allow(dead_code)]
 pub fn scene_ball_on_plane() -> Scene {
     Scene {
-        name: "Ball on Plane",
+        name: "Ball on Plane".to_string(),
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         lights: vec![Light::white([10.0, 10.0, 10.0])],
@@ -610,7 +610,7 @@ pub fn scene_cylinder_test() -> Scene {
     // Reflective checker plane underneath catches the cylinder shadows
     // and gives the reflective cylinder something to reflect.
     Scene {
-        name: "Cylinder Test",
+        name: "Cylinder Test".to_string(),
         camera: default_camera(),
         background: [0.0, 0.0, 0.0],
         lights: vec![Light::white([10.0, 10.0, 10.0])],

@@ -33,7 +33,7 @@ pub const MAT3_IDENTITY: Mat3 = [
 ///
 /// `transform_point(p) = linear * p + translation`
 /// `transform_vector(v) = linear * v`        (vectors don't translate)
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub struct Affine {
     pub linear: Mat3,
     pub translation: Point,

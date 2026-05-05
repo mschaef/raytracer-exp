@@ -10,9 +10,11 @@
 
 //! Library crate for the raytracer project.
 //!
-//! Currently exposes only the SDL (scene definition language) module.
-//! The renderer itself lives in `main.rs`'s private module tree for
-//! now; once Phase 2 of the SDL plan begins we'll move `render` and
-//! `scenes` here so the SDL bindings can reference them directly.
+//! Exposes the renderer (`render`), the hand-written Rust scenes
+//! (`scenes`), and the scene definition language (`sdl`). The binary
+//! crate (`main.rs`) and the SDL bindings consume these as a library;
+//! `tests/sdl_suite.rs` consumes the SDL via `raytracer::sdl`.
 
+pub mod render;
+pub mod scenes;
 pub mod sdl;

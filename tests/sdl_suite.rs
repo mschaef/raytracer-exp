@@ -53,6 +53,12 @@ use raytracer::sdl;
 /// catches drift.
 const DECLARED: &[&str] = &[
     "arithmetic",
+    "bindings_camera",
+    "bindings_lights",
+    "bindings_scene",
+    "bindings_shapes",
+    "bindings_surface",
+    "bindings_transforms",
     "closures",
     "comparison",
     "control_flow",
@@ -92,6 +98,12 @@ macro_rules! sdl_test {
 }
 
 sdl_test!(arithmetic);
+sdl_test!(bindings_camera);
+sdl_test!(bindings_lights);
+sdl_test!(bindings_scene);
+sdl_test!(bindings_shapes);
+sdl_test!(bindings_surface);
+sdl_test!(bindings_transforms);
 sdl_test!(closures);
 sdl_test!(comparison);
 sdl_test!(control_flow);

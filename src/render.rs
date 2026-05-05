@@ -58,7 +58,7 @@ use color::{
 
 use std::cmp::Ordering;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub struct Surface {
     pub color: LinearColor,
     pub ambient: f64,
@@ -73,6 +73,7 @@ pub struct Surface {
 /// and artistic control. The current shading model is white-implicit
 /// when `color = [1.0, 1.0, 1.0]` and `intensity = 1.0`, so existing
 /// scenes can be ported by wrapping their location in `Light::white`.
+#[derive(Clone, PartialEq, Debug)]
 pub struct Light {
     pub location: Point,
     pub color: LinearColor,
@@ -112,7 +113,7 @@ impl Light {
 ///                    Re-orthogonalized from the user's `up_hint`.
 /// - `half_height`  — half the height of the view plane at unit distance.
 ///                    Smaller values = more zoomed in.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub struct Camera {
     pub location: Point,
     pub forward: Point,
@@ -186,8 +187,13 @@ struct CameraDetails {
     pub oversample: u32,
 }
 
+#[derive(Clone, PartialEq, Debug)]
 pub struct Scene {
-    pub name: &'static str,
+    /// Human-readable name used in progress output and debugging.
+    /// `String` rather than `&'static str` so script-built scenes (from
+    /// the SDL) can carry runtime-derived names; static-string scene
+    /// literals just use `.to_string()` at construction.
+    pub name: String,
     pub camera: Camera,
     pub lights: Vec<Light>,
     pub objects: Vec<Shape>,

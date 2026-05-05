@@ -10,10 +10,12 @@
 
 //! Runtime values.
 //!
-//! Phase 1 has no host-type variants — those land in Phase 2 when the
-//! ray tracer's `Surface`, `Light`, etc. become bindable types. The
-//! shape of [`Value`] is intentionally simple: a flat enum, with
-//! collection variants holding `Rc` so that aliasing is free.
+//! Phase 1 had no host-type variants. Phase 2 adds them: the ray
+//! tracer's `Surface`, `Light`, `Camera`, `Affine`, `AABB`, `Shape`,
+//! and `Scene` types are now first-class SDL values, so scripts can
+//! build scenes that the renderer can later consume. The shape of
+//! [`Value`] is otherwise unchanged: a flat enum, with collection
+//! variants holding `Rc` so that aliasing is free.
 //!
 //! Equality semantics:
 //! - Numbers compare numerically; `Int(1) == Float(1.0)` is true.
@@ -22,12 +24,17 @@
 //! - Keywords and symbols compare by name.
 //! - Vecs compare elementwise; maps compare by key/value sets.
 //! - Functions compare by `Rc` identity (pointer equality).
+//! - Host-type values compare structurally (same field values),
+//!   reusing the `PartialEq` derives on the host structs.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 
+use crate::render::{Camera, Light, Scene, Surface};
+use crate::render::shapes::{AABB, Shape};
+use crate::render::transform::Affine;
 use crate::sdl::ast::Form;
 use crate::sdl::env::EnvRef;
 use crate::sdl::error::Position;
@@ -48,6 +55,21 @@ pub enum Value {
     /// keys are deferred per the Phase 1 design decision in CLAUDE.md.
     Map(Rc<HashMap<String, Value>>),
     Fn(Rc<Function>),
+
+    // ---------------- Phase 2 host types ----------------
+    //
+    // Inlined for the small Copy types so the Value enum stays cheap
+    // to clone; Rc-wrapped for the larger ones (Light, Shape, Scene)
+    // so that sharing is free and binding-side extraction can deep-clone
+    // through the Rc when ownership is needed (host constructors take
+    // owned values).
+    Surface(Surface),
+    Camera(Camera),
+    Affine(Affine),
+    Aabb(AABB),
+    Light(Rc<Light>),
+    Shape(Rc<Shape>),
+    Scene(Rc<Scene>),
 }
 
 impl Value {
@@ -64,6 +86,13 @@ impl Value {
             Value::Vec(_) => "vector",
             Value::Map(_) => "map",
             Value::Fn(_) => "fn",
+            Value::Surface(_) => "surface",
+            Value::Camera(_) => "camera",
+            Value::Affine(_) => "affine",
+            Value::Aabb(_) => "aabb",
+            Value::Light(_) => "light",
+            Value::Shape(_) => "shape",
+            Value::Scene(_) => "scene",
         }
     }
 
@@ -118,6 +147,18 @@ impl PartialEq for Value {
                 true
             }
             (Value::Fn(a), Value::Fn(b)) => Rc::ptr_eq(a, b),
+
+            // Host-type structural equality. The Copy variants compare
+            // by their fields (each host struct derives PartialEq);
+            // the Rc-wrapped variants short-circuit on pointer equality
+            // and otherwise fall through to derived field comparison.
+            (Value::Surface(a), Value::Surface(b)) => a == b,
+            (Value::Camera(a), Value::Camera(b)) => a == b,
+            (Value::Affine(a), Value::Affine(b)) => a == b,
+            (Value::Aabb(a), Value::Aabb(b)) => a == b,
+            (Value::Light(a), Value::Light(b)) => Rc::ptr_eq(a, b) || **a == **b,
+            (Value::Shape(a), Value::Shape(b)) => Rc::ptr_eq(a, b) || **a == **b,
+            (Value::Scene(a), Value::Scene(b)) => Rc::ptr_eq(a, b) || **a == **b,
             _ => false,
         }
     }
@@ -196,6 +237,27 @@ impl fmt::Display for Value {
                     None => f.write_str("#<fn>"),
                 },
             },
+
+            // Host-type summaries. These are opaque-ish for now —
+            // detailed printing is deferred. Tests that need to compare
+            // host values do so via `assert=` (structural equality) or
+            // by introspection helpers added to the bindings module.
+            Value::Surface(_) => f.write_str("#<surface>"),
+            Value::Camera(_) => f.write_str("#<camera>"),
+            Value::Affine(_) => f.write_str("#<affine>"),
+            Value::Aabb(_) => f.write_str("#<aabb>"),
+            Value::Light(_) => f.write_str("#<light>"),
+            Value::Shape(s) => match &**s {
+                Shape::Sphere(_)    => f.write_str("#<shape sphere>"),
+                Shape::Plane(_)     => f.write_str("#<shape plane>"),
+                Shape::Cuboid(_)    => f.write_str("#<shape cuboid>"),
+                Shape::Triangle(_)  => f.write_str("#<shape triangle>"),
+                Shape::Cylinder(_)  => f.write_str("#<shape cylinder>"),
+                Shape::Group(_)     => f.write_str("#<shape group>"),
+                Shape::Transform(_) => f.write_str("#<shape transform>"),
+                Shape::Bounded(_)   => f.write_str("#<shape bounded>"),
+            },
+            Value::Scene(s) => write!(f, "#<scene {:?}>", s.name),
         }
     }
 }

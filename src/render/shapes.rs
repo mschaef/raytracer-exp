@@ -33,18 +33,21 @@ use crate::render::transform::{
     mat3_transpose,
 };
 
+#[derive(Clone, PartialEq, Debug)]
 pub struct Sphere {
     pub center: Point,
     pub r: f64,
     pub surface: Surface,
 }
 
+#[derive(Clone, PartialEq, Debug)]
 pub struct Plane {
     pub normal: Point,
     pub p0: Point,
     pub surface: Surface,
 }
 
+#[derive(Clone, PartialEq, Debug)]
 pub struct Cuboid {
     pub center: Point,
     pub size: Point,
@@ -56,6 +59,7 @@ pub struct Cuboid {
 /// source mesh didn't supply per-vertex normals). Surface is per-triangle
 /// here; mesh loaders typically clone one surface across every triangle
 /// in a mesh, but the representation supports per-triangle materials too.
+#[derive(Clone, PartialEq, Debug)]
 pub struct Triangle {
     pub vertices: [Point; 3],
     pub normals: [Point; 3],
@@ -74,6 +78,7 @@ pub struct Triangle {
 /// cylinder, which this primitive can't represent. Wrap cylinders in
 /// `Transform` (rotate, translate, uniform scale) and the math stays correct;
 /// don't try to bake a non-uniform scale into `r` or `(p1 - p0)`.
+#[derive(Clone, PartialEq, Debug)]
 pub struct Cylinder {
     pub p0: Point,
     pub p1: Point,
@@ -91,7 +96,7 @@ pub struct Cylinder {
 /// meaningfully cheaper than `Cuboid::hit_test`. The `to_cuboid` method
 /// converts an AABB into a renderable `Cuboid` for visualization, which
 /// is useful for diagnosing bounds.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub struct AABB {
     pub min: Point,
     pub max: Point,
@@ -210,6 +215,7 @@ impl AABB {
 /// primitive the BVH builder will compose; for now scenes use it directly
 /// (e.g. wrap a loaded mesh in `bounded(...)`). The `Box` keeps `Shape`
 /// finite-sized.
+#[derive(Clone, PartialEq, Debug)]
 pub enum Shape {
     Sphere(Sphere),
     Plane(Plane),
@@ -226,6 +232,7 @@ pub enum Shape {
 /// auto-computes the bound from the child) or `bounded_with(bounds, child)`
 /// (which uses a caller-supplied bound — handy when the same bound is
 /// being used for both acceleration and visualization).
+#[derive(Clone, PartialEq, Debug)]
 pub struct Bounded {
     pub bounds: AABB,
     pub child: Shape,
@@ -244,6 +251,7 @@ pub struct Bounded {
 ///   child's local-space normal back to world space. Using the
 ///   inverse-transpose rather than the forward matrix is what keeps normals
 ///   correct under non-uniform scale.
+#[derive(Clone, PartialEq, Debug)]
 pub struct Transformed {
     pub forward: Affine,
     pub inverse: Affine,

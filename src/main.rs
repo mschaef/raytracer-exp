@@ -11,11 +11,8 @@
 use std::env;
 use std::time::Instant;
 
-mod render;
-mod scenes;
-
-use render::{render, Scene};
-use render::output::{
+use raytracer::render::{render, Scene};
+use raytracer::render::output::{
     PngTarget,
     StreamTarget,
     OffsetTarget,
@@ -27,7 +24,7 @@ use render::output::{
     OffsetHeatmapTarget,
 };
 
-use scenes::{
+use raytracer::scenes::{
     //scene_sphere_occlusion_test,
     //scene_sphere_surface_test,
     scene_cuboid_test,
@@ -58,7 +55,7 @@ fn render_into<T: RenderTarget + ?Sized>(
     // row-completion updates while the render is in flight. The wrapper
     // forwards every submit_row to the underlying target unchanged and
     // emits a closing newline via finish() (called by render() at end).
-    let progress = ProgressTarget::new(target, sy, scene.name);
+    let progress = ProgressTarget::new(target, sy, &scene.name);
 
     let start = Instant::now();
     render(scene, sx, sy, &progress, heatmap, parallel);

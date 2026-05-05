@@ -10,21 +10,25 @@
 
 //! Scene definition language: a small Clojure-subset Lisp.
 //!
-//! Phase 1 — language core only. No host bindings to the renderer yet;
-//! that's Phase 2. See `CLAUDE.md` for the full implementation plan.
+//! Phase 1 covers the language core (literals, special forms, vector
+//! and map ops, recur, destructuring). Phase 2 adds host bindings:
+//! script-callable constructors for the ray tracer's `Surface`,
+//! `Light`, `Camera`, `Shape`, and `Scene` types. See `CLAUDE.md` for
+//! the full phased plan.
 //!
 //! Public entry points:
 //!
 //! - [`read_and_eval`] — parse a source string and evaluate it in a
 //!   fresh interpreter, returning the value of the final form.
-//! - [`default_env`] — a fresh environment populated with the Phase 1
-//!   built-in functions and special-form bindings the evaluator needs.
+//! - [`default_env`] — a fresh environment populated with the language
+//!   built-ins (Phase 1) and host bindings (Phase 2).
 //!
 //! Errors are surfaced via panic with a source position, matching the
 //! rest of this codebase. The test harness in `tests/sdl_suite.rs`
 //! catches these via `std::panic::catch_unwind`.
 
 pub mod ast;
+pub mod bindings;
 pub mod builtins;
 pub mod env;
 pub mod error;
@@ -36,10 +40,12 @@ pub use env::{EnvRef, Environment};
 pub use error::{Position, SdlError};
 pub use value::Value;
 
-/// Build a fresh environment populated with all Phase 1 built-ins.
+/// Build a fresh environment populated with the language built-ins
+/// and the host-type bindings.
 pub fn default_env() -> EnvRef {
     let env = Environment::new_root();
     builtins::install(&env);
+    bindings::install(&env);
     env
 }
 

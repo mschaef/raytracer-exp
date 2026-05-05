@@ -400,6 +400,66 @@ Approximate order of recent commits, oldest first:
     Phase 2 (the BVH builder) deferred — manual annotation is fine
     for the model sizes this codebase handles.
 
+13. **SDL phase 1: language core.** New `src/sdl/` module tree implements
+    a small Clojure-subset Lisp: `reader.rs` (tokenizer + s-expression
+    reader with source positions), `ast.rs`, `value.rs`, `env.rs`
+    (parent-linked `Rc<RefCell<HashMap>>`), `eval.rs` (tree walker,
+    special forms `def`/`let`/`fn`/`if`/`do`/`quote`/`recur`/`and`/`or`,
+    function application with a recur loop, vector-pattern destructuring
+    in `let` and `fn`), `builtins.rs` (arithmetic + comparison with
+    int/float promotion, vector and map ops, predicates, `assert` /
+    `assert=`), `error.rs` (position-tagged panics via `sdl_panic!`).
+    A small `sdl_run` binary in `src/bin/` evaluates ad-hoc scripts.
+    Verification is a per-file test convention departing from the
+    rest of the codebase: each `tests/sdl/<topic>.lisp` script becomes
+    a `#[test]` via the `sdl_test!` macro in `tests/sdl_suite.rs`,
+    plus an `all_scripts_have_a_test` guard that catches drift between
+    the on-disk files and declared tests. To make the SDL crate
+    consumable from outside the binary, `src/lib.rs` was introduced
+    exposing `pub mod sdl;` initially, then expanded to also expose
+    `pub mod render;` and `pub mod scenes;` when phase 2 began (see
+    next entry).
+
+14. **SDL phase 2: host bindings.** Script-callable constructors for
+    every ray tracer host type live in `src/sdl/bindings.rs` and get
+    installed into the default environment alongside the Phase 1
+    built-ins. New `Value` variants — `Surface`, `Camera`, `Affine`,
+    `Aabb` (Copy types, inlined) and `Light(Rc<...>)`, `Shape(Rc<...>)`,
+    `Scene(Rc<...>)` — make host values first-class in the language,
+    structurally comparable via `assert=` (the new variants reuse the
+    `PartialEq` derives added to the host structs). Multi-field
+    constructors are map-keyed: `(surface {:color [...] :ambient n
+    :specular n :light n :checked b :reflection n})`,
+    `(sphere {:center [...] :r n :surface S})`, `(plane {:normal [...]
+    :p0 [...] :surface S})`, `(cuboid {:center [...] :size [...]
+    :surface S})`, `(triangle {:vertices [...] :normals [...]
+    :surface S})` (`:normals` optional — falls back to the geometric
+    face normal), `(cylinder {:p0 [...] :p1 [...] :r n :surface S})`,
+    `(scene {:name "..." :camera C :background [...] :lights [...]
+    :objects [...] :reflect-limit n :oversample n})`. Single-purpose
+    constructors are positional: `(light-white p)`, `(light-point p
+    c i)`, `(camera-looking-at loc look up zoom)`, `(camera-with-fov
+    loc look up fov)`, `(translate d s)`, `(scale s s)`, `(rotate-x
+    θ s)` / `-y` / `-z`, `(rotate-axis axis θ s)`, `(transform a s)`,
+    `(group [s1 s2 ...])`, `(bounded s)`, `(bounded-with aabb s)`. The
+    `Affine` and `AABB` types are exposed via their own constructors:
+    `(affine-identity)`, `(affine-translation d)`, `(affine-scale s)`,
+    `(affine-rotation-x θ)` / `-y` / `-z`, `(affine-rotation-axis a θ)`,
+    `(affine-compose a b)`, `(affine-inverse a)`, `(aabb min max)`.
+    Type predicates `surface?` / `camera?` / `affine?` / `aabb?` /
+    `light?` / `shape?` / `scene?` complete the surface area. Numbers
+    are accepted as int or float and coerced — scripts can write
+    `:r 1` instead of `:r 1.0`. `Scene::name` was changed from
+    `&'static str` to `String` so script-built scenes carry runtime
+    names without leaking memory; existing scene literals in
+    `scenes.rs` use `.to_string()`. New tests in
+    `tests/sdl/bindings_*.lisp` (one per surface / lights / camera /
+    leaf shapes / transforms / scene) verify construction works,
+    type predicates classify correctly, and equivalent-input scenes
+    compare structurally equal. Phase ends here: an SDL script can
+    produce a `Scene` value identical to one assembled in Rust;
+    actual rendering dispatch is Phase 3.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -528,28 +588,11 @@ existence, dimensions, and a handful of pixel values).
 
 ### Phases
 
-**Phase 1 — Language core (no host bindings).** Reader and AST with source
-positions. `Value` enum without host variants. Environment. Evaluator with
-all special forms. Built-ins: arithmetic and comparison with int/float
-auto-promotion; logic (`and`, `or`, `not`); vec literals and operations
-(`nth`, `count`, `first`, `rest`, `conj`); map literals and operations
-(`get`, `assoc`, `dissoc`, `keys`, `vals`); `print`/`println`;
-`assert`/`assert=`. Vector destructuring in `let` and `fn`. `recur` in
-`fn` bodies as a same-frame jump. Optional CLI binary `sdl-run` for ad-hoc
-evaluation. Phase ends when the language test suite (literals, arithmetic,
-all special forms, lexical scoping, closures, destructuring, `recur`,
-error positions) passes.
+**Phase 1 — Language core (no host bindings).** Done; see "Recent work
+history."
 
-**Phase 2 — Host bindings: scene construction.** `Value` variants for
-`Surface`, `Light`, `Camera`, `Shape`, `Scene`. Native function registration
-mechanism with typed argument unwrapping. Bindings for: the `Surface`
-constructor (likely map-keyed); `light-white`, `light-point`;
-`camera-looking-at`, `camera-with-fov`; `sphere`, `plane`, `cuboid`;
-`group`, `transform`, `translate`, `scale`, `rotate-x`/`y`/`z`,
-`rotate-axis`, `bounded`, `bounded-with`; `scene`. Tests assert that
-script-built values match Rust-built equivalents. No rendering yet — phase
-ends when an SDL script can produce a `Scene` value identical to one
-assembled in Rust.
+**Phase 2 — Host bindings: scene construction.** Done; see "Recent work
+history."
 
 **Phase 3 — Render dispatch.** `Value` variants for render targets.
 Bindings for: `png-target`, `offset-target`, `progress-target`; `render`;
@@ -577,17 +620,24 @@ optimizations.
 
 To be settled when each phase begins, not committed to in this plan:
 
-- File extension for SDL scripts: `.lisp`, `.scene`, `.rt`, or other.
-- `Surface` construction syntax: positional vs. map-keyed (or both).
-  Map-keyed is more readable; positional is shorter.
-- Whether `Value` carries host types directly (`Value::Shape(Shape)`)
-  or via a small wrapper to keep `Value` cheap to clone. Likely direct,
-  but the `Shape` enum is largish — measure first.
-- Map key types: keyword-only or also string/symbol/number. Keyword-only
-  is simplest.
+- File extension for SDL scripts: settled on `.lisp` for now (matches
+  the test suite); revisit if the SDL grows enough to deserve its own
+  extension.
 - Whether scripts have a "result" value (returned by the top-level form)
-  or are evaluated purely for side effects. Rendering is a side effect
-  either way.
+  or are evaluated purely for side effects. Rendering will be a side
+  effect either way once Phase 3 lands.
+
+Settled in earlier phases:
+
+- `Value` carries host types directly: small Copy types (`Surface`,
+  `Camera`, `Affine`, `Aabb`) inline, larger ones (`Light`, `Shape`,
+  `Scene`) wrapped in `Rc` for cheap cloning. `Shape` derives Clone
+  so binding-side extraction can deep-clone through the `Rc` when the
+  host constructor needs ownership.
+- Multi-field constructors are map-keyed; single-purpose constructors
+  are positional. Map keys are keyword-only.
+- `Scene::name` is `String` so script-built scenes carry runtime
+  names; existing scene literals use `.to_string()`.
 
 ## Future directions
 
