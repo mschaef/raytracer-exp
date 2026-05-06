@@ -38,6 +38,7 @@ use crate::render::transform::Affine;
 use crate::sdl::ast::Form;
 use crate::sdl::env::EnvRef;
 use crate::sdl::error::Position;
+use crate::sdl::target::SdlTarget;
 
 /// A runtime value.
 #[derive(Clone)]
@@ -70,6 +71,17 @@ pub enum Value {
     Light(Rc<Light>),
     Shape(Rc<Shape>),
     Scene(Rc<Scene>),
+
+    // ---------------- Phase 3 render dispatch ----------------
+    //
+    // A render target value: PNG buffer, offset wrapper, progress
+    // wrapper. The variant is distinct from `Shape`/`Scene` even
+    // though it's also `Rc`-wrapped because targets are *stateful* —
+    // calling `submit_row` mutates the underlying buffer — so
+    // structural equality doesn't make sense the way it does for the
+    // pure-data scene types. Equality on `Target` is identity (Rc
+    // pointer equality), matching `Fn`.
+    Target(Rc<SdlTarget>),
 }
 
 impl Value {
@@ -93,6 +105,7 @@ impl Value {
             Value::Light(_) => "light",
             Value::Shape(_) => "shape",
             Value::Scene(_) => "scene",
+            Value::Target(_) => "target",
         }
     }
 
@@ -159,6 +172,9 @@ impl PartialEq for Value {
             (Value::Light(a), Value::Light(b)) => Rc::ptr_eq(a, b) || **a == **b,
             (Value::Shape(a), Value::Shape(b)) => Rc::ptr_eq(a, b) || **a == **b,
             (Value::Scene(a), Value::Scene(b)) => Rc::ptr_eq(a, b) || **a == **b,
+            // Targets are stateful (their buffers mutate during
+            // render); equality is pointer identity, matching `Fn`.
+            (Value::Target(a), Value::Target(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -258,6 +274,13 @@ impl fmt::Display for Value {
                 Shape::Bounded(_)   => f.write_str("#<shape bounded>"),
             },
             Value::Scene(s) => write!(f, "#<scene {:?}>", s.name),
+            Value::Target(t) => {
+                if t.is_png() {
+                    f.write_str("#<target png>")
+                } else {
+                    f.write_str("#<target>")
+                }
+            }
         }
     }
 }

@@ -456,9 +456,43 @@ Approximate order of recent commits, oldest first:
     `tests/sdl/bindings_*.lisp` (one per surface / lights / camera /
     leaf shapes / transforms / scene) verify construction works,
     type predicates classify correctly, and equivalent-input scenes
-    compare structurally equal. Phase ends here: an SDL script can
-    produce a `Scene` value identical to one assembled in Rust;
-    actual rendering dispatch is Phase 3.
+    compare structurally equal.
+
+15. **SDL phase 3: render dispatch.** Closes the loop — a script can
+    now drive a render to disk without touching Rust. New
+    `Value::Target(Rc<SdlTarget>)` variant, with `SdlTarget` (in
+    `src/sdl/target.rs`) wrapping an `Arc<dyn RenderTarget>` for the
+    renderer-facing handle plus an optional `Arc<PngTarget>` for
+    `save-png`. The Arc wrapper is what makes runtime composition
+    work: the host `OffsetTarget` and `ProgressTarget` are
+    lifetime-parameterized for stack-allocated quadrant compositing
+    in `main.rs`, which doesn't fit a heap-allocated SDL value.
+    `src/render/output.rs` gained two owned counterparts —
+    `ArcOffsetTarget` and `ArcProgressTarget` — that take
+    `Arc<dyn RenderTarget>` instead of a borrowed reference; same
+    `submit_row`/`finish` semantics as the existing borrowed forms.
+    `PngTarget::save` was changed from `self`-consuming to `&self`
+    (it's a thin shim over `image::ImageBuffer::save`, which already
+    takes `&self`); this keeps the SDL ownership model simple and
+    main.rs's call site is unaffected. Bindings:
+    `(png-target w h)` constructs a fresh PNG buffer;
+    `(offset-target inner dx dy)` and
+    `(progress-target inner total-rows label)` wrap an existing
+    target, propagating the optional `PngTarget` handle so
+    `save-png` keeps working through wrappers;
+    `(render scene target w h)` drives an end-to-end parallel render
+    and returns the target so calls can be chained;
+    `(save-png target path)` writes the accumulated buffer to disk.
+    Equality on `Value::Target` is `Rc` pointer identity (matching
+    `Fn`) since targets are stateful and structural equality
+    wouldn't be meaningful. Tests:
+    `tests/sdl/render_dispatch.lisp` exercises constructors,
+    predicates, and `(render ...)` without touching disk; a separate
+    Rust-side `render_dispatch_save` test in `tests/sdl_suite.rs`
+    injects an `OUTPUT-PATH` binding into the env, evaluates an
+    inline script that calls `(save-png ...)`, and verifies the
+    resulting file is a 16×16 PNG with at least one lit pixel near
+    the center.
 
 ## Pitfalls and conventions
 
@@ -557,10 +591,15 @@ src/sdl/
   eval.rs     Evaluator: dispatch on AST node type, special forms, apply.
   builtins.rs Pure-language built-in functions (arithmetic, vec, map, etc.).
   bindings.rs Native function bindings to the ray tracer API.
+  target.rs   SdlTarget — Arc-wrapped render-target value for the SDL.
   error.rs    Error type with source positions; pretty printer.
 ```
 
-The `render` module's public API is unchanged; the SDL is a layer above it.
+The `render` module's public API is unchanged in shape; the SDL is a
+layer above it. Phase 3 added two owned counterparts to existing
+output types (`ArcOffsetTarget`, `ArcProgressTarget`) and relaxed
+`PngTarget::save` from consuming to borrowing — both additive
+changes.
 
 ### Test suite
 
@@ -594,10 +633,7 @@ history."
 **Phase 2 — Host bindings: scene construction.** Done; see "Recent work
 history."
 
-**Phase 3 — Render dispatch.** `Value` variants for render targets.
-Bindings for: `png-target`, `offset-target`, `progress-target`; `render`;
-`save-png`. Tests extend with end-to-end rendering: a small known scene
-in script, assert file existence, dimensions, and spot-check pixels.
+**Phase 3 — Render dispatch.** Done; see "Recent work history."
 
 **Phase 4 — Standard library and ergonomics.** In-language conveniences:
 `cond`, `when`, `when-not`, `->`, `->>`, `map`, `filter`, `reduce`,

@@ -39,6 +39,7 @@ extern crate image;
 use std::io::{self, Write};
 use std::net::TcpStream;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -104,9 +105,14 @@ impl PngTarget {
         buf.put_pixel(x, y, image::Rgb(encoded));
     }
 
-    /// Save the accumulated buffer as a PNG. Consumes the target.
-    pub fn save(self, path: impl AsRef<Path>) -> ImageResult<()> {
-        self.buffer.into_inner().unwrap().save(path)
+    /// Save the accumulated buffer as a PNG. Borrows `self` so the
+    /// target remains usable afterward — useful for the SDL where
+    /// targets live behind a shared pointer and consumption would
+    /// require ownership juggling. The underlying `image::ImageBuffer`
+    /// has its own `&self` save, so this is just a thin shim that
+    /// holds the mutex for the duration of the I/O.
+    pub fn save(&self, path: impl AsRef<Path>) -> ImageResult<()> {
+        self.buffer.lock().unwrap().save(path)
     }
 }
 
@@ -306,6 +312,80 @@ impl<'a, T: RenderTarget + ?Sized + 'a> RenderTarget for ProgressTarget<'a, T> {
         eprintln!();
         // Propagate so the inner target's own end-of-render hook fires
         // (e.g. a streaming target sending "Done").
+        self.inner.finish();
+    }
+}
+
+/// Owned counterpart to [`OffsetTarget`]. Same semantics — every
+/// `submit_row` is forwarded to `inner` with `(dx, dy)` added — but
+/// holds an `Arc<dyn RenderTarget>` instead of a borrowed reference,
+/// so the wrapper itself can live in a heap-allocated, reference-
+/// counted value (e.g. an SDL [`Value::Target`](crate::sdl::value::Value)).
+///
+/// `OffsetTarget` is preferred where the inner target's lifetime is
+/// statically known (the four-quadrant render in `main.rs`); this
+/// variant exists for callers that build target trees at runtime.
+/// Like `OffsetTarget`, does not propagate `finish()` to the inner
+/// target — multiple `ArcOffsetTarget`s commonly share one inner.
+pub struct ArcOffsetTarget {
+    inner: Arc<dyn RenderTarget>,
+    dx: u32,
+    dy: u32,
+}
+
+impl ArcOffsetTarget {
+    pub fn new(inner: Arc<dyn RenderTarget>, dx: u32, dy: u32) -> Self {
+        ArcOffsetTarget { inner, dx, dy }
+    }
+}
+
+impl RenderTarget for ArcOffsetTarget {
+    fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]) {
+        self.inner.submit_row(x + self.dx, y + self.dy, row);
+    }
+    // finish() intentionally not propagated — see struct doc.
+}
+
+/// Owned counterpart to [`ProgressTarget`]. Same behavior — forwards
+/// every `submit_row` to `inner` and prints `\r{label}: n/total rows`
+/// progress to stderr — but holds an `Arc<dyn RenderTarget>` so it
+/// composes cleanly into runtime-built target trees (see
+/// [`ArcOffsetTarget`] for the rationale).
+///
+/// Propagates `finish()` to the inner target, matching `ProgressTarget`'s
+/// rule.
+pub struct ArcProgressTarget {
+    inner: Arc<dyn RenderTarget>,
+    total_rows: u32,
+    completed: AtomicU32,
+    label: String,
+}
+
+impl ArcProgressTarget {
+    pub fn new(inner: Arc<dyn RenderTarget>, total_rows: u32, label: String) -> Self {
+        ArcProgressTarget {
+            inner,
+            total_rows,
+            completed: AtomicU32::new(0),
+            label,
+        }
+    }
+}
+
+impl RenderTarget for ArcProgressTarget {
+    fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]) {
+        self.inner.submit_row(x, y, row);
+
+        let n = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
+
+        let stderr = std::io::stderr();
+        let mut handle = stderr.lock();
+        let _ = write!(handle, "\r  {}: {}/{} rows ", self.label, n, self.total_rows);
+        let _ = handle.flush();
+    }
+
+    fn finish(&self) {
+        eprintln!();
         self.inner.finish();
     }
 }

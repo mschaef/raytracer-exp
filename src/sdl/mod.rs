@@ -11,10 +11,14 @@
 //! Scene definition language: a small Clojure-subset Lisp.
 //!
 //! Phase 1 covers the language core (literals, special forms, vector
-//! and map ops, recur, destructuring). Phase 2 adds host bindings:
-//! script-callable constructors for the ray tracer's `Surface`,
-//! `Light`, `Camera`, `Shape`, and `Scene` types. See `CLAUDE.md` for
-//! the full phased plan.
+//! and map ops, recur, destructuring). Phase 2 adds host bindings for
+//! scene construction: script-callable constructors for the ray
+//! tracer's `Surface`, `Light`, `Camera`, `Shape`, and `Scene` types.
+//! Phase 3 adds render dispatch — render-target constructors
+//! (`png-target`, `offset-target`, `progress-target`), `(render ...)`,
+//! and `(save-png ...)` — so a script can drive an end-to-end render
+//! to disk without touching Rust. See `CLAUDE.md` for the full phased
+//! plan.
 //!
 //! Public entry points:
 //!
@@ -34,6 +38,7 @@ pub mod env;
 pub mod error;
 pub mod eval;
 pub mod reader;
+pub mod target;
 pub mod value;
 
 pub use env::{EnvRef, Environment};

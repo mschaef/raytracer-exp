@@ -45,8 +45,10 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use raytracer::sdl;
+use raytracer::sdl::value::Value;
 
 /// The list of declared script tests. Kept manually in sync with
 /// `tests/sdl/*.lisp`. The `all_scripts_have_a_test` test below
@@ -71,6 +73,7 @@ const DECLARED: &[&str] = &[
     "predicates",
     "quote",
     "recur",
+    "render_dispatch",
     "strings",
     "vec_ops",
 ];
@@ -116,8 +119,92 @@ sdl_test!(map_ops);
 sdl_test!(predicates);
 sdl_test!(quote);
 sdl_test!(recur);
+sdl_test!(render_dispatch);
 sdl_test!(strings);
 sdl_test!(vec_ops);
+
+/// End-to-end render-dispatch test: build a small scene in script,
+/// render it through the SDL bindings, save the result, and verify
+/// the resulting file is a valid PNG of the expected dimensions.
+///
+/// Lives outside the `tests/sdl/*.lisp` discovery loop because it
+/// needs the host to inject an `OUTPUT-PATH` binding and to do
+/// post-render filesystem assertions — the script itself can't do
+/// either. The script source is inline here for the same reason: it's
+/// tied to the surrounding Rust harness, not standalone.
+#[test]
+fn render_dispatch_save() {
+    let env = sdl::default_env();
+
+    // Use a per-test-name path under the platform tempdir so the
+    // file name is unique across the suite. `process::id` would also
+    // disambiguate across concurrent test binaries if that ever
+    // mattered.
+    let path = std::env::temp_dir().join(format!(
+        "sdl_phase3_render_dispatch_save_{}.png",
+        std::process::id()
+    ));
+    // Clean up any leftover from a prior run before we render — a
+    // failed previous run could have left a file behind, and we want
+    // the existence check below to actually mean "this run wrote it."
+    let _ = fs::remove_file(&path);
+
+    let path_str = path.to_string_lossy().to_string();
+    env.borrow_mut().define(
+        "OUTPUT-PATH",
+        Value::String(Rc::new(path_str.clone())),
+    );
+
+    let source = r#"
+(def red (surface {:color [1.0 0.2 0.2] :ambient 0.4 :light 0.6}))
+(def s (scene {:name "phase3-save"
+               :camera (camera-looking-at [0 0 5] [0 0 0] [0 1 0] 1.0)
+               :background [0 0 0]
+               :lights [(light-white [10 10 10])]
+               :objects [(sphere {:center [0 0 0] :r 1.0 :surface red})]
+               :reflect-limit 0
+               :oversample 1}))
+(def t (png-target 16 16))
+(render s t 16 16)
+(save-png t OUTPUT-PATH)
+"#;
+
+    sdl::eval_source(source, "render_dispatch_save.lisp", &env);
+
+    assert!(
+        path.exists(),
+        "save-png must produce a file at {}",
+        path.display()
+    );
+
+    // Open the saved PNG and check its dimensions match what the
+    // script asked for. The `image` crate is already a regular
+    // dependency (it's what PngTarget writes through), so this is
+    // free. Convert immediately to a concrete `RgbImage` so the
+    // dimension/get_pixel calls below are inherent methods on the
+    // buffer, not trait methods that would need `GenericImageView`
+    // imported.
+    let rgb = image::open(&path)
+        .unwrap_or_else(|e| panic!("save-png file must be a readable PNG: {}", e))
+        .to_rgb8();
+    assert_eq!(rgb.width(), 16, "PNG width");
+    assert_eq!(rgb.height(), 16, "PNG height");
+
+    // Spot-check: a red sphere centered in the frame, lit by a white
+    // light, should produce at least one non-black pixel near the
+    // center. Don't pin exact values — anti-aliasing, lighting math,
+    // and oversampling all interact and we just want to confirm the
+    // renderer wrote *something* sensible. If this ever flakes, the
+    // problem is upstream of the SDL bindings.
+    let center = rgb.get_pixel(8, 8).0;
+    assert!(
+        center[0] > 0 || center[1] > 0 || center[2] > 0,
+        "center pixel should be lit, got {:?}",
+        center
+    );
+
+    fs::remove_file(&path).ok();
+}
 
 /// Guard test: every `.lisp` file in `tests/sdl/` must have a
 /// corresponding `sdl_test!` declaration above. Catches "added a

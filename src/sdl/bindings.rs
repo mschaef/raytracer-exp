@@ -8,11 +8,11 @@
 //
 // You must not remove this notice, or any other, from this software.
 
-//! Phase 2 host bindings.
+//! Host bindings.
 //!
-//! Wires the ray tracer's `Surface`, `Light`, `Camera`, `Shape`, and
-//! `Scene` types up as native SDL functions, so scripts can build the
-//! same scene values that Rust scenes (in `crate::scenes`) build.
+//! Wires the ray tracer's `Surface`, `Light`, `Camera`, `Shape`,
+//! `Scene`, and `RenderTarget` types up as native SDL functions, so
+//! scripts can build and render scenes without touching Rust.
 //!
 //! Multi-field constructors (`surface`, `sphere`, `plane`, `cuboid`,
 //! `triangle`, `cylinder`, `scene`) are map-keyed: a single argument
@@ -23,15 +23,22 @@
 //! positional since they have only a few arguments and the order is
 //! intuitive.
 //!
+//! Phase 2 added scene-construction bindings; Phase 3 added the
+//! render-dispatch bindings (`png-target`, `offset-target`,
+//! `progress-target`, `render`, `save-png`) that drive an end-to-end
+//! render to disk.
+//!
 //! Numbers passed to host fields are accepted as either int or float
 //! and coerced to f64 — scripts can write `(sphere {:r 1 :center [0 0 0] ...})`
 //! without sprinkling `1.0`s through the source.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::rc::Rc;
 
 use crate::render::color::LinearColor;
 use crate::render::geometry::Point;
+use crate::render::render;
 use crate::render::shapes::{
     bounded, bounded_with, group, rotate_axis, rotate_x, rotate_y, rotate_z,
     scale, transform, translate, AABB, Cuboid, Cylinder, Plane, Shape, Sphere,
@@ -42,6 +49,7 @@ use crate::render::{Camera, Light, Scene, Surface};
 
 use crate::sdl::env::EnvRef;
 use crate::sdl::error::Position;
+use crate::sdl::target::SdlTarget;
 use crate::sdl::value::{Function, FunctionKind, NativeFn, Value};
 use crate::sdl_panic;
 
@@ -49,8 +57,10 @@ use crate::sdl_panic;
 // Installation
 // ---------------------------------------------------------------------------
 
-/// Install every Phase 2 binding into `env`. Called by `default_env`
-/// after the language built-ins are installed so a script can use both.
+/// Install every host binding into `env`. Called by `default_env`
+/// after the language built-ins are installed so a script can use
+/// both. Covers the Phase 2 scene-construction surface and the
+/// Phase 3 render-dispatch surface.
 pub fn install(env: &EnvRef) {
     // Surfaces.
     define_native(env, "surface", builtin_surface);
@@ -100,6 +110,13 @@ pub fn install(env: &EnvRef) {
     // Scene aggregation.
     define_native(env, "scene", builtin_scene);
 
+    // Render dispatch (Phase 3).
+    define_native(env, "png-target", builtin_png_target);
+    define_native(env, "offset-target", builtin_offset_target);
+    define_native(env, "progress-target", builtin_progress_target);
+    define_native(env, "render", builtin_render);
+    define_native(env, "save-png", builtin_save_png);
+
     // Type predicates for the new variants.
     define_native(env, "surface?", builtin_surface_q);
     define_native(env, "camera?", builtin_camera_q);
@@ -108,6 +125,7 @@ pub fn install(env: &EnvRef) {
     define_native(env, "light?", builtin_light_q);
     define_native(env, "shape?", builtin_shape_q);
     define_native(env, "scene?", builtin_scene_q);
+    define_native(env, "target?", builtin_target_q);
 }
 
 fn define_native(env: &EnvRef, name: &'static str, func: NativeFn) {
@@ -424,6 +442,48 @@ fn require_aabb(v: &Value, ctx: &str, pos: &Position) -> AABB {
             other.type_name()
         ),
     }
+}
+
+/// Pull the (Rc-shared) `SdlTarget` out of a `Value::Target`. Returns
+/// the shared `Rc` so callers can re-share without cloning the
+/// underlying target.
+fn require_target(v: &Value, ctx: &str, pos: &Position) -> Rc<SdlTarget> {
+    match v {
+        Value::Target(t) => t.clone(),
+        other => sdl_panic!(
+            pos.clone(),
+            "{} expected a target, got {} ({})",
+            ctx,
+            other,
+            other.type_name()
+        ),
+    }
+}
+
+fn require_scene_value(v: &Value, ctx: &str, pos: &Position) -> Rc<Scene> {
+    match v {
+        Value::Scene(s) => s.clone(),
+        other => sdl_panic!(
+            pos.clone(),
+            "{} expected a scene, got {} ({})",
+            ctx,
+            other,
+            other.type_name()
+        ),
+    }
+}
+
+/// Coerce an int or float that's required to be non-negative into
+/// `u32`. Used for image dimensions and offset components.
+fn require_u32(v: &Value, ctx: &str, pos: &Position) -> u32 {
+    let n = require_int(v, ctx, pos);
+    if n < 0 {
+        sdl_panic!(pos.clone(), "{} expected a non-negative integer (got {})", ctx, n);
+    }
+    if n > u32::MAX as i64 {
+        sdl_panic!(pos.clone(), "{} integer out of u32 range (got {})", ctx, n);
+    }
+    n as u32
 }
 
 // ---------------------------------------------------------------------------
@@ -836,4 +896,89 @@ fn builtin_shape_q(args: &[Value], pos: &Position) -> Value {
 }
 fn builtin_scene_q(args: &[Value], pos: &Position) -> Value {
     unary_predicate(args, "scene?", pos, |v| matches!(v, Value::Scene(_)))
+}
+fn builtin_target_q(args: &[Value], pos: &Position) -> Value {
+    unary_predicate(args, "target?", pos, |v| matches!(v, Value::Target(_)))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 — render dispatch
+// ---------------------------------------------------------------------------
+//
+// Targets are stateful and reference-counted: `(png-target ...)` produces
+// a value that can be shared across `(render ...)` calls and `(save-png ...)`
+// without ownership juggling. The wrappers `(offset-target ...)` and
+// `(progress-target ...)` produce new target values that internally hold
+// an Arc to the wrapped target — so wrapping doesn't move the inner
+// target out of the script's environment, and the script can still refer
+// to the original.
+//
+// `(render ...)` is positional rather than map-keyed even though it has
+// four parameters: `scene`, `target`, `width`, `height`. The order
+// reads naturally ("render this scene to that target at WxH") and the
+// shape is closed enough not to need optional fields.
+
+/// `(png-target width height)` — a fresh in-memory PNG buffer.
+fn builtin_png_target(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 2, "png-target", pos);
+    let w = require_u32(&args[0], "png-target width", pos);
+    let h = require_u32(&args[1], "png-target height", pos);
+    Value::Target(Rc::new(SdlTarget::png(w, h)))
+}
+
+/// `(offset-target inner dx dy)` — wrap `inner` so its rows land at
+/// `(dx, dy)` instead of `(0, 0)`. Save-ability passes through:
+/// wrapping a png-target keeps `save-png` working on the wrapper.
+fn builtin_offset_target(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 3, "offset-target", pos);
+    let inner = require_target(&args[0], "offset-target inner", pos);
+    let dx = require_u32(&args[1], "offset-target dx", pos);
+    let dy = require_u32(&args[2], "offset-target dy", pos);
+    Value::Target(Rc::new(SdlTarget::offset(&inner, dx, dy)))
+}
+
+/// `(progress-target inner total-rows label)` — wrap `inner` with
+/// row-completion progress reporting on stderr.
+fn builtin_progress_target(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 3, "progress-target", pos);
+    let inner = require_target(&args[0], "progress-target inner", pos);
+    let total = require_u32(&args[1], "progress-target total-rows", pos);
+    let label = require_string(&args[2], "progress-target label", pos);
+    Value::Target(Rc::new(SdlTarget::progress(&inner, total, label)))
+}
+
+/// `(render scene target width height)` — drive an end-to-end render
+/// of `scene` into `target` at `width × height` pixels. Always uses
+/// the parallel renderer; the host's `PARALLEL=n` toggle is a
+/// `main`-level concern that the SDL doesn't surface yet. The
+/// per-pixel heatmap is also off — Phase 6+ will add it back.
+///
+/// Returns the target so calls can chain via `->`-style threading
+/// (Phase 4) or be used inline.
+fn builtin_render(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 4, "render", pos);
+    let scene = require_scene_value(&args[0], "render scene", pos);
+    let target = require_target(&args[1], "render target", pos);
+    let width = require_u32(&args[2], "render width", pos);
+    let height = require_u32(&args[3], "render height", pos);
+
+    render(&scene, width, height, target.as_render_target(), None, true);
+
+    // Hand the target back so chained pipelines work without holding
+    // a separate binding. The Rc is cheap to clone.
+    Value::Target(target)
+}
+
+/// `(save-png target path)` — save a png-target's accumulated buffer
+/// to disk. Panics if `target` was not constructed from (or wrapped
+/// around) a png-target. `target` remains usable after save —
+/// further rendering or a second save are both fine.
+fn builtin_save_png(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 2, "save-png", pos);
+    let target = require_target(&args[0], "save-png target", pos);
+    let path_str = require_string(&args[1], "save-png path", pos);
+    match target.save_png(Path::new(&path_str)) {
+        Ok(()) => Value::Nil,
+        Err(e) => sdl_panic!(pos.clone(), "save-png failed: {}", e),
+    }
 }
