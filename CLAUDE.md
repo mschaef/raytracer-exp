@@ -523,6 +523,40 @@ Approximate order of recent commits, oldest first:
     to write idiomatic scenes without dropping back to Rust for
     common idioms.
 
+17. **SDL phase 5: ported scene + visual-equivalence harness.**
+    First "real" scene written entirely in the SDL plus a
+    byte-equality harness that pins the SDL pipeline against the
+    canonical Rust version. New top-level `scenes/` directory holds
+    portable scene definitions; the first inhabitant is
+    `scenes/transform_test.lisp`, a port of `scene_transform_test`
+    from `scenes.rs`. The script is *pure data* — it `def`s
+    `transform-test-scene` to a `Value::Scene` and stops there, no
+    `(render ...)` call — so it's safe to evaluate from anywhere
+    without side effects, and the Rust harness drives both sides of
+    the comparison itself. Idiomatic surface area: a script-side
+    `(def glossy (fn [color] (surface {...})))` plays the role of
+    `surface_glossy` from `scenes.rs`, named `surface-red` /
+    `-green` / etc. plus a separate `surface-white-c` for the
+    reflective checkered ground; the camera is built once via
+    `(def default-camera (camera-looking-at ...))`; rotations use
+    `(/ pi N)` against the stdlib's `pi`. New
+    `phase5_transform_test_scene_matches_rust` test in
+    `tests/sdl_suite.rs` reads the script via
+    `CARGO_MANIFEST_DIR/scenes/transform_test.lisp`, evaluates it in
+    a `default_env`, looks up `transform-test-scene`, renders both
+    that and `scene_transform_test()` to 64×64 `PngTarget`s with
+    `parallel = false`, saves and decodes each, and walks the
+    buffers asserting per-channel equality (`TOLERANCE = 0`).
+    Failure preserves both PNGs on disk and surfaces their paths in
+    the panic so `open` produces a side-by-side diff for debugging.
+    The pipelines run identical math on identical inputs (same
+    `Surface` field values, same `Camera::looking_at` arguments,
+    same transform composition order, identical f64 representation
+    of `pi`), so a divergence is a bug in the binding layer or the
+    port — not floating-point drift. Phase ends here: the SDL is
+    pleasant enough to write a real scene in, and a regression in
+    any binding immediately breaks a fast test.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -668,16 +702,14 @@ history."
 **Phase 4 — Standard library and ergonomics.** Done; see "Recent work
 history."
 
-**Phase 5 — Port a real scene.** Re-express one of the existing
-`scenes.rs` scenes in the SDL. Render side-by-side with the Rust version
-and assert visual equivalence (pixel match within tolerance). Phase
-ending criterion: scenes are pleasant to write in the SDL, and at least
-one real scene runs end-to-end.
+**Phase 5 — Port a real scene.** Done; see "Recent work history."
 
-**Phase 6+ (deferred).** `load-obj` mesh binding; heatmap target binding;
-animation (timestep loops, a video or sequence-of-PNGs target, per-frame
-mutation of geometry); transform collapsing and other interpreter
-optimizations.
+**Phase 6+ (deferred).** Additional scene ports (one per existing
+`scenes.rs` entry, modulo the ones that need unbound features); the
+`load-obj` mesh binding (would unblock `scene_teapot`); heatmap
+target binding; animation (timestep loops, a video or
+sequence-of-PNGs target, per-frame mutation of geometry); transform
+collapsing and other interpreter optimizations.
 
 ### Decisions still open
 
@@ -686,9 +718,6 @@ To be settled when each phase begins, not committed to in this plan:
 - File extension for SDL scripts: settled on `.lisp` for now (matches
   the test suite); revisit if the SDL grows enough to deserve its own
   extension.
-- Whether scripts have a "result" value (returned by the top-level form)
-  or are evaluated purely for side effects. Rendering will be a side
-  effect either way once Phase 3 lands.
 
 Settled in earlier phases:
 
@@ -701,6 +730,16 @@ Settled in earlier phases:
   are positional. Map keys are keyword-only.
 - `Scene::name` is `String` so script-built scenes carry runtime
   names; existing scene literals use `.to_string()`.
+- Scripts can be either pure-data (define a Scene, return) or
+  side-effecting (call `(render ...)` / `(save-png ...)`). Phase 5
+  used pure-data so the test harness owns the render call and can
+  compare against the Rust pipeline byte-for-byte; production usage
+  is expected to be side-effecting (rendering then saving).
+- Portable scenes live at `scenes/<name>.lisp` at the repo root
+  (mirroring `models/` for OBJ files). The `tests/sdl/` directory
+  remains for language unit-test scripts that use `(assert ...)`;
+  scenes are a separate concern even though they share the `.lisp`
+  extension and the test harness reads them.
 
 ## Future directions
 
