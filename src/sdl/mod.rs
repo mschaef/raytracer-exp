@@ -17,8 +17,12 @@
 //! Phase 3 adds render dispatch — render-target constructors
 //! (`png-target`, `offset-target`, `progress-target`), `(render ...)`,
 //! and `(save-png ...)` — so a script can drive an end-to-end render
-//! to disk without touching Rust. See `CLAUDE.md` for the full phased
-//! plan.
+//! to disk without touching Rust. Phase 4 adds in-language ergonomics:
+//! control-flow special forms (`cond`, `when`, `when-not`, `->`, `->>`),
+//! HOFs (`map`, `filter`, `reduce`, `range`, `repeat`, `apply`), and
+//! a small lisp standard library (`stdlib.lisp`) with math constants,
+//! angle conversions, and point helpers. See `CLAUDE.md` for the full
+//! phased plan.
 //!
 //! Public entry points:
 //!
@@ -45,12 +49,19 @@ pub use env::{EnvRef, Environment};
 pub use error::{Position, SdlError};
 pub use value::Value;
 
-/// Build a fresh environment populated with the language built-ins
-/// and the host-type bindings.
+/// In-language standard library. Compiled into the binary so every
+/// fresh interpreter starts with the same set of conveniences. Loaded
+/// after Rust built-ins and host bindings so the lisp definitions can
+/// reference everything below them.
+const STDLIB_SOURCE: &str = include_str!("stdlib.lisp");
+
+/// Build a fresh environment populated with the language built-ins,
+/// the host-type bindings, and the in-language standard library.
 pub fn default_env() -> EnvRef {
     let env = Environment::new_root();
     builtins::install(&env);
     bindings::install(&env);
+    eval_source(STDLIB_SOURCE, "stdlib.lisp", &env);
     env
 }
 

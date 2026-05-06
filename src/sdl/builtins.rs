@@ -24,6 +24,7 @@ use std::rc::Rc;
 
 use crate::sdl::env::EnvRef;
 use crate::sdl::error::Position;
+use crate::sdl::eval;
 use crate::sdl::value::{Function, FunctionKind, NativeFn, Value};
 use crate::sdl_panic;
 
@@ -87,6 +88,23 @@ pub fn install(env: &EnvRef) {
 
     // Name/identity helpers (useful for testing).
     define_native(env, "name", builtin_name);
+
+    // Phase 4 — higher-order functions.
+    define_native(env, "map", builtin_map);
+    define_native(env, "filter", builtin_filter);
+    define_native(env, "reduce", builtin_reduce);
+    define_native(env, "range", builtin_range);
+    define_native(env, "repeat", builtin_repeat);
+    define_native(env, "apply", builtin_apply);
+
+    // Phase 4 — math helpers.
+    define_native(env, "min", builtin_min);
+    define_native(env, "max", builtin_max);
+    define_native(env, "abs", builtin_abs);
+    define_native(env, "sqrt", builtin_sqrt);
+    define_native(env, "sin", builtin_sin);
+    define_native(env, "cos", builtin_cos);
+    define_native(env, "tan", builtin_tan);
 }
 
 fn define_native(env: &EnvRef, name: &'static str, func: NativeFn) {
@@ -684,4 +702,330 @@ fn builtin_name(args: &[Value], pos: &Position) -> Value {
             other.type_name()
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 — higher-order functions
+// ---------------------------------------------------------------------------
+//
+// These are eagerly-evaluating versions of Clojure's seq HOFs. They
+// take a vector (the only collection type the SDL has so far) and
+// return a vector. Lazy seqs and transducers are out of scope.
+//
+// Each one calls back into `eval::apply` for the user-supplied
+// callable, so HOFs work uniformly over native and interpreted
+// functions. Argument validation (the callable must be a Value::Fn)
+// happens lazily inside `apply` — passing a non-fn produces a
+// position-tagged error pointing at the HOF's call site.
+
+fn require_fn<'a>(v: &'a Value, fn_name: &str, pos: &Position) -> &'a Value {
+    if !matches!(v, Value::Fn(_)) {
+        sdl_panic!(
+            pos.clone(),
+            "{} expected a function (got {})",
+            fn_name,
+            v.type_name()
+        );
+    }
+    v
+}
+
+fn require_vec<'a>(v: &'a Value, fn_name: &str, pos: &Position) -> Rc<Vec<Value>> {
+    match v {
+        Value::Vec(items) => items.clone(),
+        other => sdl_panic!(
+            pos.clone(),
+            "{} expected a vector (got {})",
+            fn_name,
+            other.type_name()
+        ),
+    }
+}
+
+/// `(map f coll)` — returns a vector of `(f x)` for each `x` in
+/// `coll`. Single-arity only; multi-collection map is a Phase 6+
+/// nicety.
+fn builtin_map(args: &[Value], pos: &Position) -> Value {
+    if args.len() != 2 {
+        sdl_panic!(
+            pos.clone(),
+            "map takes 2 arguments (got {})",
+            args.len()
+        );
+    }
+    let f = require_fn(&args[0], "map", pos);
+    let coll = require_vec(&args[1], "map", pos);
+    let mut out = Vec::with_capacity(coll.len());
+    for x in coll.iter() {
+        out.push(eval::apply(f, std::slice::from_ref(x), pos));
+    }
+    Value::Vec(Rc::new(out))
+}
+
+/// `(filter pred coll)` — returns a vector of elements of `coll` for
+/// which `(pred x)` is truthy.
+fn builtin_filter(args: &[Value], pos: &Position) -> Value {
+    if args.len() != 2 {
+        sdl_panic!(
+            pos.clone(),
+            "filter takes 2 arguments (got {})",
+            args.len()
+        );
+    }
+    let pred = require_fn(&args[0], "filter", pos);
+    let coll = require_vec(&args[1], "filter", pos);
+    let mut out: Vec<Value> = Vec::new();
+    for x in coll.iter() {
+        if eval::apply(pred, std::slice::from_ref(x), pos).is_truthy() {
+            out.push(x.clone());
+        }
+    }
+    Value::Vec(Rc::new(out))
+}
+
+/// `(reduce f init coll)` or `(reduce f coll)` — left fold. The
+/// init-less form requires a non-empty collection (matches Clojure);
+/// the init-ful form returns `init` for an empty collection.
+fn builtin_reduce(args: &[Value], pos: &Position) -> Value {
+    let (f, mut acc, coll) = match args.len() {
+        2 => {
+            let f = require_fn(&args[0], "reduce", pos);
+            let coll = require_vec(&args[1], "reduce", pos);
+            if coll.is_empty() {
+                sdl_panic!(
+                    pos.clone(),
+                    "reduce on an empty vector requires an init value"
+                );
+            }
+            // Single-arity reduce on a 1-element vector returns the
+            // single element without calling f, matching Clojure.
+            if coll.len() == 1 {
+                return coll[0].clone();
+            }
+            let init = coll[0].clone();
+            let rest: Vec<Value> = coll[1..].to_vec();
+            (f, init, rest)
+        }
+        3 => {
+            let f = require_fn(&args[0], "reduce", pos);
+            let init = args[1].clone();
+            let coll = require_vec(&args[2], "reduce", pos);
+            (f, init, coll.iter().cloned().collect::<Vec<_>>())
+        }
+        n => sdl_panic!(
+            pos.clone(),
+            "reduce takes 2 or 3 arguments (got {})",
+            n
+        ),
+    };
+    for x in coll {
+        acc = eval::apply(f, &[acc, x], pos);
+    }
+    acc
+}
+
+/// `(range n)` → `[0 1 ... n-1]`.
+/// `(range start end)` → `[start ... end-1]`.
+/// `(range start end step)` → arithmetic progression with `step`. Step
+/// must be non-zero. With a positive step, ranges are open at the high
+/// end; with a negative step, open at the low end. Empty ranges are
+/// returned as an empty vector rather than an error.
+fn builtin_range(args: &[Value], pos: &Position) -> Value {
+    let (start, end, step) = match args.len() {
+        1 => (0, require_int(&args[0], "range", pos), 1),
+        2 => (
+            require_int(&args[0], "range", pos),
+            require_int(&args[1], "range", pos),
+            1,
+        ),
+        3 => (
+            require_int(&args[0], "range", pos),
+            require_int(&args[1], "range", pos),
+            require_int(&args[2], "range", pos),
+        ),
+        n => sdl_panic!(
+            pos.clone(),
+            "range takes 1, 2, or 3 arguments (got {})",
+            n
+        ),
+    };
+    if step == 0 {
+        sdl_panic!(pos.clone(), "range step must be non-zero");
+    }
+    let mut out: Vec<Value> = Vec::new();
+    let mut i = start;
+    if step > 0 {
+        while i < end {
+            out.push(Value::Int(i));
+            i = i.wrapping_add(step);
+        }
+    } else {
+        while i > end {
+            out.push(Value::Int(i));
+            i = i.wrapping_add(step);
+        }
+    }
+    Value::Vec(Rc::new(out))
+}
+
+/// `(repeat n x)` — returns a vector of `n` copies of `x`. `n` must
+/// be a non-negative integer. Returns an empty vector for n = 0.
+fn builtin_repeat(args: &[Value], pos: &Position) -> Value {
+    if args.len() != 2 {
+        sdl_panic!(
+            pos.clone(),
+            "repeat takes 2 arguments (got {})",
+            args.len()
+        );
+    }
+    let n = require_int(&args[0], "repeat count", pos);
+    if n < 0 {
+        sdl_panic!(
+            pos.clone(),
+            "repeat count must be non-negative (got {})",
+            n
+        );
+    }
+    let mut out: Vec<Value> = Vec::with_capacity(n as usize);
+    for _ in 0..n {
+        out.push(args[1].clone());
+    }
+    Value::Vec(Rc::new(out))
+}
+
+/// `(apply f arg-vec)` or `(apply f a1 a2 ... arg-vec)` — calls `f`
+/// with the elements of the trailing vector spread out as positional
+/// args, optionally preceded by the leading explicit args. Matches
+/// Clojure's variadic apply.
+fn builtin_apply(args: &[Value], pos: &Position) -> Value {
+    if args.len() < 2 {
+        sdl_panic!(
+            pos.clone(),
+            "apply takes at least 2 arguments (got {})",
+            args.len()
+        );
+    }
+    let f = require_fn(&args[0], "apply", pos);
+    let last = &args[args.len() - 1];
+    let tail = require_vec(last, "apply (last argument)", pos);
+    // Build the final argument list: leading positional args first,
+    // then the tail vector spread out.
+    let mut combined: Vec<Value> = args[1..args.len() - 1].to_vec();
+    combined.extend(tail.iter().cloned());
+    eval::apply(f, &combined, pos)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 — math helpers
+// ---------------------------------------------------------------------------
+//
+// `min` and `max` are variadic and preserve int-ness when every
+// argument is an int, mirroring `+`/`-`/`*`. The transcendental
+// helpers (`sqrt`, `sin`, `cos`, `tan`) always return float, even
+// when the input was an int — there's no point pretending sqrt(2)
+// rounds to an integer.
+
+fn builtin_min(args: &[Value], pos: &Position) -> Value {
+    if args.is_empty() {
+        sdl_panic!(pos.clone(), "min requires at least 1 argument");
+    }
+    if any_float(args) {
+        let mut acc = require_number(&args[0], "min", pos);
+        for a in &args[1..] {
+            let v = require_number(a, "min", pos);
+            if v < acc {
+                acc = v;
+            }
+        }
+        Value::Float(acc)
+    } else {
+        let mut acc = require_int(&args[0], "min", pos);
+        for a in &args[1..] {
+            let v = require_int(a, "min", pos);
+            if v < acc {
+                acc = v;
+            }
+        }
+        Value::Int(acc)
+    }
+}
+
+fn builtin_max(args: &[Value], pos: &Position) -> Value {
+    if args.is_empty() {
+        sdl_panic!(pos.clone(), "max requires at least 1 argument");
+    }
+    if any_float(args) {
+        let mut acc = require_number(&args[0], "max", pos);
+        for a in &args[1..] {
+            let v = require_number(a, "max", pos);
+            if v > acc {
+                acc = v;
+            }
+        }
+        Value::Float(acc)
+    } else {
+        let mut acc = require_int(&args[0], "max", pos);
+        for a in &args[1..] {
+            let v = require_int(a, "max", pos);
+            if v > acc {
+                acc = v;
+            }
+        }
+        Value::Int(acc)
+    }
+}
+
+/// `(abs n)` — preserves int-ness for int input, returns float for
+/// float input. `i64::MIN.abs()` would overflow; we use
+/// `wrapping_abs` so it saturates rather than panicking — matches
+/// the existing arithmetic functions' wrapping convention.
+fn builtin_abs(args: &[Value], pos: &Position) -> Value {
+    if args.len() != 1 {
+        sdl_panic!(
+            pos.clone(),
+            "abs takes 1 argument (got {})",
+            args.len()
+        );
+    }
+    match &args[0] {
+        Value::Int(i) => Value::Int(i.wrapping_abs()),
+        Value::Float(f) => Value::Float(f.abs()),
+        other => sdl_panic!(
+            pos.clone(),
+            "abs expected a number (got {})",
+            other.type_name()
+        ),
+    }
+}
+
+fn builtin_sqrt(args: &[Value], pos: &Position) -> Value {
+    if args.len() != 1 {
+        sdl_panic!(
+            pos.clone(),
+            "sqrt takes 1 argument (got {})",
+            args.len()
+        );
+    }
+    Value::Float(require_number(&args[0], "sqrt", pos).sqrt())
+}
+
+fn builtin_sin(args: &[Value], pos: &Position) -> Value {
+    if args.len() != 1 {
+        sdl_panic!(pos.clone(), "sin takes 1 argument (got {})", args.len());
+    }
+    Value::Float(require_number(&args[0], "sin", pos).sin())
+}
+
+fn builtin_cos(args: &[Value], pos: &Position) -> Value {
+    if args.len() != 1 {
+        sdl_panic!(pos.clone(), "cos takes 1 argument (got {})", args.len());
+    }
+    Value::Float(require_number(&args[0], "cos", pos).cos())
+}
+
+fn builtin_tan(args: &[Value], pos: &Position) -> Value {
+    if args.len() != 1 {
+        sdl_panic!(pos.clone(), "tan takes 1 argument (got {})", args.len());
+    }
+    Value::Float(require_number(&args[0], "tan", pos).tan())
 }

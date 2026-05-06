@@ -494,6 +494,35 @@ Approximate order of recent commits, oldest first:
     resulting file is a 16×16 PNG with at least one lit pixel near
     the center.
 
+16. **SDL phase 4: stdlib and ergonomics.** In-language conveniences
+    on top of Phase 1 primitives, split between Rust and a small
+    bundled lisp file. New special forms in `src/sdl/eval.rs`:
+    `cond` (test/expr pairs, returns first truthy match's expr or
+    nil), `when` / `when-not` (gated implicit-do), `->` /
+    `->>` (thread-first / thread-last, rewriting each subsequent
+    form's first or last argument slot — implemented as special
+    forms because the SDL has no macros). New built-in functions in
+    `src/sdl/builtins.rs`: HOFs `map`, `filter`, `reduce` (2- and
+    3-arity), `range` (1/2/3-arity), `repeat`, and `apply` (with
+    Clojure's variadic shape: leading positional args + trailing
+    spread vector). All HOFs go through `eval::apply` so they work
+    uniformly over native and interpreted callables. Math helpers:
+    variadic `min` / `max` (preserve int-ness when every arg is
+    int), `abs` (preserves int-ness), `sqrt` / `sin` / `cos` /
+    `tan` (always return float). New `src/sdl/stdlib.lisp`,
+    bundled into the binary via `include_str!` and evaluated by
+    `default_env` after the Rust built-ins and host bindings, holds
+    the lisp-side conveniences: `pi`, `tau` constants;
+    `deg->rad` / `rad->deg`; `point` / `x` / `y` / `z` accessors;
+    component-wise point arithmetic `p+` / `p-` / `p*` (scalar
+    multiply). Tests:
+    `tests/sdl/control_flow.lisp` extended with `when` /
+    `when-not` / `cond` cases (including laziness checks); new
+    scripts `threading.lisp`, `hofs.lisp`, `math.lisp`,
+    `points.lisp`. Phase ends here: scripts have enough leverage
+    to write idiomatic scenes without dropping back to Rust for
+    common idioms.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -583,16 +612,17 @@ A new top-level module `sdl` alongside `render`. Approximate breakdown:
 
 ```
 src/sdl/
-  mod.rs      Re-exports and the public entry point: read + eval a file.
-  reader.rs   Tokenizer + s-expression reader producing AST with source positions.
-  ast.rs      AST node definitions (literal, symbol, list, vector, map, ...).
-  value.rs    The runtime Value enum, including host-type variants.
-  env.rs      Environment: parent-linked Rc<RefCell<HashMap>>.
-  eval.rs     Evaluator: dispatch on AST node type, special forms, apply.
-  builtins.rs Pure-language built-in functions (arithmetic, vec, map, etc.).
-  bindings.rs Native function bindings to the ray tracer API.
-  target.rs   SdlTarget — Arc-wrapped render-target value for the SDL.
-  error.rs    Error type with source positions; pretty printer.
+  mod.rs       Re-exports and the public entry point: read + eval a file.
+  reader.rs    Tokenizer + s-expression reader producing AST with source positions.
+  ast.rs       AST node definitions (literal, symbol, list, vector, map, ...).
+  value.rs     The runtime Value enum, including host-type variants.
+  env.rs       Environment: parent-linked Rc<RefCell<HashMap>>.
+  eval.rs      Evaluator: dispatch on AST node type, special forms, apply.
+  builtins.rs  Pure-language built-in functions (arithmetic, vec, map, etc.).
+  bindings.rs  Native function bindings to the ray tracer API.
+  target.rs    SdlTarget — Arc-wrapped render-target value for the SDL.
+  stdlib.lisp  In-language standard library, bundled via include_str!.
+  error.rs     Error type with source positions; pretty printer.
 ```
 
 The `render` module's public API is unchanged in shape; the SDL is a
@@ -635,11 +665,8 @@ history."
 
 **Phase 3 — Render dispatch.** Done; see "Recent work history."
 
-**Phase 4 — Standard library and ergonomics.** In-language conveniences:
-`cond`, `when`, `when-not`, `->`, `->>`, `map`, `filter`, `reduce`,
-`range`, `repeat`, `apply`. Math helpers: `pi`, `tau`, `deg->rad`, `min`,
-`max`, `abs`, `sqrt`, basic trig. Point helpers: `point`, `x`, `y`, `z`,
-point arithmetic. Tests cover library-level behavior.
+**Phase 4 — Standard library and ergonomics.** Done; see "Recent work
+history."
 
 **Phase 5 — Port a real scene.** Re-express one of the existing
 `scenes.rs` scenes in the SDL. Render side-by-side with the Rust version

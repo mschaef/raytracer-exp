@@ -91,6 +91,11 @@ fn eval_list(elements: &[Form], env: &EnvRef, pos: &Position) -> Value {
             "recur" => return eval_recur(&elements[1..], env, pos),
             "and" => return eval_and(&elements[1..], env),
             "or" => return eval_or(&elements[1..], env),
+            "cond" => return eval_cond(&elements[1..], env, pos),
+            "when" => return eval_when(&elements[1..], env, pos),
+            "when-not" => return eval_when_not(&elements[1..], env, pos),
+            "->" => return eval_thread_first(&elements[1..], env, pos),
+            "->>" => return eval_thread_last(&elements[1..], env, pos),
             _ => {}
         }
     }
@@ -611,4 +616,141 @@ fn eval_or(args: &[Form], env: &EnvRef) -> Value {
         last = v;
     }
     last
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 special forms
+// ---------------------------------------------------------------------------
+//
+// These are special forms (not regular functions) for one of two reasons:
+//
+// - `cond`, `when`, `when-not` need *lazy* evaluation: only the matching
+//   branch's body is evaluated. A regular function-call would eagerly
+//   evaluate every argument before dispatch.
+//
+// - `->` and `->>` rewrite the structure of the source code (threading
+//   a value into the first or last argument position of each subsequent
+//   form). They need access to the unevaluated `Form` tree; by the time
+//   a regular function sees its args, the rewriting opportunity is gone.
+//
+// In a Lisp with macros, `when`, `when-not`, `->`, and `->>` would
+// typically be macros. The SDL doesn't have macros (Phase 1 design
+// decision in CLAUDE.md), so they live here as compiler-built-ins.
+
+/// `(cond test1 expr1 test2 expr2 ...)` — evaluate test/expr pairs in
+/// order; on the first truthy test, return its expr. The convention
+/// for a "default" branch is `:else expr` — `:else` is just a keyword,
+/// which is truthy, so the branch always matches when reached. Returns
+/// `nil` if no test matches (matches Clojure).
+fn eval_cond(args: &[Form], env: &EnvRef, pos: &Position) -> Value {
+    if args.len() % 2 != 0 {
+        sdl_panic!(
+            pos.clone(),
+            "cond requires an even number of forms (test/expr pairs), got {}",
+            args.len()
+        );
+    }
+    let mut i = 0;
+    while i < args.len() {
+        let test = eval(&args[i], env);
+        if test.is_truthy() {
+            return eval(&args[i + 1], env);
+        }
+        i += 2;
+    }
+    Value::Nil
+}
+
+/// `(when test body...)` — if `test` is truthy, evaluate body forms
+/// in order and return the last value. Otherwise return `nil`. The
+/// body is implicit-`do`, so multiple expressions are fine.
+fn eval_when(args: &[Form], env: &EnvRef, pos: &Position) -> Value {
+    if args.is_empty() {
+        sdl_panic!(pos.clone(), "when requires a test expression");
+    }
+    let test = eval(&args[0], env);
+    if test.is_truthy() {
+        eval_do(&args[1..], env)
+    } else {
+        Value::Nil
+    }
+}
+
+/// `(when-not test body...)` — mirror of `when`: evaluate body iff
+/// `test` is falsy.
+fn eval_when_not(args: &[Form], env: &EnvRef, pos: &Position) -> Value {
+    if args.is_empty() {
+        sdl_panic!(pos.clone(), "when-not requires a test expression");
+    }
+    let test = eval(&args[0], env);
+    if !test.is_truthy() {
+        eval_do(&args[1..], env)
+    } else {
+        Value::Nil
+    }
+}
+
+/// `(-> x form1 form2 ...)` — thread `x` through the *first* argument
+/// slot of each subsequent form. A bare symbol `f` is treated as a
+/// 1-arg call `(f x)`; a list `(f a b)` becomes `(f x a b)`.
+///
+/// Implemented as a special form because it has to inspect the
+/// unevaluated forms to do the rewrite — by the time a regular
+/// function sees its args, the structure is gone.
+fn eval_thread_first(args: &[Form], env: &EnvRef, pos: &Position) -> Value {
+    if args.is_empty() {
+        sdl_panic!(pos.clone(), "-> requires at least 1 argument");
+    }
+    let mut current = eval(&args[0], env);
+    for form in &args[1..] {
+        current = thread_step(form, current, env, /*first=*/ true);
+    }
+    current
+}
+
+/// `(->> x form1 form2 ...)` — thread `x` through the *last* argument
+/// slot of each subsequent form. A bare symbol `f` becomes `(f x)`;
+/// a list `(f a b)` becomes `(f a b x)`.
+fn eval_thread_last(args: &[Form], env: &EnvRef, pos: &Position) -> Value {
+    if args.is_empty() {
+        sdl_panic!(pos.clone(), "->> requires at least 1 argument");
+    }
+    let mut current = eval(&args[0], env);
+    for form in &args[1..] {
+        current = thread_step(form, current, env, /*first=*/ false);
+    }
+    current
+}
+
+/// One step of `->` / `->>`: given the threaded `current` value and
+/// the next `form`, rewrite-and-evaluate. `first = true` inserts
+/// `current` as the first argument; `first = false` appends it as
+/// the last.
+fn thread_step(form: &Form, current: Value, env: &EnvRef, first: bool) -> Value {
+    match &form.kind {
+        FormKind::List(items) => {
+            if items.is_empty() {
+                sdl_panic!(form.pos.clone(), "thread step cannot be an empty list");
+            }
+            // Evaluate the head (the function-position form) and the
+            // explicit args left-to-right, exactly as a normal call
+            // would. Then splice `current` into the right slot.
+            let head = eval(&items[0], env);
+            let mut call_args: Vec<Value> =
+                items[1..].iter().map(|f| eval(f, env)).collect();
+            if first {
+                call_args.insert(0, current);
+            } else {
+                call_args.push(current);
+            }
+            apply(&head, &call_args, &items[0].pos)
+        }
+        // Bare symbol or other form: treat as a 1-arg call. The form
+        // evaluates to a function (Value::Fn); anything else will
+        // panic in `apply`.
+        _ => {
+            let head = eval(form, env);
+            apply(&head, &[current], &form.pos)
+        }
+    }
 }

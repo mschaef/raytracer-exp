@@ -67,14 +67,18 @@ const DECLARED: &[&str] = &[
     "def_let",
     "destructuring",
     "fn_form",
+    "hofs",
     "literals",
     "logic",
     "map_ops",
+    "math",
+    "points",
     "predicates",
     "quote",
     "recur",
     "render_dispatch",
     "strings",
+    "threading",
     "vec_ops",
 ];
 
@@ -113,14 +117,18 @@ sdl_test!(control_flow);
 sdl_test!(def_let);
 sdl_test!(destructuring);
 sdl_test!(fn_form);
+sdl_test!(hofs);
 sdl_test!(literals);
 sdl_test!(logic);
 sdl_test!(map_ops);
+sdl_test!(math);
+sdl_test!(points);
 sdl_test!(predicates);
 sdl_test!(quote);
 sdl_test!(recur);
 sdl_test!(render_dispatch);
 sdl_test!(strings);
+sdl_test!(threading);
 sdl_test!(vec_ops);
 
 /// End-to-end render-dispatch test: build a small scene in script,
