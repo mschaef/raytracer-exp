@@ -84,3 +84,46 @@
 
 ; tan(pi/4) ≈ 1.
 (assert (< (abs (- (tan (/ pi 4)) 1.0)) 0.0000001))
+
+;; --------------------------------------------------------------------
+;; mod, quot — Phase 6 additions
+;; --------------------------------------------------------------------
+;;
+;; `mod` follows Clojure semantics (sign of result matches sign of
+;; divisor); `quot` is truncating integer division (toward zero).
+;; Both preserve int-ness when both args are ints.
+
+; Plain int / int — int result.
+(assert= (mod  10 3)  1)
+(assert= (mod  9  3)  0)
+(assert= (quot 10 3)  3)
+(assert= (quot 9  3)  3)
+
+; Sign-of-divisor invariant for mod, distinct from rem-style "%".
+; Negative dividend, positive divisor: mod result is positive.
+(assert= (mod -10 3)  2)
+(assert= (mod -9  3)  0)
+; Positive dividend, negative divisor: mod result is negative.
+(assert= (mod 10 -3) -2)
+
+; quot always rounds toward zero, regardless of sign.
+(assert= (quot -10 3) -3)
+(assert= (quot 10 -3) -3)
+(assert= (quot -10 -3) 3)
+
+; Float promotion: any float arg → float result, but the value is
+; still produced via the same algebra.
+(assert= (mod  10.0 3) 1.0)
+(assert= (mod  10 3.0) 1.0)
+(assert= (quot 10.0 3) 3.0)
+(assert= (quot 10 3.0) 3.0)
+
+; Identity (for non-negative inputs): n = d * (quot n d) + (mod n d).
+(def n 17)
+(def d 5)
+(assert= (+ (* d (quot n d)) (mod n d)) n)
+
+; Division by zero on either op panics — covered visually since
+; assert can't catch panics here. The grid generator in
+; scenes/sphere_surface_test.lisp is the smoke test that exercises
+; mod + quot end-to-end against real iteration.

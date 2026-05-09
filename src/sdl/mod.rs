@@ -49,6 +49,58 @@ pub use env::{EnvRef, Environment};
 pub use error::{Position, SdlError};
 pub use value::Value;
 
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+
+thread_local! {
+    /// Directory of the file currently being evaluated. Set by
+    /// [`eval_source`] via [`CurrentDirGuard`] for the duration of a
+    /// source's evaluation, and consulted by the `(load ...)` special
+    /// form to resolve relative paths against the loading file's
+    /// directory rather than the process CWD. `None` while no source
+    /// is being evaluated, or when the current source has no useful
+    /// base directory (e.g. inline strings or bare filenames).
+    pub(crate) static CURRENT_DIR: RefCell<Option<PathBuf>> =
+        const { RefCell::new(None) };
+}
+
+/// RAII guard that points [`CURRENT_DIR`] at the parent directory of
+/// `filename` for its lifetime, then restores the previous value on
+/// drop. Drop runs on normal return *and* on panic-unwind, so a test
+/// that triggers an SDL panic doesn't leak directory state across
+/// thread reuse in cargo's parallel test runner.
+///
+/// The guard stacks naturally for nested `(load ...)`: each load
+/// constructs a new guard before recursing into `eval_source`, and the
+/// guard's `prev` field captures the outer file's directory so it gets
+/// restored when the loaded file finishes.
+pub(crate) struct CurrentDirGuard {
+    prev: Option<PathBuf>,
+}
+
+impl CurrentDirGuard {
+    /// Push `filename`'s parent directory onto the thread-local. An
+    /// empty or missing parent (bare filename like "foo.lisp") leaves
+    /// `CURRENT_DIR` as `None` rather than `""` — there's no useful
+    /// anchor for relative loads in that case, and falling through to
+    /// CWD is the least-surprising default.
+    pub fn enter(filename: &str) -> Self {
+        let path = Path::new(filename);
+        let dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf());
+        let prev = CURRENT_DIR.with(|c| c.replace(dir));
+        CurrentDirGuard { prev }
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        CURRENT_DIR.with(|c| *c.borrow_mut() = self.prev.take());
+    }
+}
+
 /// In-language standard library. Compiled into the binary so every
 /// fresh interpreter starts with the same set of conveniences. Loaded
 /// after Rust built-ins and host bindings so the lisp definitions can
@@ -75,7 +127,15 @@ pub fn read_and_eval(source: &str, filename: &str) -> Value {
 
 /// Like [`read_and_eval`] but takes a caller-supplied environment so
 /// the test harness can populate extra bindings before evaluation.
+///
+/// Sets [`CURRENT_DIR`] to the directory of `filename` for the
+/// duration of evaluation via [`CurrentDirGuard`], so any `(load ...)`
+/// calls inside the source resolve relative paths against the
+/// loading file rather than the process CWD. Pass an absolute path as
+/// `filename` when callers want `(load ...)` to work robustly; bare
+/// filenames or relative paths fall back to CWD-relative resolution.
 pub fn eval_source(source: &str, filename: &str, env: &EnvRef) -> Value {
+    let _guard = CurrentDirGuard::enter(filename);
     let forms = reader::read_all(source, filename);
     let mut last = Value::Nil;
     for form in &forms {

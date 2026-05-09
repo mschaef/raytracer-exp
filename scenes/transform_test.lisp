@@ -1,70 +1,13 @@
-; Phase 5 — port of scenes.rs::scene_transform_test to the SDL.
+; SDL port of scenes.rs::scene_transform_test.
 ;
-; Defines `transform-test-scene` for the visual-equivalence harness
-; (`phase5_transform_test_scene_matches_rust` in tests/sdl_suite.rs).
-; Pure data: no render side effects, so it can be evaluated freely
-; from anywhere without touching disk.
+; Defines `transform-test-scene` for the visual-equivalence harness in
+; tests/sdl_suite.rs. Pure data: no render side effects.
 ;
-; Numeric values match scenes.rs::scene_transform_test exactly. The
-; harness renders this scene and the Rust scene to two in-memory
-; buffers and asserts byte-level equality — pi, the rotation
-; divisors, and the surface coefficients all need to round-trip to
-; the same f64 the Rust version uses.
+; Each object exercises a different transform path; the comments echo
+; the per-object commentary in scenes.rs::scene_transform_test so the
+; two are easy to compare.
 
-;; ----------------------------------------------------------------------
-;; Surface presets
-;; ----------------------------------------------------------------------
-;;
-;; Mirror the const fns and SURFACE_* constants in scenes.rs. `glossy`
-;; is the lisp-side equivalent of the `surface_glossy` const fn (matte
-;; body, modest specular highlight, no reflection); `surface-white-c`
-;; is the reflective checkered ground.
-
-(def ambient    0.2)
-(def specular   0.5)
-(def light      0.6)
-
-(def glossy
-  (fn [color]
-    (surface {:color      color
-              :ambient    ambient
-              :specular   specular
-              :light      light
-              :checked    false
-              :reflection 0.0})))
-
-(def surface-red    (glossy [1.0 0.0 0.0]))
-(def surface-green  (glossy [0.0 1.0 0.0]))
-(def surface-blue   (glossy [0.0 0.0 1.0]))
-(def surface-orange (glossy [1.0 0.5 0.0]))
-(def surface-yellow (glossy [1.0 1.0 0.0]))
-(def surface-purple (glossy [1.0 0.0 1.0]))
-
-(def surface-white-c
-  (surface {:color      [0.2 0.2 0.2]
-            :ambient    ambient
-            :specular   specular
-            :light      light
-            :checked    true
-            :reflection 0.5}))
-
-;; ----------------------------------------------------------------------
-;; Camera
-;; ----------------------------------------------------------------------
-;;
-;; Matches scenes.rs::default_camera: looking at the origin from
-;; (0, 10, 0), world-up = +z, zoom = 1.0 (~53° vertical FOV).
-
-(def default-camera
-  (camera-looking-at [0 10 0] [0 0 0] [0 0 1] 1.0))
-
-;; ----------------------------------------------------------------------
-;; Scene
-;; ----------------------------------------------------------------------
-;;
-;; Each object exercises a different transform path; the comments echo
-;; the per-object commentary in scenes.rs::scene_transform_test so the
-;; two are easy to compare.
+(load "_common.lisp")
 
 (def transform-test-scene
   (scene

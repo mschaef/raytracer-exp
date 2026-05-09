@@ -557,6 +557,54 @@ Approximate order of recent commits, oldest first:
     pleasant enough to write a real scene in, and a regression in
     any binding immediately breaks a fast test.
 
+18. **SDL phase 6: scene-port parity (no-mesh subset).** Every scene
+    in `src/scenes.rs` except `scene_teapot` now has a parallel
+    SDL definition in `scenes/`, each pinned by a
+    `phase6_<name>_scene_matches_rust` test in `tests/sdl_suite.rs`.
+    The eventual goal is to delete the Rust scene definitions
+    entirely; this phase is the parity step, the teapot port (which
+    needs a `load-obj` mesh binding) is the next step, and removal
+    follows that. Three pieces of supporting infrastructure landed
+    alongside the ports:
+      * **`mod` and `quot` builtins** in `src/sdl/builtins.rs`. Both
+        are int-preserving when both args are ints, float-promoting
+        otherwise, and panic on division by zero. `mod` follows
+        Clojure semantics (sign of result matches sign of divisor),
+        distinct from Rust's `%` which matches the dividend.
+        `quot` truncates toward zero. Together they let
+        `scenes/sphere_surface_test.lisp` express the original
+        `(0..25).map(|x| ...)` 5×5 grid generator from `scenes.rs`
+        without dropping back to a hand-rolled list. Tests live in
+        `tests/sdl/math.lisp` (extended).
+      * **`(load <path-expr>)` special form** in `src/sdl/eval.rs`.
+        Reads the file at the resolved path and evaluates each
+        top-level form in the *current* environment (the
+        binding-into-caller-scope semantic is what required it to
+        be a special form rather than a builtin — `NativeFn` has no
+        `env` parameter). Path resolution is relative to the
+        directory of the loading file via a thread-local
+        `CURRENT_DIR` set by an RAII guard in
+        `crate::sdl::eval_source`, with absolute paths used as-is.
+        `tests/sdl_suite.rs::run_script` was updated to pass the
+        absolute script path to `eval_source` so the load form
+        works under the test harness too. Tests:
+        `tests/sdl/load_form.lisp` plus `load_form_fixture.lisp`
+        (the loaded helper, also a standalone passing test).
+      * **`scenes/_common.lisp`** — single source of truth for the
+        surface coefficients (`ambient`/`specular`/`light`), the
+        `glossy` and `reflective` helpers, the `surface-*` presets,
+        and `default-camera`. Every scene file starts with
+        `(load "_common.lisp")` and pulls these into its env.
+        Underscore-prefixed filename signals "not a standalone
+        scene"; the test harness only references the unprefixed
+        files. The harness itself was refactored: the per-scene
+        90-line equivalence test from Phase 5 collapsed into a
+        single `assert_sdl_scene_matches_rust` helper, with one
+        `#[test]` per ported scene calling it with three arguments
+        (script relpath, binding name, Rust scene fn). Default
+        comparison is byte-equal at 64×64 with `parallel = false`,
+        same conventions as Phase 5.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -704,12 +752,38 @@ history."
 
 **Phase 5 — Port a real scene.** Done; see "Recent work history."
 
-**Phase 6+ (deferred).** Additional scene ports (one per existing
-`scenes.rs` entry, modulo the ones that need unbound features); the
-`load-obj` mesh binding (would unblock `scene_teapot`); heatmap
-target binding; animation (timestep loops, a video or
-sequence-of-PNGs target, per-frame mutation of geometry); transform
-collapsing and other interpreter optimizations.
+**Phase 6 — Scene-port parity (no-mesh subset).** Done; see "Recent
+work history." Every scene in `scenes.rs` except `scene_teapot` has
+a parallel `.lisp` definition pinned by an equivalence test. Phase 6
+also delivered the supporting `mod`/`quot` builtins and the
+`(load ...)` special form.
+
+**Phase 7 — `load-obj` mesh binding + teapot port.** The last
+ingredient blocking SDL parity with `scenes.rs`. Add
+`(load-obj <path-string> <surface>)` as a new SDL host binding
+calling through to `crate::render::mesh::load_obj`, which returns a
+`Shape::Group` of triangles. Path resolution should match
+`(load ...)` (relative to the current file via `CURRENT_DIR`).
+Then port `scene_teapot` to `scenes/teapot.lisp` and add an
+equivalence test. The `models/teapot.obj` file is already on disk
+but not committed — same setup the Rust scene assumes.
+
+**Phase 8 — Remove `src/scenes.rs` (and the surrounding plumbing).**
+Once Phase 7 lands and every scene in `scenes/*.lisp` is verified
+byte-equal to its Rust counterpart, delete `src/scenes.rs`,
+`pub mod scenes;` in `src/lib.rs`, the corresponding imports in
+`src/main.rs`, and the `assert_sdl_scene_matches_rust` helper that
+becomes unanchored. `main.rs` will need its own way to drive the
+SDL scenes (probably a small loop that loads each `scenes/*.lisp`
+and calls `(render ...)` from script — or extracts each scene
+binding and renders from Rust). The `scene_objects!` macro becomes
+unused once `scenes.rs` is gone (the .lisp files reach the host
+shape constructors via the SDL bindings, not the macro), so it
+can be deleted too.
+
+**Phase 9+ (deferred).** Heatmap target binding; animation
+(timestep loops, a video or sequence-of-PNGs target, per-frame
+mutation of geometry); interpreter optimizations.
 
 ### Decisions still open
 
@@ -766,7 +840,13 @@ this codebase deals with, that's tractable.
 three separate `Transform` nodes, each doing its own ray-transform on the way
 down. `transform()` could peek at its child and, if it's already a
 `Shape::Transform`, multiply the inverse affines and skip a level. Trivial
-local optimization.
+local optimization. **Explicitly on the radar** — flagged after Phase 6 as
+the next perf item to tackle once SDL parity is complete and the Rust
+scene definitions are gone (deeper transform stacks will be more common
+as SDL scenes get richer, since the SDL constructor functions don't
+currently fold). Work item lives here in the plan rather than in
+"Phases" because it's a self-contained optimization, not a sequenced
+SDL milestone.
 
 **More primitives.** Cylinder, cone, torus. Triangle is already in.
 Each new primitive is a struct + `Hittable` impl + a new `Shape` variant

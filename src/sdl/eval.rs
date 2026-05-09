@@ -96,6 +96,7 @@ fn eval_list(elements: &[Form], env: &EnvRef, pos: &Position) -> Value {
             "when-not" => return eval_when_not(&elements[1..], env, pos),
             "->" => return eval_thread_first(&elements[1..], env, pos),
             "->>" => return eval_thread_last(&elements[1..], env, pos),
+            "load" => return eval_load(&elements[1..], env, pos),
             _ => {}
         }
     }
@@ -753,4 +754,71 @@ fn thread_step(form: &Form, current: Value, env: &EnvRef, first: bool) -> Value 
             apply(&head, &[current], &form.pos)
         }
     }
+}
+
+/// `(load <path-expr>)` — evaluate the forms of another file in the
+/// *current* environment.
+///
+/// Implemented as a special form (not a builtin) so it can call back
+/// into [`crate::sdl::eval_source`] with the same `env`, threading the
+/// loading file's defs into the calling scope. A builtin couldn't do
+/// this — its signature has no `env` parameter.
+///
+/// Path resolution:
+/// - Absolute paths are used as-is.
+/// - Relative paths join against [`crate::sdl::CURRENT_DIR`], which
+///   was set by the *outer* `eval_source` to the loading file's
+///   directory. Inside a nested load, the inner file's directory
+///   takes over via the [`crate::sdl::CurrentDirGuard`] stacking
+///   inside `eval_source`. If `CURRENT_DIR` is `None` (e.g. the outer
+///   source was an inline string), the relative path falls through
+///   unchanged and resolves against the process CWD.
+///
+/// Returns the value of the loaded file's last form (or `Nil` if it
+/// was empty), matching `eval_source`. Side effects in the loaded
+/// file (def's, side-effecting calls, asserts) all run in the calling
+/// env, which is the whole point.
+fn eval_load(args: &[Form], env: &EnvRef, pos: &Position) -> Value {
+    if args.len() != 1 {
+        sdl_panic!(
+            pos.clone(),
+            "load takes 1 argument (got {})",
+            args.len()
+        );
+    }
+    // Eval the path argument so callers can compute it (e.g. join a
+    // base path with a name) rather than being limited to literals.
+    let path_value = eval(&args[0], env);
+    let path_str = match &path_value {
+        Value::String(s) => (**s).clone(),
+        other => sdl_panic!(
+            pos.clone(),
+            "load expected a string path, got {} ({})",
+            other,
+            other.type_name()
+        ),
+    };
+    let path = std::path::Path::new(&path_str);
+    let resolved: std::path::PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        crate::sdl::CURRENT_DIR.with(|c| {
+            c.borrow()
+                .clone()
+                .map(|d| d.join(path))
+                .unwrap_or_else(|| path.to_path_buf())
+        })
+    };
+    let source = std::fs::read_to_string(&resolved).unwrap_or_else(|e| {
+        sdl_panic!(
+            pos.clone(),
+            "load: could not read {}: {}",
+            resolved.display(),
+            e
+        )
+    });
+    // Recursive eval_source installs its own CurrentDirGuard for the
+    // loaded file's directory and pops it on exit, so nested loads
+    // work without explicit bookkeeping here.
+    crate::sdl::eval_source(&source, &resolved.to_string_lossy(), env)
 }

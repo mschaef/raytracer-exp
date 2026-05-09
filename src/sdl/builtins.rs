@@ -35,6 +35,8 @@ pub fn install(env: &EnvRef) {
     define_native(env, "-", builtin_sub);
     define_native(env, "*", builtin_mul);
     define_native(env, "/", builtin_div);
+    define_native(env, "mod", builtin_mod);
+    define_native(env, "quot", builtin_quot);
 
     // Comparison.
     define_native(env, "=", builtin_eq);
@@ -246,6 +248,72 @@ fn builtin_div(args: &[Value], pos: &Position) -> Value {
         acc /= f;
     }
     Value::Float(acc)
+}
+
+/// `(mod n d)` — modulo. Result has the same sign as `d` (Clojure
+/// semantics, distinct from Rust's `%` which matches the dividend's
+/// sign). When both arguments are ints, returns an int; if either is
+/// a float, returns a float computed via `f64::rem_euclid`-style
+/// adjustment so the sign-of-divisor invariant holds for floats too.
+fn builtin_mod(args: &[Value], pos: &Position) -> Value {
+    if args.len() != 2 {
+        sdl_panic!(pos.clone(), "mod takes 2 arguments (got {})", args.len());
+    }
+    let zero_msg = "mod by zero";
+    if any_float(args) {
+        let n = require_number(&args[0], "mod", pos);
+        let d = require_number(&args[1], "mod", pos);
+        if d == 0.0 {
+            sdl_panic!(pos.clone(), "{}", zero_msg);
+        }
+        // Clojure semantics: ((n rem d) + d) rem d. The double rem
+        // collapses the result into the half-open range [0, d) when
+        // d > 0, or (d, 0] when d < 0 — i.e. same sign as d.
+        let r = ((n % d) + d) % d;
+        Value::Float(r)
+    } else {
+        let n = require_int(&args[0], "mod", pos);
+        let d = require_int(&args[1], "mod", pos);
+        if d == 0 {
+            sdl_panic!(pos.clone(), "{}", zero_msg);
+        }
+        // Same shape as the float branch but in integer arithmetic.
+        // rem_euclid would do the right thing for nonnegative d, but
+        // we want the Clojure-style sign-of-divisor invariant for
+        // negative d too.
+        let r = ((n % d) + d) % d;
+        Value::Int(r)
+    }
+}
+
+/// `(quot n d)` — truncating division (`n / d` rounded toward zero).
+/// Matches Clojure's `quot`. When both arguments are ints, returns an
+/// int (Rust's `/` for `i64` already truncates toward zero); if either
+/// is a float, returns a float-truncated-to-integer-value via
+/// `f64::trunc`. Pairs with `mod` so that
+/// `(+ (* d (quot n d)) (mod n d))` reconstructs `n` for nonnegative
+/// inputs (the identity is more nuanced when signs disagree, mirroring
+/// Clojure).
+fn builtin_quot(args: &[Value], pos: &Position) -> Value {
+    if args.len() != 2 {
+        sdl_panic!(pos.clone(), "quot takes 2 arguments (got {})", args.len());
+    }
+    let zero_msg = "quot by zero";
+    if any_float(args) {
+        let n = require_number(&args[0], "quot", pos);
+        let d = require_number(&args[1], "quot", pos);
+        if d == 0.0 {
+            sdl_panic!(pos.clone(), "{}", zero_msg);
+        }
+        Value::Float((n / d).trunc())
+    } else {
+        let n = require_int(&args[0], "quot", pos);
+        let d = require_int(&args[1], "quot", pos);
+        if d == 0 {
+            sdl_panic!(pos.clone(), "{}", zero_msg);
+        }
+        Value::Int(n / d)
+    }
 }
 
 // ---------------------------------------------------------------------------
