@@ -605,6 +605,44 @@ Approximate order of recent commits, oldest first:
         comparison is byte-equal at 64×64 with `parallel = false`,
         same conventions as Phase 5.
 
+19. **SDL phase 7: `(load-obj ...)` mesh binding + teapot port.**
+    Closes the last gap before SDL parity with `scenes.rs`. New
+    `(load-obj <path-string> <surface>)` host binding in
+    `src/sdl/bindings.rs` calls through to
+    `crate::render::mesh::load_obj`, returning a `Value::Shape`
+    wrapping the `Shape::Group` of triangles. Path resolution
+    matches `(load ...)`: relative paths join `CURRENT_DIR` (the
+    loading file's directory), absolute paths used as-is — so
+    scenes can write `(load-obj "../models/foo.obj" surface)`
+    portably rather than depending on CWD. Positional arity
+    (path, surface) rather than map-keyed since two args is
+    obvious from order. Tests: a tiny
+    `tests/sdl/load_obj_fixture.obj` with two flat triangles
+    (no per-vertex normals, exercising the loader's
+    geometric-normal fallback) and `tests/sdl/bindings_mesh.lisp`
+    confirms the binding loads, the result is a Shape, and the
+    Shape composes through `translate`/`scale`/`bounded` and
+    into a renderable scene. The `.obj` lives under `tests/sdl/`
+    alongside `.lisp` files; the
+    `all_scripts_have_a_test` guard only walks `.lisp` extensions
+    so the fixture doesn't trip it. New `scenes/teapot.lisp`
+    ports `scene_teapot` end-to-end:
+    `(bounded (translate [0 0 -2] (scale [0.5 0.5 0.5]
+    (load-obj "../models/utah_teapot.obj" surface-blue))))`.
+    Equivalence test
+    `phase7_teapot_scene_matches_rust` uses a new
+    `assert_sdl_scene_matches_rust_with` helper variant (32×32,
+    `parallel = true`) — a 6000-triangle mesh at the default
+    64×64 serial would dominate suite runtime, but the renderer
+    is per-pixel deterministic so byte-equality still holds with
+    parallel dispatch. The model file isn't committed (same
+    posture as `main.rs`'s use of `scene_teapot`); the test
+    skips with an `eprintln` when `models/utah_teapot.obj` is
+    absent rather than failing. Phase ends here: every scene in
+    `scenes.rs` now has a parallel `.lisp` definition pinned by
+    an equivalence test, and the next step (Phase 8) is removing
+    `scenes.rs` itself.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -758,15 +796,8 @@ a parallel `.lisp` definition pinned by an equivalence test. Phase 6
 also delivered the supporting `mod`/`quot` builtins and the
 `(load ...)` special form.
 
-**Phase 7 — `load-obj` mesh binding + teapot port.** The last
-ingredient blocking SDL parity with `scenes.rs`. Add
-`(load-obj <path-string> <surface>)` as a new SDL host binding
-calling through to `crate::render::mesh::load_obj`, which returns a
-`Shape::Group` of triangles. Path resolution should match
-`(load ...)` (relative to the current file via `CURRENT_DIR`).
-Then port `scene_teapot` to `scenes/teapot.lisp` and add an
-equivalence test. The `models/teapot.obj` file is already on disk
-but not committed — same setup the Rust scene assumes.
+**Phase 7 — `load-obj` mesh binding + teapot port.** Done; see
+"Recent work history."
 
 **Phase 8 — Remove `src/scenes.rs` (and the surrounding plumbing).**
 Once Phase 7 lands and every scene in `scenes/*.lisp` is verified
@@ -814,6 +845,16 @@ Settled in earlier phases:
   remains for language unit-test scripts that use `(assert ...)`;
   scenes are a separate concern even though they share the `.lisp`
   extension and the test harness reads them.
+- File-system paths in SDL scripts (`(load ...)`, `(load-obj ...)`)
+  resolve relative to the loading file's directory via the
+  thread-local `CURRENT_DIR`. Absolute paths are used as-is.
+  Falling through to CWD only happens when there's no anchor —
+  e.g. an inline script eval'd from Rust without a meaningful
+  filename. The script-relative convention lets `scenes/teapot.lisp`
+  reference `../models/utah_teapot.obj` without depending on
+  what CWD the renderer was invoked from, which is what makes the
+  ports portable across `cargo test`, `cargo run`, and any future
+  external invocation.
 
 ## Future directions
 

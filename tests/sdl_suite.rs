@@ -57,6 +57,7 @@ const DECLARED: &[&str] = &[
     "arithmetic",
     "bindings_camera",
     "bindings_lights",
+    "bindings_mesh",
     "bindings_scene",
     "bindings_shapes",
     "bindings_surface",
@@ -114,6 +115,7 @@ macro_rules! sdl_test {
 sdl_test!(arithmetic);
 sdl_test!(bindings_camera);
 sdl_test!(bindings_lights);
+sdl_test!(bindings_mesh);
 sdl_test!(bindings_scene);
 sdl_test!(bindings_shapes);
 sdl_test!(bindings_surface);
@@ -260,6 +262,39 @@ const EQUIV_TOLERANCE: u8 = 0;
 /// Render a Rust `Scene` and an SDL-defined scene from a `.lisp`
 /// script and assert byte-equal output.
 ///
+/// Defaults to 64×64 with `parallel = false` — the convention used by
+/// the Phase 5 / Phase 6 ports where every transformed object covers
+/// at least a few pixels and serial execution is well under a second.
+/// For ports where that's too slow (a 6000-triangle teapot at 64×64
+/// serial would dominate suite runtime), call
+/// [`assert_sdl_scene_matches_rust_with`] directly with smaller
+/// dimensions and/or `parallel = true`.
+fn assert_sdl_scene_matches_rust(
+    script_relpath: &str,
+    binding_name: &str,
+    rust_scene: raytracer::render::Scene,
+    suffix: &str,
+) {
+    assert_sdl_scene_matches_rust_with(
+        script_relpath,
+        binding_name,
+        rust_scene,
+        suffix,
+        EQUIV_W,
+        EQUIV_H,
+        false,
+    );
+}
+
+/// Like [`assert_sdl_scene_matches_rust`] but takes the render
+/// dimensions and `parallel` flag explicitly. The renderer is
+/// per-pixel deterministic regardless of whether work is dispatched
+/// across Rayon's worker threads or run serially in the main thread —
+/// each pixel reads from immutable scene data and writes a single
+/// non-overlapping row to the target — so byte-equality holds with
+/// `parallel = true` too. Use that for expensive scenes (e.g. the
+/// teapot) where serial execution would dominate suite runtime.
+///
 /// `script_relpath` is the path relative to `scenes/` (e.g.
 /// `"transform_test.lisp"`). `binding_name` is the symbol the script
 /// `def`s its `Value::Scene` to (e.g. `"transform-test-scene"`).
@@ -270,11 +305,14 @@ const EQUIV_TOLERANCE: u8 = 0;
 /// passed to `eval_source` as-is, so any `(load "_common.lisp")` the
 /// script does resolves correctly via the `CurrentDirGuard` thread-
 /// local installed inside `eval_source`.
-fn assert_sdl_scene_matches_rust(
+fn assert_sdl_scene_matches_rust_with(
     script_relpath: &str,
     binding_name: &str,
     rust_scene: raytracer::render::Scene,
     suffix: &str,
+    width: u32,
+    height: u32,
+    parallel: bool,
 ) {
     use raytracer::render::output::PngTarget;
     use raytracer::render::render;
@@ -291,8 +329,8 @@ fn assert_sdl_scene_matches_rust(
     // PngTarget writes sRGB-encoded 8-bit pixels, which matches what
     // we'll get when we decode either saved file below — the
     // comparison is symmetric.
-    let rust_target = PngTarget::new(EQUIV_W, EQUIV_H);
-    render(&rust_scene, EQUIV_W, EQUIV_H, &rust_target, None, false);
+    let rust_target = PngTarget::new(width, height);
+    render(&rust_scene, width, height, &rust_target, None, parallel);
     rust_target
         .save(&rust_path)
         .expect("save Rust render");
@@ -325,8 +363,8 @@ fn assert_sdl_scene_matches_rust(
         ),
     };
 
-    let sdl_target = PngTarget::new(EQUIV_W, EQUIV_H);
-    render(&*sdl_scene, EQUIV_W, EQUIV_H, &sdl_target, None, false);
+    let sdl_target = PngTarget::new(width, height);
+    render(&*sdl_scene, width, height, &sdl_target, None, parallel);
     sdl_target
         .save(&sdl_path)
         .expect("save SDL render");
@@ -340,13 +378,13 @@ fn assert_sdl_scene_matches_rust(
 
     assert_eq!(
         rust_img.dimensions(),
-        (EQUIV_W, EQUIV_H),
+        (width, height),
         "{}: Rust PNG dimensions",
         script_relpath
     );
     assert_eq!(
         sdl_img.dimensions(),
-        (EQUIV_W, EQUIV_H),
+        (width, height),
         "{}: SDL PNG dimensions",
         script_relpath
     );
@@ -358,8 +396,8 @@ fn assert_sdl_scene_matches_rust(
     // to investigate.
     let mut max_diff: u8 = 0;
     let mut first_offender: Option<(u32, u32, [u8; 3], [u8; 3])> = None;
-    for y in 0..EQUIV_H {
-        for x in 0..EQUIV_W {
+    for y in 0..height {
+        for x in 0..width {
             let r = rust_img.get_pixel(x, y).0;
             let s = sdl_img.get_pixel(x, y).0;
             for c in 0..3 {
@@ -497,6 +535,50 @@ fn phase6_cylinder_test_scene_matches_rust() {
         "cylinder-test-scene",
         raytracer::scenes::scene_cylinder_test(),
         "cylinder_test",
+    );
+}
+
+/// Phase 7 — teapot port equivalence test.
+///
+/// Renders both `scene_teapot()` and `scenes/teapot.lisp` to PNGs
+/// and asserts byte-equality, same as the other ports — but with two
+/// concessions to the teapot's cost:
+///
+/// 1. **Skip if the model isn't on disk.** The teapot OBJ isn't
+///    committed to the repo (it's a multi-megabyte third-party model
+///    you drop in yourself), so a fresh clone has no way to run this
+///    test. We check for `models/utah_teapot.obj` up front and skip
+///    with an explanatory `eprintln` if it's missing — same posture
+///    as `main.rs`, which also fails at runtime if the model is
+///    absent rather than bringing it in as a build-time dependency.
+///
+/// 2. **Smaller render and `parallel = true`.** A 6000-triangle mesh
+///    rendered serially at 64×64 takes seconds; at 32×32 with rayon
+///    it's well under one. The renderer is per-pixel deterministic
+///    regardless of dispatch strategy (each pixel reads from
+///    immutable scene data and writes a non-overlapping row to the
+///    target), so byte-equality still holds.
+#[test]
+fn phase7_teapot_scene_matches_rust() {
+    let model_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("models")
+        .join("utah_teapot.obj");
+    if !model_path.exists() {
+        eprintln!(
+            "phase7_teapot_scene_matches_rust: skipped — {} not found. \
+             Drop a Utah teapot OBJ at that path to enable this test.",
+            model_path.display()
+        );
+        return;
+    }
+    assert_sdl_scene_matches_rust_with(
+        "teapot.lisp",
+        "teapot-scene",
+        raytracer::scenes::scene_teapot(),
+        "teapot",
+        32,
+        32,
+        true,
     );
 }
 

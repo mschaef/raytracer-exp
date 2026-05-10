@@ -1,0 +1,12 @@
+# Minimal Wavefront OBJ for tests/sdl/bindings_mesh.lisp.
+# Two triangles forming a small flat square in the xy plane,
+# with no per-vertex normals so the load_obj geometric-normal
+# fallback runs.
+
+v 0.0 0.0 0.0
+v 1.0 0.0 0.0
+v 1.0 1.0 0.0
+v 0.0 1.0 0.0
+
+f 1 2 3
+f 1 3 4

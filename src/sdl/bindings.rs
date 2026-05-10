@@ -38,6 +38,7 @@ use std::rc::Rc;
 
 use crate::render::color::LinearColor;
 use crate::render::geometry::Point;
+use crate::render::mesh::load_obj;
 use crate::render::render;
 use crate::render::shapes::{
     bounded, bounded_with, group, rotate_axis, rotate_x, rotate_y, rotate_z,
@@ -79,6 +80,9 @@ pub fn install(env: &EnvRef) {
     define_native(env, "cuboid", builtin_cuboid);
     define_native(env, "triangle", builtin_triangle);
     define_native(env, "cylinder", builtin_cylinder);
+
+    // Mesh loading (Phase 7).
+    define_native(env, "load-obj", builtin_load_obj);
 
     // Composite / transformed shapes.
     define_native(env, "group", builtin_group);
@@ -660,6 +664,57 @@ fn builtin_cylinder(args: &[Value], pos: &Position) -> Value {
     let r = require_key_number(&map, "r", "cylinder", pos);
     let surface = require_key_surface(&map, "surface", "cylinder", pos);
     Value::Shape(Rc::new(Shape::Cylinder(Cylinder { p0, p1, r, surface })))
+}
+
+/// `(load-obj <path-string> <surface>)` — load a Wavefront OBJ file
+/// from disk and return it as a `Shape::Group` of triangles, all
+/// sharing the supplied surface.
+///
+/// Path resolution mirrors the `(load ...)` special form: relative
+/// paths join the loading file's directory via `CURRENT_DIR`, with
+/// absolute paths used as-is. This matters because scenes/ files want
+/// to reference `../models/foo.obj` symbolically rather than
+/// depending on what CWD the renderer was invoked from. (The Rust
+/// `mesh::load_obj` itself takes `impl AsRef<Path>` and does no
+/// resolution; we do all the resolution at the binding boundary.)
+///
+/// Positional rather than map-keyed because the only two arguments
+/// (where, what surface) are obvious from order. Returns `Value::Shape`
+/// wrapping the `Shape::Group` so the result composes with the rest of
+/// the shape constructors — `(bounded (translate ... (load-obj ...)))`
+/// is the typical idiom.
+fn builtin_load_obj(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 2, "load-obj", pos);
+    let path_str = require_string(&args[0], "load-obj path", pos);
+    let surface = match &args[1] {
+        Value::Surface(s) => *s,
+        other => sdl_panic!(
+            pos.clone(),
+            "load-obj surface expected a surface, got {} ({})",
+            other,
+            other.type_name()
+        ),
+    };
+
+    // Same resolution rule as eval_load: absolute paths used as-is,
+    // relative paths anchor against CURRENT_DIR (the loading file's
+    // directory). When CURRENT_DIR is unset (e.g. inline source), the
+    // path falls through unchanged and resolves against the process
+    // CWD — the user-facing failure mode there is "file not found",
+    // same as the Rust call would have produced.
+    let path = Path::new(&path_str);
+    let resolved: std::path::PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        crate::sdl::CURRENT_DIR.with(|c| {
+            c.borrow()
+                .clone()
+                .map(|d| d.join(path))
+                .unwrap_or_else(|| path.to_path_buf())
+        })
+    };
+
+    Value::Shape(Rc::new(load_obj(&resolved, surface)))
 }
 
 // ---------------------------------------------------------------------------
