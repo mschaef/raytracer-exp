@@ -399,6 +399,18 @@ fn require_shape_value(v: &Value, ctx: &str, pos: &Position) -> Shape {
         // clone; the deep-clone only happens at host-binding boundaries
         // when we hand the shape to a host function that takes ownership.
         Value::Shape(s) => (**s).clone(),
+        // Lights are also acceptable wherever a shape is expected: the
+        // `Shape::Light` variant is what makes "lights live in the
+        // scene graph" work, and the SDL light constructors still
+        // return `Value::Light` so existing scenes that use
+        // `:lights [(light-white ...) ...]` keep working. Auto-wrapping
+        // here lets the same `(light-white ...)` value also be passed
+        // into `(translate ...)`, `(group [...])`, or `:objects`
+        // without any explicit "convert to shape" step. The light
+        // value's `Rc` stays cheap to clone in the script; the
+        // deep-clone via `(**l).clone()` is the same boundary
+        // crossing as for `Value::Shape`.
+        Value::Light(l) => Shape::Light((**l).clone()),
         other => sdl_panic!(
             pos.clone(),
             "{} expected a shape, got {} ({})",

@@ -96,9 +96,11 @@ pub enum Shape {
     Plane(Plane),
     Cuboid(Cuboid),                    // axis-aligned box, slab method
     Triangle(Triangle),                // Möller–Trumbore, smooth normals
+    Cylinder(Cylinder),                // closed cylinder, body + caps
     Group(Vec<Shape>),                 // hierarchical container
     Transform(Box<Transformed>),       // affine-transformed subtree
     Bounded(Box<Bounded>),             // AABB-accelerated subtree
+    Light(Light),                      // positioned light source (invisible)
 }
 ```
 
@@ -110,6 +112,12 @@ out for free; flat shading is the same algorithm with all three vertex
 normals equal). `Group::hit_test` is `nearest_hit(ray, &children)` — same
 fold the top-level scene traversal uses, so flat scenes and arbitrarily-nested
 groups share the exact same hit-testing path.
+
+`Light::hit_test` returns `None`: lights are invisible to every kind of
+ray (primary, shadow, reflection). They occupy a position in the scene
+graph for the sake of being affected by enclosing transforms; the renderer
+collects them up-front via `Shape::collect_lights` rather than reaching
+them through hit-testing. See the "Lights" section below.
 
 `Bounded::hit_test` does a cheap boolean ray-AABB test first (slab method,
 no normal/distance computation); if the ray misses the box the entire
@@ -124,8 +132,21 @@ shape, or `None` if the shape is genuinely unbounded. Plane returns
 Transform transforms the eight corners of the child's local AABB by the
 cached forward affine and takes the AABB enclosing the result (a
 conservative bound — not the tightest possible for shapes other than
-boxes, but always sufficient). Used by `bounded(...)` to auto-compute
-bounds, and useful directly for visualization via `AABB::to_cuboid(surface)`.
+boxes, but always sufficient). Light returns a degenerate point AABB at
+`light.location` (`min == max`) so that Group/Bounded composition stays
+well-defined; lights aren't hit-tested so the "useless" bound has no
+runtime consequence. Used by `bounded(...)` to auto-compute bounds, and
+useful directly for visualization via `AABB::to_cuboid(surface)`.
+
+`Shape::collect_lights(&Affine, &mut Vec<Light>)` walks the tree and
+pushes every `Shape::Light` leaf's world-space `Light` into the output
+vec. Affines accumulate through `Transform` nodes via
+`world_from_local.compose(t.forward)`; `Group` and `Bounded` recurse
+into their children with the same affine (Bounded *unconditionally* —
+the AABB early-out is per-ray work that would just hide lights with
+degenerate bounds for no benefit). The renderer calls this once at
+`render()` entry to build a flat `Vec<Light>` for shading; details
+under "Lights" below.
 
 The `Transformed` struct caches the forward affine, the inverse affine,
 and a precomputed inverse-transpose `Mat3` for normal transformation.
@@ -266,14 +287,40 @@ Convenience constructors: `Light::white(location)` for full-intensity white
 (matches the legacy implicit defaults), `Light::point(location, color,
 intensity)` for the general case.
 
-`Scene::lights: Vec<Light>` is a list, summed in `shade_pixel`. Each visible
-light contributes a Phong specular highlight and a Lambertian diffuse term,
-both multiplied by `light.color * light.intensity`. The diffuse term has the
-surface color modulated component-wise by the light tint; the specular term
-takes on the pure light color (i.e. a red light produces a red highlight on
-any surface, regardless of body color, which is physically right for
-microfacet specularity). Empty `lights: vec![]` yields ambient + reflection
-only — useful as a debug mode.
+Lights can live in either of two places: `Scene::lights: Vec<Light>`
+(the historical top-level list) and inside `Scene::objects` as
+`Shape::Light` nodes. The renderer treats them identically — at
+`render()` entry, an "effective lights" `Vec<Light>` is built by
+cloning `scene.lights` and extending it with the result of
+`Shape::collect_lights` over `scene.objects`, then a `&[Light]` slice
+is threaded through `render_one_row` → `pixel_color` → `ray_color` →
+`shade_pixel` (which iterates the slice). `shade_pixel` sums each
+visible light's Phong specular highlight and Lambertian diffuse
+contribution, both multiplied by `light.color * light.intensity`. The
+diffuse term has the surface color modulated component-wise by the
+light tint; the specular term takes on the pure light color (i.e. a
+red light produces a red highlight on any surface, regardless of body
+color, which is physically right for microfacet specularity). An
+empty effective list yields ambient + reflection only — useful as a
+debug mode.
+
+The point of `Shape::Light` is that lights inside the object tree
+inherit affine transforms from enclosing `Shape::Transform` wrappers,
+the same way geometry does. `(translate [5 5 5] (light-white [0 0 0]))`
+in SDL puts a light at world `[5 5 5]`. Useful for two reasons:
+positioning lights in the same coordinate system as the surrounding
+geometry (e.g. an `(rotate-z θ (group [body lamp]))` rotates the
+"lamp" — geometry plus its light — around the body); and a future
+diagnostic-imaging pass that wants to render visible markers at light
+positions can build them from the same `Shape::Light` nodes the
+renderer extracts from.
+
+`Scene::lights` is kept for backwards compatibility and for scenes
+that just want a top-level light without wrapping it in `Shape::Light`.
+Stage 2 of this migration (deferred — see "Future directions") is the
+`Scene::root: Shape` collapse, after which `Scene::lights` can come
+out entirely and the render-entry call becomes
+`scene.root.collect_lights(...)`.
 
 ## Recent work history
 
@@ -692,6 +739,57 @@ Approximate order of recent commits, oldest first:
     scene-definition mechanism. Future phases (heatmap target
     binding, animation, interpreter optimizations, transform
     collapsing) are all additive on top of this baseline.
+
+21. **Lights as scene-graph shapes (stage 1).** Lights can now live
+    inside `Scene::objects` and inherit affine transforms from
+    enclosing `Shape::Transform` nodes, the same way geometry does
+    — `(translate [5 5 5] (light-white [0 0 0]))` puts a light at
+    world `[5 5 5]`. New `Shape::Light(Light)` variant;
+    `Hittable::hit_test` returns `None` (lights are invisible to
+    primary, shadow, and reflection rays); `Shape::bounds()` returns
+    a degenerate point AABB at `light.location` so Group/Bounded
+    composition stays well-defined without special-casing. New
+    `Shape::collect_lights(&Affine, &mut Vec<Light>)` walks the tree,
+    accumulating affines through `Transform` nodes via
+    `world_from_local.compose(t.forward)`, and pushes world-space
+    `Light` values into the output vec. `Bounded` wrappers are
+    descended into unconditionally — the AABB early-out is per-ray
+    work that would just hide lights with degenerate bounds for no
+    speedup. `render()` builds an "effective lights" `Vec<Light>`
+    once at entry by cloning `scene.lights` and extending it with
+    `collect_lights` over `scene.objects`, then threads a
+    `&[Light]` slice through `render_one_row` → `pixel_color` →
+    `ray_color` → `shade_pixel`. `shade_pixel` iterates the slice
+    instead of `scene.lights`. Stage 1 keeps `Scene::lights`
+    working — scenes that put lights there get the same render
+    they always got, scenes that move lights into the object tree
+    (or mix both styles) render identically. SDL side:
+    `require_shape_value` auto-wraps `Value::Light` into
+    `Shape::Light`, so the same `(light-white ...)` /
+    `(light-point ...)` constructors flow through `(translate ...)`,
+    `(rotate-* ...)`, `(scale ...)`, `(group ...)`, `(bounded ...)`,
+    and the scene `:objects` field without any new surface area.
+    Predicates unchanged: a bare `(light-white ...)` is `light?`
+    and not `shape?`; wrapping it in a transform makes the result
+    `shape?`. `scenes/multi_light_test.lisp` was ported as a
+    visual smoke test — both lights now live in `:objects` with
+    `:lights []`; re-rendering should yield an identical quadrant.
+    New tests: `tests/sdl/lights_in_objects.lisp` exercises the
+    SDL surface (coercion, predicates, composition through every
+    transform constructor, scene construction in both new and
+    mixed styles), and a new `lights_in_objects_equivalence` test
+    in `tests/sdl_suite.rs` renders two 32×32 scenes — one with
+    a light at world `[5 5 5]` in `:lights`, one with
+    `(translate [5 5 5] (light-white [0 0 0]))` in `:objects` —
+    and asserts byte-equality. That single byte-equality test
+    pins down both that the collection pass runs and that the
+    accumulated affine is being applied correctly to light
+    positions; the renderer is per-pixel deterministic so
+    equality holds with `parallel = true`. Stage 2 (deferred):
+    the `Scene::root: Shape` collapse called for in "Future
+    directions" — once the scene is a single top-level `Shape`,
+    the render-entry call becomes `scene.root.collect_lights(...)`
+    and `Scene::lights` comes out entirely.
 
 ## Pitfalls and conventions
 

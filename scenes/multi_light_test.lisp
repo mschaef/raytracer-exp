@@ -6,6 +6,15 @@
 ; confirm contributions still sum correctly when multiple objects are
 ; present, and the ground catches color-tinted shadows from each light
 ; cast in opposite directions.
+;
+; First scene ported to the lights-as-shapes layout: the two lights
+; live in `:objects` alongside the geometry. They're still invisible
+; to rays (no spot on the image where the light is, no shadow cast on
+; itself) — the renderer extracts them with `Shape::collect_lights` at
+; render entry and treats them exactly like the historical
+; `Scene::lights` list. `:lights []` here is the empty backwards-compat
+; channel; equivalent forms put the same `(light-point ...)`
+; expressions in `:lights` and `:objects` and either render identically.
 
 (load "_common.lisp")
 
@@ -16,14 +25,14 @@
      :background    [0.0 0.0 0.0]
      :reflect-limit 2
      :oversample    2
-     :lights
+     :lights        []
+     :objects
      [;; Red light coming from image-left, slightly behind the camera.
       (light-point [-5 5 5] [1.0 0.2 0.2] 1.0)
       ;; Blue light from image-right, lower intensity so the asymmetry
       ;; between the two contributions is visible.
-      (light-point [ 5 5 5] [0.2 0.4 1.0] 0.7)]
-     :objects
-     [;; Central white sphere — picks up whatever color the lights
+      (light-point [ 5 5 5] [0.2 0.4 1.0] 0.7)
+      ;; Central white sphere — picks up whatever color the lights
       ;; throw at it without bias.
       (sphere {:center [0 0 0] :r 1 :surface surface-white})
       ;; Smaller accent spheres for visual reference and to confirm

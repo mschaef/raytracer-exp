@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use shapes::{Shape, nearest_hit};
 use output::{RenderTarget, HeatmapTarget};
+use transform::Affine;
 
 use rayon::prelude::*;
 
@@ -274,7 +275,7 @@ fn light_vector(point: &Point, scene: &Scene, light: &Light) -> Option<Vector> {
     }
 }
 
-fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) -> LinearColor {
+fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, reflect_count: u32) -> LinearColor {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
     let scolor = if hit.surface.checked {
@@ -295,22 +296,23 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) ->
         let rcolor = ray_color(&Vector {
             start: hit.hit_point,
             delta: normalizep(rvec)
-        }, scene, reflect_count + 1);
+        }, scene, lights, reflect_count + 1);
 
         scale_linear_color(&rcolor, hit.surface.reflection)
     } else {
         [0.0, 0.0, 0.0]
     };
 
-    // Sum direct lighting contributions from every light in the scene
-    // that can see this surface point. Each visible light contributes
-    // a Phong specular highlight and a Lambertian diffuse term, both
-    // tinted by `light.color * light.intensity`. With one white,
-    // unit-intensity light this is identical to the earlier behavior;
-    // with multiple lights the contributions just add. Empty `lights`
-    // gives a pure ambient + reflection render, useful as a debug mode.
+    // Sum direct lighting contributions from every light in the
+    // effective list (Scene::lights ++ lights collected from
+    // Scene::objects). Each visible light contributes a Phong specular
+    // highlight and a Lambertian diffuse term, both tinted by
+    // `light.color * light.intensity`. With one white, unit-intensity
+    // light this is identical to the earlier behavior; with multiple
+    // lights the contributions just add. An empty list gives a pure
+    // ambient + reflection render, useful as a debug mode.
     let mut light: LinearColor = [0.0, 0.0, 0.0];
-    for l in &scene.lights {
+    for l in lights {
         if let Some(lv) = light_vector(&hit.hit_point, scene, l) {
             let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0);
             let lambert = dotp(hit.normal, negp(lv.delta));
@@ -337,9 +339,9 @@ fn shade_pixel(ray: &Vector, scene: &Scene, hit: &RayHit, reflect_count: u32) ->
     add_linear_color(&reflected, &add_linear_color(&ambient, &light))
 }
 
-fn ray_color(ray: &Vector, scene: &Scene, reflect_count: u32) -> LinearColor {
+fn ray_color(ray: &Vector, scene: &Scene, lights: &[Light], reflect_count: u32) -> LinearColor {
     match nearest_hit(ray, &scene.objects) {
-        Some(hit) => shade_pixel(ray, scene, &hit, reflect_count),
+        Some(hit) => shade_pixel(ray, scene, lights, &hit, reflect_count),
         None => scene.background
     }
 }
@@ -347,6 +349,7 @@ fn ray_color(ray: &Vector, scene: &Scene, reflect_count: u32) -> LinearColor {
 fn pixel_color(
     camera: &CameraDetails,
     scene: &Scene,
+    lights: &[Light],
     x: u32,
     y: u32,
 ) -> LinearColor {
@@ -363,7 +366,7 @@ fn pixel_color(
             let xt = xc + subdx * (1 + 2 * iix) as f64;
             let yt = yc + subdy * (1 + 2 * iiy) as f64;
 
-            let rc = ray_color(&camera_ray(&camera.camera, camera.aspect, xt, yt), scene, 0);
+            let rc = ray_color(&camera_ray(&camera.camera, camera.aspect, xt, yt), scene, lights, 0);
 
             pc = add_linear_color(&pc, &rc)
         }
@@ -377,6 +380,7 @@ fn render_one_row<T: RenderTarget + ?Sized>(
     heatmap: Option<&dyn HeatmapTarget>,
     camera: &CameraDetails,
     scene: &Scene,
+    lights: &[Light],
     imgx: u32,
     y: u32,
 ) {
@@ -391,7 +395,7 @@ fn render_one_row<T: RenderTarget + ?Sized>(
         let mut timings = vec![0u32; imgx as usize];
         for x in 0..imgx {
             let start = Instant::now();
-            let pc = pixel_color(camera, scene, x, y);
+            let pc = pixel_color(camera, scene, lights, x, y);
             // Saturate at u32::MAX nanoseconds (~4.29 s) rather than
             // wrapping silently. A pixel that takes longer than that
             // shows up as "max-bright" on the heat map, which is
@@ -405,7 +409,7 @@ fn render_one_row<T: RenderTarget + ?Sized>(
         h.submit_timing_row(0, y, &timings);
     } else {
         for x in 0..imgx {
-            row[x as usize] = pixel_color(camera, scene, x, y);
+            row[x as usize] = pixel_color(camera, scene, lights, x, y);
         }
         target.submit_row(0, y, &row);
     }
@@ -441,13 +445,30 @@ pub fn render<T: RenderTarget + ?Sized>(
         oversample: scene.oversample,
     };
 
+    // Build the effective list of lights once at render entry.
+    // `Scene::lights` (the historical top-level list) is concatenated
+    // with every `Shape::Light` discovered inside `Scene::objects` —
+    // each such light has its location transformed into world space by
+    // any enclosing `Shape::Transform` wrappers. Stage 1 of the
+    // lights-as-shapes migration: scenes that only ever used
+    // `Scene::lights` are unchanged; scenes that move some or all of
+    // their lights into the object tree also work; mixed-style scenes
+    // work too. The shading code below iterates a single flat slice
+    // and is agnostic to where each light came from.
+    let identity = Affine::identity();
+    let mut effective_lights: Vec<Light> = scene.lights.clone();
+    for obj in &scene.objects {
+        obj.collect_lights(identity, &mut effective_lights);
+    }
+    let lights = effective_lights.as_slice();
+
     if parallel {
         (0..imgy).into_par_iter().for_each(
-            | y | render_one_row(target, heatmap, &camera, scene, imgx, y)
+            | y | render_one_row(target, heatmap, &camera, scene, lights, imgx, y)
         );
     } else {
         (0..imgy).for_each(
-            | y | render_one_row(target, heatmap, &camera, scene, imgx, y)
+            | y | render_one_row(target, heatmap, &camera, scene, lights, imgx, y)
         );
     }
 

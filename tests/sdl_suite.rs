@@ -69,6 +69,7 @@ const DECLARED: &[&str] = &[
     "destructuring",
     "fn_form",
     "hofs",
+    "lights_in_objects",
     "literals",
     "load_form",
     "load_form_fixture",
@@ -127,6 +128,7 @@ sdl_test!(def_let);
 sdl_test!(destructuring);
 sdl_test!(fn_form);
 sdl_test!(hofs);
+sdl_test!(lights_in_objects);
 sdl_test!(literals);
 sdl_test!(load_form);
 sdl_test!(load_form_fixture);
@@ -223,6 +225,114 @@ fn render_dispatch_save() {
     );
 
     fs::remove_file(&path).ok();
+}
+
+/// Lights-as-shapes equivalence: a scene whose only light lives in
+/// `Scene::lights` at world-space `[5 5 5]` must render byte-identically
+/// to a scene where the same light is positioned by wrapping a
+/// origin-located `(light-white [0 0 0])` in `(translate [5 5 5] ...)`
+/// inside `:objects`. This pins down two stage-1 properties at once:
+/// `Shape::collect_lights` actually walks the object tree, and the
+/// accumulated affine is being applied to the light position.
+///
+/// The renderer is per-pixel deterministic (same convention as
+/// scenes.rs::scene_teapot under parallel = true in earlier phases),
+/// so byte-equality is meaningful even with `parallel = true` —
+/// any divergence indicates a real arithmetic difference, not
+/// scheduling noise.
+#[test]
+fn lights_in_objects_equivalence() {
+    let env = sdl::default_env();
+
+    let pid = std::process::id();
+    let path_a = std::env::temp_dir().join(format!("sdl_lights_eq_a_{}.png", pid));
+    let path_b = std::env::temp_dir().join(format!("sdl_lights_eq_b_{}.png", pid));
+    // Clean up any leftover from a prior run — we need the existence
+    // check below to mean "this run wrote it".
+    let _ = fs::remove_file(&path_a);
+    let _ = fs::remove_file(&path_b);
+
+    env.borrow_mut().define(
+        "PATH-A",
+        Value::String(Rc::new(path_a.to_string_lossy().to_string())),
+    );
+    env.borrow_mut().define(
+        "PATH-B",
+        Value::String(Rc::new(path_b.to_string_lossy().to_string())),
+    );
+
+    // Identical surfaces, camera, and geometry in both scenes —
+    // only the *placement* of the light differs. A is the historical
+    // form (light in :lights). B is the new form (light in :objects,
+    // positioned by translate). Anything other than byte-equality
+    // means the lights-as-shapes wiring is producing a different
+    // shading result for what is supposed to be the same light.
+    let source = r#"
+(def red (surface {:color [1.0 0.2 0.2] :ambient 0.2 :specular 0.5 :light 0.6}))
+(def white-c (surface {:color [0.2 0.2 0.2] :ambient 0.2 :specular 0.5
+                       :light 0.6 :checked true :reflection 0.0}))
+(def cam (camera-looking-at [0 6 3] [0 0 0] [0 0 1] 1.0))
+
+(def s-a
+  (scene {:name "lights-eq-a"
+          :camera cam
+          :background [0 0 0]
+          :reflect-limit 0
+          :oversample 1
+          :lights [(light-white [5 5 5])]
+          :objects [(sphere {:center [0 0 0] :r 1.0 :surface red})
+                    (plane {:normal [0 0 1] :p0 [0 0 -1] :surface white-c})]}))
+
+(def s-b
+  (scene {:name "lights-eq-b"
+          :camera cam
+          :background [0 0 0]
+          :reflect-limit 0
+          :oversample 1
+          :lights []
+          :objects [(translate [5 5 5] (light-white [0 0 0]))
+                    (sphere {:center [0 0 0] :r 1.0 :surface red})
+                    (plane {:normal [0 0 1] :p0 [0 0 -1] :surface white-c})]}))
+
+(def t-a (png-target 32 32))
+(def t-b (png-target 32 32))
+(render s-a t-a 32 32)
+(render s-b t-b 32 32)
+(save-png t-a PATH-A)
+(save-png t-b PATH-B)
+"#;
+
+    sdl::eval_source(source, "lights_in_objects_equivalence.lisp", &env);
+
+    let rgb_a = image::open(&path_a)
+        .unwrap_or_else(|e| panic!("decode PATH-A: {}", e))
+        .to_rgb8();
+    let rgb_b = image::open(&path_b)
+        .unwrap_or_else(|e| panic!("decode PATH-B: {}", e))
+        .to_rgb8();
+
+    assert_eq!(rgb_a.dimensions(), (32, 32));
+    assert_eq!(rgb_b.dimensions(), (32, 32));
+
+    // Quick sanity: the scene should be lit (at least one non-black
+    // pixel). If neither rendered any light, byte-equality would
+    // hold trivially and silently mask a bug.
+    let any_lit_a = rgb_a.as_raw().iter().any(|&c| c > 0);
+    let any_lit_b = rgb_b.as_raw().iter().any(|&c| c > 0);
+    assert!(any_lit_a, "scene A produced an all-black render");
+    assert!(any_lit_b, "scene B produced an all-black render");
+
+    assert_eq!(
+        rgb_a.as_raw(),
+        rgb_b.as_raw(),
+        "lights-in-objects render diverged from lights-in-Scene::lights render \
+         (see {} and {})",
+        path_a.display(),
+        path_b.display(),
+    );
+
+    fs::remove_file(&path_a).ok();
+    fs::remove_file(&path_b).ok();
 }
 
 // ---------------------------------------------------------------------------

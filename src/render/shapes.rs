@@ -9,6 +9,7 @@
 // You must not remove this notice, or any other, from this software.
 
 use crate::render::{
+    Light,
     Point,
     Surface,
     Hittable,
@@ -217,6 +218,18 @@ impl AABB {
 /// primitive the BVH builder will compose; for now scenes use it directly
 /// (e.g. wrap a loaded mesh in `bounded(...)`). The `Box` keeps `Shape`
 /// finite-sized.
+///
+/// `Light` is a point light source positioned in the scene graph. Like
+/// every other Shape variant, lights inherit the affine transforms of
+/// enclosing `Shape::Transform` nodes — that is the whole point of this
+/// variant: scripts can write `(translate [5 0 0] (light-white [0 0 0]))`
+/// and have the light end up at world-space `[5 0 0]`, the same way
+/// geometry does. Lights are *invisible* to every kind of ray
+/// (`Hittable::hit_test` returns `None`): they don't appear in renders,
+/// they don't occlude shadow rays, they don't reflect. The renderer
+/// extracts them up-front via `Shape::collect_lights` so the shading
+/// path iterates a flat world-space list per pixel — no tree walk in
+/// the shading hot path.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Shape {
     Sphere(Sphere),
@@ -227,6 +240,7 @@ pub enum Shape {
     Group(Vec<Shape>),
     Transform(Box<Transformed>),
     Bounded(Box<Bounded>),
+    Light(Light),
 }
 
 /// Storage for a `Shape::Bounded` node. Holds the bounding AABB and the
@@ -281,6 +295,10 @@ impl From<Cylinder> for Shape {
     fn from(c: Cylinder) -> Self { Shape::Cylinder(c) }
 }
 
+impl From<Light> for Shape {
+    fn from(l: Light) -> Self { Shape::Light(l) }
+}
+
 impl Hittable for Shape {
     fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
         match self {
@@ -292,6 +310,13 @@ impl Hittable for Shape {
             Shape::Group(children)  => nearest_hit(ray, children),
             Shape::Transform(t)     => t.hit_test(ray),
             Shape::Bounded(b)       => b.hit_test(ray),
+            // Lights are invisible to every ray (primary, shadow,
+            // reflection). The renderer reaches them through
+            // `Shape::collect_lights` at render entry, not through
+            // hit-testing. Returning `None` here is what keeps them
+            // out of the rendered image and what stops them from
+            // self-shadowing the geometry they live near.
+            Shape::Light(_)         => None,
         }
     }
 }
@@ -444,6 +469,71 @@ impl Shape {
                 Some(AABB::new(min, max))
             }
             Shape::Bounded(b) => Some(b.bounds),
+            Shape::Light(l) => {
+                // A point light has zero extent — its bound is the
+                // degenerate AABB containing only its location. We
+                // return `Some` rather than `None` so a `Group`
+                // containing a light stays bounded, and so `bounded(...)`
+                // works without special-casing lights. Light hit-testing
+                // is always a no-op, so even if a `Bounded` wrapper
+                // skips the light due to a ray-AABB miss the user-
+                // visible result is unchanged.
+                Some(AABB::new(l.location, l.location))
+            }
+        }
+    }
+
+    /// Walk the scene tree and push every contained light's world-space
+    /// `Light` value into `out`. `world_from_local` accumulates the
+    /// affine transforms of enclosing `Shape::Transform` nodes; pass
+    /// `Affine::identity()` at the top level. Each leaf light pushes a
+    /// new `Light` whose `location` has been transformed by the
+    /// accumulated affine — color and intensity are unchanged because
+    /// affines don't carry photometric meaning.
+    ///
+    /// `Bounded` wrappers are descended into *unconditionally*: the
+    /// collection pass runs once at render entry, not per-ray, so the
+    /// AABB early-out provides no speedup and would silently hide a
+    /// light that happened to fall outside its enclosing box (which
+    /// is a degenerate-bounds edge case but not worth defending
+    /// against by having different traversal rules for collection and
+    /// hit-testing).
+    ///
+    /// `world_from_local` is passed by value because `Affine` is
+    /// `Copy` (96 bytes) and `Affine::compose` consumes its `self`;
+    /// borrowing buys nothing here and just complicates the recursion.
+    pub fn collect_lights(&self, world_from_local: Affine, out: &mut Vec<Light>) {
+        match self {
+            Shape::Light(l) => {
+                out.push(Light {
+                    location: world_from_local.transform_point(l.location),
+                    color: l.color,
+                    intensity: l.intensity,
+                });
+            }
+            Shape::Group(children) => {
+                for child in children {
+                    child.collect_lights(world_from_local, out);
+                }
+            }
+            Shape::Transform(t) => {
+                // The child sees the affine that maps its local space
+                // to world space. If we already have a world-from-parent
+                // affine and the child is wrapped in a parent-from-child
+                // affine (`t.forward`), the composed map is
+                // `world_from_local ∘ t.forward` — same convention as
+                // `Affine::compose`.
+                t.child.collect_lights(world_from_local.compose(t.forward), out);
+            }
+            Shape::Bounded(b) => {
+                b.child.collect_lights(world_from_local, out);
+            }
+            // Leaf geometry contains no lights.
+            Shape::Sphere(_)
+            | Shape::Plane(_)
+            | Shape::Cuboid(_)
+            | Shape::Triangle(_)
+            | Shape::Cylinder(_) => {}
         }
     }
 }
