@@ -19,13 +19,14 @@ showing a different scene; this is configured in `main.rs`.
 
 ```
 src/
-  main.rs              Entry point. Builds 4 scenes, lays them out in quadrants,
-                       writes render.png. Reads PARALLEL env var.
+  main.rs              Entry point. Loads four scenes from
+                       `scenes/<name>.lisp` via `load_sdl_scene(...)`,
+                       lays them out in quadrants, writes render.png.
+                       Reads PARALLEL env var.
 
   render.rs            Top-level render module. Defines:
                          - Scene, Camera, Light, Surface, RayHit
                          - Hittable trait
-                         - the scene_objects! macro (#[macro_export])
                          - the rendering pipeline:
                              render → render_into_line → pixel_color
                                     → camera_ray, ray_color
@@ -54,10 +55,35 @@ src/
                          timings into a heatmap target; `image` crate use is
                          fully encapsulated here.
 
-  scenes.rs            Hand-written scene definitions, surface presets,
-                       and default_camera(). Each scene is a `pub fn` returning
-                       a Scene value, marked #[allow(dead_code)] since main.rs
-                       only wires up four of them at a time.
+  sdl/                 The scene definition language. See the
+                       "Scene definition language" section below for
+                       a full module breakdown. Phase 8 deleted the
+                       older `src/scenes.rs` once every scene had a
+                       parallel `.lisp` definition; the SDL is now
+                       the canonical scene-definition mechanism.
+```
+
+Scene definitions live at the repo root:
+
+```
+scenes/
+  _common.lisp         Surface coefficients (ambient/specular/light), the
+                       glossy and reflective helpers, surface-* presets,
+                       and default-camera. Loaded by every scene file via
+                       (load "_common.lisp"). Underscore prefix signals
+                       "not a standalone scene."
+
+  axis_spheres.lisp    Each scene file defines a single `<name>-scene`
+  ball_on_plane.lisp   binding (Value::Scene). main.rs picks four of these
+  cuboid_test.lisp     for the quadrant layout via load_sdl_scene; tests/
+  cylinder_test.lisp   sdl_suite.rs has a smoke test per file that
+  group_test.lisp      verifies the script evaluates and produces a Scene.
+  multi_light_test.lisp
+  one_sphere.lisp      teapot.lisp uses (load-obj ...) to pull in
+  sphere_occlusion_test.lisp  models/utah_teapot.obj — that file isn't
+  sphere_surface_test.lisp    committed; main.rs and the smoke test
+  teapot.lisp          gracefully handle its absence.
+  transform_test.lisp
 ```
 
 ## The Shape enum
@@ -119,51 +145,45 @@ hit-testing only uses the inverse and `normal_xform`. Its hit_test:
 The `Group` variant is naturally recursive without an explicit Box because
 `Vec<Shape>` is heap-indirected.
 
-## Constructing scenes ergonomically
+## Constructing scenes
 
-Three layered conveniences let scene definitions stay clean:
+Scenes are written in the SDL — see `scenes/*.lisp` for examples and
+"Scene definition language" below for the language and bindings. The
+underlying Rust constructors are still public on `crate::render::shapes`
+for direct use:
 
-1. **`From<T> for Shape`** for each leaf type (`Sphere`, `Plane`, `Cuboid`).
-   Plus the standard library's reflexive `From<T> for T`, so `Shape::from(s)`
-   works on any leaf or on an existing `Shape`.
+- `From<T> for Shape` for each leaf type (`Sphere`, `Plane`, `Cuboid`,
+  `Cylinder`, `Triangle`). Auto-promotes a leaf primitive to the `Shape`
+  enum variant; reflexive `From<Shape> for Shape` means `Shape::from(s)`
+  works uniformly.
+- Constructor functions in `shapes.rs` for the composite/transformed
+  variants, each accepting `impl Into<Shape>` so leaves and existing
+  shapes both work as the child argument:
 
-2. **The `scene_objects!` macro** (defined in `render.rs`, `#[macro_export]`):
+  ```rust
+  pub fn group(children: Vec<Shape>) -> Shape;
+  pub fn transform(forward: Affine, child: impl Into<Shape>) -> Shape;
+  pub fn translate(d: Point,        child: impl Into<Shape>) -> Shape;
+  pub fn scale(s: Point,            child: impl Into<Shape>) -> Shape;
+  pub fn rotate_x(theta: f64,       child: impl Into<Shape>) -> Shape;
+  pub fn rotate_y(theta: f64,       child: impl Into<Shape>) -> Shape;
+  pub fn rotate_z(theta: f64,       child: impl Into<Shape>) -> Shape;
+  pub fn rotate_axis(axis: Point, theta: f64, child: impl Into<Shape>) -> Shape;
+  pub fn bounded(child: impl Into<Shape>) -> Shape;
+  pub fn bounded_with(bounds: AABB, child: impl Into<Shape>) -> Shape;
+  ```
 
-   ```rust
-   scene_objects![
-       Sphere { ... },
-       Plane  { ... },
-       translate([1,0,0], Cuboid { ... }),
-   ]
-   ```
+  Outer-most call applies last, so `translate(t, rotate_z(θ, scale(s, leaf)))`
+  reads naturally: scale first, then rotate, then translate. Each layer
+  inverse-transforms the ray on the way down; the math comes out equivalent
+  to a single composed transform without anyone having to think about matrix
+  multiplication order. The bare `transform(matrix, child)` is the escape
+  hatch for hand-built `Affine` values via
+  `Affine::translation(...).compose(...)` etc.
 
-   Expands each entry through `<Shape>::from(_)`, returning `Vec<Shape>`. Used
-   directly for `Scene::objects` and as the input to `group(...)`.
-
-3. **Constructor functions** (in `shapes.rs`) that accept `impl Into<Shape>`
-   for their `child` argument, so leaf primitives can be passed directly:
-
-   ```rust
-   pub fn group(children: Vec<Shape>) -> Shape;
-   pub fn transform(forward: Affine, child: impl Into<Shape>) -> Shape;
-   pub fn translate(d: Point,        child: impl Into<Shape>) -> Shape;
-   pub fn scale(s: Point,            child: impl Into<Shape>) -> Shape;
-   pub fn rotate_x(theta: f64,       child: impl Into<Shape>) -> Shape;
-   pub fn rotate_y(theta: f64,       child: impl Into<Shape>) -> Shape;
-   pub fn rotate_z(theta: f64,       child: impl Into<Shape>) -> Shape;
-   pub fn rotate_axis(axis: Point, theta: f64, child: impl Into<Shape>) -> Shape;
-   pub fn bounded(child: impl Into<Shape>) -> Shape;
-   pub fn bounded_with(bounds: AABB, child: impl Into<Shape>) -> Shape;
-   ```
-
-   Outer-most call applies last, so `translate(t, rotate_z(θ, scale(s, leaf)))`
-   reads naturally: scale first, then rotate, then translate. Each layer
-   inverse-transforms the ray on the way down; the math comes out equivalent
-   to a single composed transform without anyone having to think about
-   matrix multiplication order.
-
-   The bare `transform(matrix, child)` is the escape hatch for hand-built
-   `Affine` values via `Affine::translation(...).compose(...)` etc.
+The SDL bindings call these constructors under the hood — `(translate ...)`,
+`(rotate-z ...)`, `(group ...)`, `(bounded ...)`, etc. all map directly to
+the Rust functions above with the same composition semantics.
 
 ## The Camera
 
@@ -231,9 +251,10 @@ multiplier of the surface color and a single bounce of mirror reflection
 (recursion gated by `Scene::reflect_limit`). The `checked` flag enables a
 simple world-space checker pattern keyed off `floor(x+y+z)`.
 
-Surface presets and the `surface_glossy` / `reflective` const fns live in
-`scenes.rs`. Common ones: `SURFACE_RED`, `SURFACE_GREEN`, …, `SURFACE_WHITE_C`
-(the reflective checkered ground used by most scenes).
+Surface presets and the `glossy` / `reflective` constructor helpers live
+in `scenes/_common.lisp`. Common ones: `surface-red`, `surface-green`, …,
+`surface-white-c` (the reflective checkered ground used by most scenes).
+Every `scenes/<name>.lisp` file pulls these in via `(load "_common.lisp")`.
 
 ## Lights
 
@@ -643,6 +664,35 @@ Approximate order of recent commits, oldest first:
     an equivalence test, and the next step (Phase 8) is removing
     `scenes.rs` itself.
 
+20. **SDL phase 8: SDL is the only scene-definition mechanism.**
+    Deletes `src/scenes.rs` (10 hand-written Rust scenes), the
+    `pub mod scenes;` declaration in `src/lib.rs`, and the
+    `scene_objects!` macro in `src/render.rs` (used only inside
+    `scenes.rs`). The doc comment in `src/render/shapes.rs` was
+    trimmed to mention only the `From` impls — the macro
+    reference no longer applies. `src/main.rs` now drives the
+    renderer from SDL scenes via a small `load_sdl_scene(rel,
+    binding)` helper that reads `scenes/<rel>` (path built
+    absolute from `CARGO_MANIFEST_DIR`), evaluates in a fresh
+    `default_env`, looks up the named scene binding, and clones
+    the inner `Scene` out of the `Rc`. The four-quadrant
+    composition and the on-disk vs. streaming path are
+    structurally unchanged. `tests/sdl_suite.rs` lost its
+    `assert_sdl_scene_matches_rust*` byte-equivalence helpers
+    along with the 11 `phase{5,6,7}_<scene>_scene_matches_rust`
+    tests they powered — there's no Rust scene left to compare
+    against. They were replaced with much smaller smoke tests
+    (`<scene>_scene_loads`) that load each `.lisp` file in a
+    fresh `default_env`, look up the scene binding, and verify
+    it's a `Value::Scene` without rendering. Catches script-
+    level breakage (parse errors, missing bindings,
+    `_common.lisp` regressions) for free; visual correctness
+    falls back to the rest of the codebase's "render and look"
+    convention. Phase ends here: the SDL is the canonical
+    scene-definition mechanism. Future phases (heatmap target
+    binding, animation, interpreter optimizations, transform
+    collapsing) are all additive on top of this baseline.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -667,24 +717,25 @@ place under non-uniform scale," this is the suspect.
 1e3), the self-intersection rejection threshold drifts in world terms. Hasn't
 been an issue yet.
 
-**`scene_objects!` macro requires explicit import in submodules.** It's
-`#[macro_export]` so it lives at the crate root; modules using it need
-`use crate::scene_objects;` at the top. This is already in place in
-`scenes.rs`.
-
 **Image-y is inverted.** `camera_ray` uses `sy = 1.0 - 2.0 * yt` so that
 pixel y=0 is the top of the image. Don't "fix" this unless you also flip
 every existing scene's `up_hint`.
 
-**There are no unit tests.** Verification is visual: render and look. When
-making changes, the smell test is "does the output look the same as before
-for cases that shouldn't have changed, and right for cases that should?" The
-default `main.rs` quadrant layout is useful for side-by-side comparisons.
+**Visual verification of scenes; SDL has unit tests.** The renderer and
+the scene definitions are verified visually — render `render.png` and
+look. The SDL itself has a thorough integration suite at
+`tests/sdl_suite.rs`; that catches script-level breakage (parse errors,
+missing bindings, language regressions) but doesn't cover visual
+correctness. When changing the renderer or a `scenes/*.lisp` file, the
+smell test is "does the output look the same as before for cases that
+shouldn't have changed, and right for cases that should?" The default
+`main.rs` quadrant layout is useful for side-by-side comparisons.
 
-**`#[allow(dead_code)]` on every scene fn.** `main.rs` only references four
-scenes at a time; the unused ones generate warnings without it. When
-introducing a new scene, swap it into the `scene` array in `main.rs` to view
-it (or comment one out — the existing pattern shows both styles).
+**Swapping scenes in `main.rs`.** `main.rs::main` builds an array of
+four `Scene` values via `load_sdl_scene("<file>.lisp", "<binding>")`.
+To view a different scene, change the path/binding pair. The complete
+list of available scenes (with their `*-scene` binding names) lives in
+the comment above the `let scenes = [ ... ]` block.
 
 ## Scene definition language: implementation plan
 
@@ -800,21 +851,14 @@ also delivered the supporting `mod`/`quot` builtins and the
 "Recent work history."
 
 **Phase 8 — Remove `src/scenes.rs` (and the surrounding plumbing).**
-Once Phase 7 lands and every scene in `scenes/*.lisp` is verified
-byte-equal to its Rust counterpart, delete `src/scenes.rs`,
-`pub mod scenes;` in `src/lib.rs`, the corresponding imports in
-`src/main.rs`, and the `assert_sdl_scene_matches_rust` helper that
-becomes unanchored. `main.rs` will need its own way to drive the
-SDL scenes (probably a small loop that loads each `scenes/*.lisp`
-and calls `(render ...)` from script — or extracts each scene
-binding and renders from Rust). The `scene_objects!` macro becomes
-unused once `scenes.rs` is gone (the .lisp files reach the host
-shape constructors via the SDL bindings, not the macro), so it
-can be deleted too.
+Done; see "Recent work history." The SDL is now the canonical
+scene-definition mechanism.
 
 **Phase 9+ (deferred).** Heatmap target binding; animation
 (timestep loops, a video or sequence-of-PNGs target, per-frame
-mutation of geometry); interpreter optimizations.
+mutation of geometry); interpreter optimizations; transform
+collapsing (see "Future directions" — first perf item to tackle
+now that SDL parity is complete).
 
 ### Decisions still open
 

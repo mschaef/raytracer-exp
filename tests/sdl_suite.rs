@@ -226,360 +226,131 @@ fn render_dispatch_save() {
 }
 
 // ---------------------------------------------------------------------------
-// Scene-port equivalence harness
+// Scene-load smoke tests
 // ---------------------------------------------------------------------------
 //
-// Each ported scene gets a one-line `#[test]` that delegates to
-// `assert_sdl_scene_matches_rust`. The helper renders both the
-// SDL-defined scene (looked up by binding name in the script's env)
-// and the canonical Rust scene to two `PngTarget`s at the same
-// dimensions, saves each as PNG, decodes both, and asserts
-// pixel-by-pixel equality.
-//
-// The two pipelines run identical math on identical inputs (same
-// `Surface` field values, same `Camera::looking_at` arguments, same
-// transform composition order, identical f64 representation of `pi`),
-// so the rendered bytes should match exactly. `TOLERANCE = 0` reflects
-// that — any divergence is a real bug in the binding layer or the
-// port, not floating-point drift. If a future change introduces an
-// unavoidable LSB-level mismatch we'd loosen the tolerance, but the
-// failure message preserves enough detail to diagnose either case.
-//
-// Resolution is 64×64 to keep the suite fast while still exercising
-// every transform path in each scene. `parallel = false` removes any
-// scheduler-order variability — the renderer is per-pixel deterministic
-// regardless, but serial execution makes that property load-bearing for
-// the test rather than incidental.
-//
-// On failure both PNGs are kept on disk and their paths surfaced in
-// the panic message so the user can `open` them and diff visually.
-// On success they're removed.
+// Phase 8 deleted src/scenes.rs and the byte-equivalence harness that
+// pinned each .lisp scene against its Rust counterpart. The SDL is now
+// the canonical scene-definition mechanism — there's nothing left to
+// compare against. We replace the equivalence tests with a much smaller
+// smoke test per scene file: load the script, verify the *-scene
+// binding is present and is a Value::Scene. This catches script-level
+// breakage (parse errors, missing bindings, type mismatches, broken
+// helpers in _common.lisp) without rendering. Visual correctness is
+// verified the way the rest of the codebase is verified — by running
+// the binary and looking at render.png.
 
-const EQUIV_W: u32 = 64;
-const EQUIV_H: u32 = 64;
-const EQUIV_TOLERANCE: u8 = 0;
-
-/// Render a Rust `Scene` and an SDL-defined scene from a `.lisp`
-/// script and assert byte-equal output.
-///
-/// Defaults to 64×64 with `parallel = false` — the convention used by
-/// the Phase 5 / Phase 6 ports where every transformed object covers
-/// at least a few pixels and serial execution is well under a second.
-/// For ports where that's too slow (a 6000-triangle teapot at 64×64
-/// serial would dominate suite runtime), call
-/// [`assert_sdl_scene_matches_rust_with`] directly with smaller
-/// dimensions and/or `parallel = true`.
-fn assert_sdl_scene_matches_rust(
-    script_relpath: &str,
-    binding_name: &str,
-    rust_scene: raytracer::render::Scene,
-    suffix: &str,
-) {
-    assert_sdl_scene_matches_rust_with(
-        script_relpath,
-        binding_name,
-        rust_scene,
-        suffix,
-        EQUIV_W,
-        EQUIV_H,
-        false,
-    );
-}
-
-/// Like [`assert_sdl_scene_matches_rust`] but takes the render
-/// dimensions and `parallel` flag explicitly. The renderer is
-/// per-pixel deterministic regardless of whether work is dispatched
-/// across Rayon's worker threads or run serially in the main thread —
-/// each pixel reads from immutable scene data and writes a single
-/// non-overlapping row to the target — so byte-equality holds with
-/// `parallel = true` too. Use that for expensive scenes (e.g. the
-/// teapot) where serial execution would dominate suite runtime.
-///
-/// `script_relpath` is the path relative to `scenes/` (e.g.
-/// `"transform_test.lisp"`). `binding_name` is the symbol the script
-/// `def`s its `Value::Scene` to (e.g. `"transform-test-scene"`).
-/// `suffix` is appended to the temp PNG filenames so concurrent runs
-/// of different ports don't clobber each other.
-///
-/// The script path is built absolute (from `CARGO_MANIFEST_DIR`) and
-/// passed to `eval_source` as-is, so any `(load "_common.lisp")` the
-/// script does resolves correctly via the `CurrentDirGuard` thread-
-/// local installed inside `eval_source`.
-fn assert_sdl_scene_matches_rust_with(
-    script_relpath: &str,
-    binding_name: &str,
-    rust_scene: raytracer::render::Scene,
-    suffix: &str,
-    width: u32,
-    height: u32,
-    parallel: bool,
-) {
-    use raytracer::render::output::PngTarget;
-    use raytracer::render::render;
-
-    let pid = std::process::id();
-    let rust_path = std::env::temp_dir()
-        .join(format!("sdl_equiv_{}_rust_{}.png", suffix, pid));
-    let sdl_path = std::env::temp_dir()
-        .join(format!("sdl_equiv_{}_sdl_{}.png", suffix, pid));
-    let _ = fs::remove_file(&rust_path);
-    let _ = fs::remove_file(&sdl_path);
-
-    // Render the Rust version directly into a PngTarget and save.
-    // PngTarget writes sRGB-encoded 8-bit pixels, which matches what
-    // we'll get when we decode either saved file below — the
-    // comparison is symmetric.
-    let rust_target = PngTarget::new(width, height);
-    render(&rust_scene, width, height, &rust_target, None, parallel);
-    rust_target
-        .save(&rust_path)
-        .expect("save Rust render");
-
-    // Read and evaluate the .lisp scene file in a fresh default_env.
-    // CARGO_MANIFEST_DIR is the workspace root, so this works
-    // regardless of where `cargo test` is invoked from.
-    let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+/// Load a `scenes/<relpath>` file in a fresh default_env, look up
+/// `binding`, and assert it's a `Value::Scene`. The script path is
+/// built absolute (from `CARGO_MANIFEST_DIR`) and passed to
+/// `eval_source` as-is, so any `(load "_common.lisp")` the script
+/// does resolves correctly via the `CurrentDirGuard`.
+fn assert_scene_loads(script_relpath: &str, binding: &str) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("scenes")
         .join(script_relpath);
-    let source = fs::read_to_string(&script_path).unwrap_or_else(|e| {
-        panic!("could not read {}: {}", script_path.display(), e)
+    let source = fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!("could not read {}: {}", path.display(), e)
     });
     let env = sdl::default_env();
-    // Pass the absolute path so (load "_common.lisp") in the script
-    // resolves to scenes/_common.lisp via the CurrentDirGuard.
-    sdl::eval_source(&source, &script_path.to_string_lossy(), &env);
-
-    let scene_value = env
+    sdl::eval_source(&source, &path.to_string_lossy(), &env);
+    let value = env
         .borrow()
-        .lookup(binding_name)
-        .unwrap_or_else(|| panic!("script did not define `{}`", binding_name));
-    let sdl_scene = match scene_value {
-        Value::Scene(s) => s,
+        .lookup(binding)
+        .unwrap_or_else(|| {
+            panic!(
+                "{} did not define `{}`",
+                script_relpath, binding
+            )
+        });
+    match value {
+        Value::Scene(_) => {}
         other => panic!(
-            "{} must be a scene, got {} ({})",
-            binding_name,
+            "{} :: {} expected a scene, got {} ({})",
+            script_relpath,
+            binding,
             other,
             other.type_name()
         ),
-    };
-
-    let sdl_target = PngTarget::new(width, height);
-    render(&*sdl_scene, width, height, &sdl_target, None, parallel);
-    sdl_target
-        .save(&sdl_path)
-        .expect("save SDL render");
-
-    let rust_img = image::open(&rust_path)
-        .unwrap_or_else(|e| panic!("decode Rust PNG: {}", e))
-        .to_rgb8();
-    let sdl_img = image::open(&sdl_path)
-        .unwrap_or_else(|e| panic!("decode SDL PNG: {}", e))
-        .to_rgb8();
-
-    assert_eq!(
-        rust_img.dimensions(),
-        (width, height),
-        "{}: Rust PNG dimensions",
-        script_relpath
-    );
-    assert_eq!(
-        sdl_img.dimensions(),
-        (width, height),
-        "{}: SDL PNG dimensions",
-        script_relpath
-    );
-
-    // Walk the buffers in parallel. Track both the worst per-channel
-    // delta seen anywhere and the first pixel that exceeds tolerance —
-    // the former is a quick sanity check ("is this off by 1 LSB or
-    // wildly wrong?"), the latter points the user at a specific pixel
-    // to investigate.
-    let mut max_diff: u8 = 0;
-    let mut first_offender: Option<(u32, u32, [u8; 3], [u8; 3])> = None;
-    for y in 0..height {
-        for x in 0..width {
-            let r = rust_img.get_pixel(x, y).0;
-            let s = sdl_img.get_pixel(x, y).0;
-            for c in 0..3 {
-                let d = r[c].abs_diff(s[c]);
-                if d > max_diff {
-                    max_diff = d;
-                }
-                if d > EQUIV_TOLERANCE && first_offender.is_none() {
-                    first_offender = Some((x, y, r, s));
-                }
-            }
-        }
     }
-
-    if let Some((x, y, r, s)) = first_offender {
-        panic!(
-            "{}: SDL render diverges from Rust render at ({}, {}): \
-             rust={:?} sdl={:?}, max diff = {} (tolerance {}). \
-             rust PNG: {}, sdl PNG: {}",
-            script_relpath,
-            x,
-            y,
-            r,
-            s,
-            max_diff,
-            EQUIV_TOLERANCE,
-            rust_path.display(),
-            sdl_path.display(),
-        );
-    }
-
-    // All pixels matched within tolerance — clean up the temp files.
-    let _ = fs::remove_file(&rust_path);
-    let _ = fs::remove_file(&sdl_path);
 }
 
-// One #[test] per ported scene. Phase 5 was the original; Phase 6 added
-// the rest of the no-mesh `scenes.rs` entries. `scene_teapot` is
-// deferred until the `load-obj` mesh binding lands.
+// One #[test] per scene file. Order matches `scenes/` directory listing
+// for easy visual scan; the `(path, binding)` pairing also serves as a
+// reference for what main.rs's load_sdl_scene calls expect. Naming
+// dropped the `phaseN_` prefix that the equivalence tests had —
+// post-Phase-8 these are just regular smoke tests, not phase deliverables.
 
 #[test]
-fn phase5_transform_test_scene_matches_rust() {
-    assert_sdl_scene_matches_rust(
-        "transform_test.lisp",
-        "transform-test-scene",
-        raytracer::scenes::scene_transform_test(),
-        "transform_test",
-    );
+fn axis_spheres_scene_loads() {
+    assert_scene_loads("axis_spheres.lisp", "axis-spheres-scene");
 }
 
 #[test]
-fn phase6_sphere_occlusion_test_scene_matches_rust() {
-    assert_sdl_scene_matches_rust(
-        "sphere_occlusion_test.lisp",
-        "sphere-occlusion-test-scene",
-        raytracer::scenes::scene_sphere_occlusion_test(),
-        "sphere_occlusion_test",
-    );
+fn ball_on_plane_scene_loads() {
+    assert_scene_loads("ball_on_plane.lisp", "ball-on-plane-scene");
 }
 
 #[test]
-fn phase6_sphere_surface_test_scene_matches_rust() {
-    assert_sdl_scene_matches_rust(
-        "sphere_surface_test.lisp",
-        "sphere-surface-test-scene",
-        raytracer::scenes::scene_sphere_surface_test(),
-        "sphere_surface_test",
-    );
+fn cuboid_test_scene_loads() {
+    assert_scene_loads("cuboid_test.lisp", "cuboid-test-scene");
 }
 
 #[test]
-fn phase6_one_sphere_scene_matches_rust() {
-    assert_sdl_scene_matches_rust(
-        "one_sphere.lisp",
-        "one-sphere-scene",
-        raytracer::scenes::scene_one_sphere(),
-        "one_sphere",
-    );
+fn cylinder_test_scene_loads() {
+    assert_scene_loads("cylinder_test.lisp", "cylinder-test-scene");
 }
 
 #[test]
-fn phase6_axis_spheres_scene_matches_rust() {
-    assert_sdl_scene_matches_rust(
-        "axis_spheres.lisp",
-        "axis-spheres-scene",
-        raytracer::scenes::scene_axis_spheres(),
-        "axis_spheres",
-    );
+fn group_test_scene_loads() {
+    assert_scene_loads("group_test.lisp", "group-test-scene");
 }
 
 #[test]
-fn phase6_cuboid_test_scene_matches_rust() {
-    assert_sdl_scene_matches_rust(
-        "cuboid_test.lisp",
-        "cuboid-test-scene",
-        raytracer::scenes::scene_cuboid_test(),
-        "cuboid_test",
-    );
+fn multi_light_test_scene_loads() {
+    assert_scene_loads("multi_light_test.lisp", "multi-light-test-scene");
 }
 
 #[test]
-fn phase6_group_test_scene_matches_rust() {
-    assert_sdl_scene_matches_rust(
-        "group_test.lisp",
-        "group-test-scene",
-        raytracer::scenes::scene_group_test(),
-        "group_test",
-    );
+fn one_sphere_scene_loads() {
+    assert_scene_loads("one_sphere.lisp", "one-sphere-scene");
 }
 
 #[test]
-fn phase6_multi_light_test_scene_matches_rust() {
-    assert_sdl_scene_matches_rust(
-        "multi_light_test.lisp",
-        "multi-light-test-scene",
-        raytracer::scenes::scene_multi_light_test(),
-        "multi_light_test",
-    );
+fn sphere_occlusion_test_scene_loads() {
+    assert_scene_loads("sphere_occlusion_test.lisp", "sphere-occlusion-test-scene");
 }
 
 #[test]
-fn phase6_ball_on_plane_scene_matches_rust() {
-    assert_sdl_scene_matches_rust(
-        "ball_on_plane.lisp",
-        "ball-on-plane-scene",
-        raytracer::scenes::scene_ball_on_plane(),
-        "ball_on_plane",
-    );
+fn sphere_surface_test_scene_loads() {
+    assert_scene_loads("sphere_surface_test.lisp", "sphere-surface-test-scene");
 }
 
 #[test]
-fn phase6_cylinder_test_scene_matches_rust() {
-    assert_sdl_scene_matches_rust(
-        "cylinder_test.lisp",
-        "cylinder-test-scene",
-        raytracer::scenes::scene_cylinder_test(),
-        "cylinder_test",
-    );
+fn transform_test_scene_loads() {
+    assert_scene_loads("transform_test.lisp", "transform-test-scene");
 }
 
-/// Phase 7 — teapot port equivalence test.
-///
-/// Renders both `scene_teapot()` and `scenes/teapot.lisp` to PNGs
-/// and asserts byte-equality, same as the other ports — but with two
-/// concessions to the teapot's cost:
-///
-/// 1. **Skip if the model isn't on disk.** The teapot OBJ isn't
-///    committed to the repo (it's a multi-megabyte third-party model
-///    you drop in yourself), so a fresh clone has no way to run this
-///    test. We check for `models/utah_teapot.obj` up front and skip
-///    with an explanatory `eprintln` if it's missing — same posture
-///    as `main.rs`, which also fails at runtime if the model is
-///    absent rather than bringing it in as a build-time dependency.
-///
-/// 2. **Smaller render and `parallel = true`.** A 6000-triangle mesh
-///    rendered serially at 64×64 takes seconds; at 32×32 with rayon
-///    it's well under one. The renderer is per-pixel deterministic
-///    regardless of dispatch strategy (each pixel reads from
-///    immutable scene data and writes a non-overlapping row to the
-///    target), so byte-equality still holds.
+/// Teapot smoke test — same shape as the rest, but skips with an
+/// `eprintln` when `models/utah_teapot.obj` is absent. Loading the
+/// scene calls `(load-obj "../models/utah_teapot.obj" ...)`, which
+/// requires the model file. The OBJ isn't committed to the repo
+/// (it's a multi-megabyte third-party model you drop in yourself);
+/// `main.rs` has the same dependency at runtime.
 #[test]
-fn phase7_teapot_scene_matches_rust() {
+fn teapot_scene_loads() {
     let model_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("models")
         .join("utah_teapot.obj");
     if !model_path.exists() {
         eprintln!(
-            "phase7_teapot_scene_matches_rust: skipped — {} not found. \
+            "teapot_scene_loads: skipped — {} not found. \
              Drop a Utah teapot OBJ at that path to enable this test.",
             model_path.display()
         );
         return;
     }
-    assert_sdl_scene_matches_rust_with(
-        "teapot.lisp",
-        "teapot-scene",
-        raytracer::scenes::scene_teapot(),
-        "teapot",
-        32,
-        32,
-        true,
-    );
+    assert_scene_loads("teapot.lisp", "teapot-scene");
 }
 
 /// Guard test: every `.lisp` file in `tests/sdl/` must have a

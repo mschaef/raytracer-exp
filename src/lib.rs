@@ -10,11 +10,12 @@
 
 //! Library crate for the raytracer project.
 //!
-//! Exposes the renderer (`render`), the hand-written Rust scenes
-//! (`scenes`), and the scene definition language (`sdl`). The binary
-//! crate (`main.rs`) and the SDL bindings consume these as a library;
-//! `tests/sdl_suite.rs` consumes the SDL via `raytracer::sdl`.
+//! Exposes the renderer (`render`) and the scene definition language
+//! (`sdl`). The binary crate (`main.rs`) loads scenes from
+//! `scenes/*.lisp` via the SDL — Phase 8 deleted the older
+//! `src/scenes.rs` module of hand-written Rust scenes once every
+//! scene had a parallel `.lisp` definition. `tests/sdl_suite.rs`
+//! consumes the SDL via `raytracer::sdl`.
 
 pub mod render;
-pub mod scenes;
 pub mod sdl;

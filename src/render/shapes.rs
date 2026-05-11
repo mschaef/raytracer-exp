@@ -195,9 +195,11 @@ impl AABB {
 /// Closed enumeration of all shape primitives the renderer knows how to
 /// hit-test. Stored inline in `Scene::objects` (no boxing, no vtable).
 ///
-/// The `scene_objects!` macro and the `From` impls below let scene
-/// definitions just write `Sphere { ... }` and have it auto-promoted to
-/// the right variant.
+/// The `From` impls below let Rust callers write `Sphere { ... }` and
+/// have it auto-promoted to the right variant. The SDL bindings build
+/// `Shape::Sphere(...)` etc. directly rather than going through `From`,
+/// but the impls remain a sensible Rust-side API for any future
+/// non-SDL callers.
 ///
 /// `Group` lets a list of children be treated as a single shape, which
 /// is what makes hierarchical scene composition possible. A group's hit
