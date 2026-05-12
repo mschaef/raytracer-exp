@@ -390,10 +390,11 @@ fn assert_scene_loads(script_relpath: &str, binding: &str) {
 }
 
 // One #[test] per scene file. Order matches `scenes/` directory listing
-// for easy visual scan; the `(path, binding)` pairing also serves as a
-// reference for what main.rs's load_sdl_scene calls expect. Naming
-// dropped the `phaseN_` prefix that the equivalence tests had —
-// post-Phase-8 these are just regular smoke tests, not phase deliverables.
+// for easy visual scan; the `(path, binding)` pairing documents the
+// same `<stem>-scene` convention `main.rs`'s `binding_name_for`
+// derives. Naming dropped the `phaseN_` prefix that the equivalence
+// tests had — post-Phase-8 these are just regular smoke tests, not
+// phase deliverables.
 
 #[test]
 fn axis_spheres_scene_loads() {

@@ -10,19 +10,33 @@ A CPU ray tracer that renders simple scenes of analytic primitives (spheres,
 planes, axis-aligned boxes) into PNGs. It supports ambient/diffuse/specular
 shading, hard shadows, mirror reflections, hierarchical scene composition with
 affine transforms, and a look-at camera. Rendering is parallelized with Rayon.
-Output is a 2048×2048 image (`render.png`) split into four quadrants, each
-showing a different scene; this is configured in `main.rs`.
 
-`cargo run --release` produces `render.png`. Set `PARALLEL=n` to disable Rayon.
+The binary takes a single scene file path on the command line and writes
+`render.png` (and `render-heatmap.png`) in the current directory:
+
+```
+cargo run --release -- scenes/teapot.lisp
+```
+
+The binding looked up inside the script is derived from the filename:
+`cuboid_test.lisp` → `cuboid-test-scene` (file stem with `_` → `-`, plus
+the `-scene` suffix). Every scene in `scenes/` follows this convention.
+`SIZE=N` or `SIZE=WxH` overrides the default 1024×1024 output; `PARALLEL=n`
+disables Rayon; `RTVIEW_ADDR=host:port` streams pixels to a live receiver
+instead of writing `render.png`.
 
 ## Module layout
 
 ```
 src/
-  main.rs              Entry point. Loads four scenes from
-                       `scenes/<name>.lisp` via `load_sdl_scene(...)`,
-                       lays them out in quadrants, writes render.png.
-                       Reads PARALLEL env var.
+  main.rs              Entry point. Takes a single SDL file path on
+                       the command line, derives the canonical
+                       `<stem>-scene` binding from the filename, and
+                       renders the scene to render.png (and a heatmap
+                       to render-heatmap.png). Reads SIZE, PARALLEL,
+                       and RTVIEW_ADDR env vars. Multi-scene
+                       compositing and animation are expected to move
+                       into the SDL — see "Future directions."
 
   render.rs            Top-level render module. Defines:
                          - Scene, Camera, Light, Surface, RayHit
@@ -74,17 +88,17 @@ scenes/
                        "not a standalone scene."
 
   axis_spheres.lisp    Each scene file defines a single `<name>-scene`
-  ball_on_plane.lisp   binding (Value::Scene). main.rs picks four of these
-  cuboid_test.lisp     for the quadrant layout via load_sdl_scene; tests/
-  cylinder_test.lisp   sdl_suite.rs has a smoke test per file that
-  group_test.lisp      verifies the script evaluates and produces a Scene.
-  moravian_star.lisp
-  multi_light_test.lisp
-  one_sphere.lisp      teapot.lisp uses (load-obj ...) to pull in
-  sphere_occlusion_test.lisp  models/utah_teapot.obj — that file isn't
-  sphere_surface_test.lisp    committed; main.rs and the smoke test
-  teapot.lisp          gracefully handle its absence.
-  transform_test.lisp
+  ball_on_plane.lisp   binding (Value::Scene). main.rs derives the
+  cuboid_test.lisp     binding name from the script's filename (e.g.
+  cylinder_test.lisp   `cuboid_test.lisp` → `cuboid-test-scene`);
+  group_test.lisp      tests/sdl_suite.rs has a smoke test per file
+  moravian_star.lisp   that verifies the script evaluates and
+  multi_light_test.lisp produces a Scene.
+  one_sphere.lisp
+  sphere_occlusion_test.lisp  teapot.lisp uses (load-obj ...) to pull
+  sphere_surface_test.lisp    in models/utah_teapot.obj — that file
+  teapot.lisp                 isn't committed; the smoke test
+  transform_test.lisp         gracefully handles its absence.
 ```
 
 ## The Shape enum
@@ -830,6 +844,37 @@ Approximate order of recent commits, oldest first:
     `require_light_value` helper in `bindings.rs` is gone — it was
     only ever called by the `:lights` parser, which no longer exists.
 
+23. **CLI single-scene rendering; quadrant layout removed.**
+    `main.rs` rewritten around a single positional argument: the path
+    to an SDL script. The four-scene quadrant compositing
+    (`render_quadrants`, the `OffsetTarget` wrapping, the per-quadrant
+    crosshair) is gone, along with the hard-coded 2048×2048 dimensions
+    and the in-source list of scenes to render. The binding name to
+    look up inside the script is derived from the filename
+    (`cuboid_test.lisp` → `cuboid-test-scene`: file stem with `_` →
+    `-`, plus the `-scene` suffix), matching the convention every
+    `scenes/*.lisp` already follows. New `SIZE` env var (`SIZE=N`
+    shorthand for `NxN`, `SIZE=WxH` separate dimensions) overrides
+    the new 1024×1024 default; `PARALLEL` and `RTVIEW_ADDR` carry over
+    unchanged from the pre-rewrite. Error paths print to stderr and
+    exit non-zero rather than panicking — missing file, missing
+    binding, wrong-typed binding, malformed `SIZE`, and bad usage all
+    get clean messages. The path passed to `eval_source` is
+    canonicalized so the SDL's `CurrentDirGuard` anchors `(load ...)`
+    calls against the script's real directory even when the CLI arg
+    was relative. Imports cleaned up: `OffsetTarget` and
+    `OffsetHeatmapTarget` are no longer used by `main.rs` (they
+    remain in `output.rs` for future SDL-driven compositing). The
+    pre-existing `sdl_run` binary is still the right tool for
+    side-effecting scripts that call `(render ...)` /
+    `(save-png ...)` directly; `main.rs` retains the "pure-data
+    scene definition + render-from-Rust" shape. Multi-scene
+    compositing and animation are expected to move into the SDL — a
+    script can construct an off-screen target, render each scene
+    into an `(offset-target ...)` of it, and save the composed
+    result — at which point `main.rs` reduces to "evaluate this
+    script" and the convention-based binding lookup goes away.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -865,14 +910,15 @@ look. The SDL itself has a thorough integration suite at
 missing bindings, language regressions) but doesn't cover visual
 correctness. When changing the renderer or a `scenes/*.lisp` file, the
 smell test is "does the output look the same as before for cases that
-shouldn't have changed, and right for cases that should?" The default
-`main.rs` quadrant layout is useful for side-by-side comparisons.
+shouldn't have changed, and right for cases that should?" Render the
+same scene before and after the change and diff the outputs.
 
-**Swapping scenes in `main.rs`.** `main.rs::main` builds an array of
-four `Scene` values via `load_sdl_scene("<file>.lisp", "<binding>")`.
-To view a different scene, change the path/binding pair. The complete
-list of available scenes (with their `*-scene` binding names) lives in
-the comment above the `let scenes = [ ... ]` block.
+**Running a scene.** `cargo run --release -- scenes/<name>.lisp`. The
+binding is derived from the filename: `<stem>-scene` with `_` → `-`.
+`SIZE=N` or `SIZE=WxH` overrides the default 1024×1024 (the teapot at
+1024² is slow without a real BVH — bump down to 512 for fast iteration).
+`PARALLEL=n` disables Rayon. `RTVIEW_ADDR=host:port` routes pixels to a
+live receiver instead of writing render.png.
 
 ## Scene definition language: implementation plan
 
@@ -885,10 +931,10 @@ and the corresponding plan content here is trimmed.
 
 The SDL is **lower-level than a POV-Ray-style declarative scene file**.
 A script owns control flow: it constructs surfaces, lights, cameras, and
-geometry, builds a render target, and explicitly calls `render`. This is
-what enables the existing four-quadrant style of output, and eventually
-animation — where a script builds geometry once and drives it across a
-frame loop into a streaming target.
+geometry, builds a render target, and explicitly calls `render`. This
+is what makes scripted multi-scene compositing and animation possible —
+a script builds geometry once and drives it across multiple `(render ...)`
+calls or a frame loop into a streaming target.
 
 The language is a small Clojure-subset Lisp:
 
