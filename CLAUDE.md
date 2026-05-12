@@ -1083,6 +1083,147 @@ Settled in earlier phases:
   ports portable across `cargo test`, `cargo run`, and any future
   external invocation.
 
+## Adaptive oversampling: implementation plan
+
+The current oversampling does anti-aliasing via a fixed N×N sub-pixel
+grid — every pixel costs the same whether it's in a flat region or
+sitting on a geometric edge. Adaptive oversampling redirects work to
+where it matters: take a few samples, check variance, and only continue
+sampling pixels that need more. The expected payoff is a substantial
+speed-up on every existing scene with no visual quality loss, plus a
+sampling infrastructure that future DOF work (which introduces a second
+source of pixel-level variance — out-of-focus regions) hooks into
+directly.
+
+The work splits into three phases. Phase 1 swaps the fixed sub-pixel
+grid for a sample-index-keyed quasi-random sequence — same sample count
+per pixel, different sample positions — to establish the "sample i has
+a well-defined offset regardless of total count" abstraction that
+adaptive needs. Phase 2 adds variance-driven termination. Phase 3 is
+diagnostics and polish.
+
+### Phase 1 — Sample-indexed sampling foundation
+
+Replace the deterministic 2×2 grid in `pixel_color` with a Halton (2, 3)
+sequence indexed by sample number. Total sample count per pixel is
+unchanged; only the within-pixel offsets change. Pieces:
+
+- A small `Sampler` helper (function or struct, no trait needed yet)
+  that maps `(pixel_x, pixel_y, sample_index) → (dx, dy)` in `[0,1)²`.
+  Halton bases 2 and 3 for the two coordinates; both compute stateless
+  in a handful of integer divisions per index.
+- Optional per-pixel Cranley-Patterson rotation: hash `(x, y)` to a
+  constant `(ox, oy)` and shift the Halton output by it mod 1. This
+  decorrelates neighboring pixels so any residual sampling artifact
+  looks like noise instead of a tiled pattern. Cheap; recommend yes.
+- The `pixel_color` loop body becomes `for i in 0..oversample² { let
+  (dx, dy) = sampler(x, y, i); ... }`. Grid arithmetic goes away.
+
+Test impact: byte-pinned tests (`lights_in_objects_equivalence`, the
+`render_dispatch_save` PNG check in `sdl_suite.rs`, anything else
+asserting byte-equality) re-pin once. Visual quality should be
+comparable to today.
+
+This phase is separate from the variance work because it's mechanical
+and self-contained — reviewing variance logic is easier when it's not
+bundled with a sampler swap. It also positions DOF (a later feature) to
+use the same `Sampler` without revisiting the sequence choice.
+
+### Phase 2 — Adaptive termination
+
+Replace the fixed `oversample²` loop with a variance-checked loop:
+
+```
+while samples < min_samples
+   || (samples < max_samples && variance > threshold) {
+    take another batch of samples
+}
+```
+
+Variance metric — two viable choices, both fine in practice:
+
+- **Statistical variance.** Per-channel running `sum` and
+  `sum_of_squares` (6 f64 per pixel during sampling). Compute variance
+  in closed form, compare max channel variance to threshold.
+- **Min/max spread.** Per-channel `min` and `max` across samples (6
+  f64 per pixel). Compare `max - min` to threshold. Simpler, less
+  principled, threshold more intuitive to tune.
+
+Variance checks happen between batches (every 4 samples), not after
+every individual sample, so metric cost is negligible.
+
+`Scene` gains three new fields: `min_samples: usize`, `max_samples:
+usize`, `variance_threshold: f64`. The existing `oversample: usize` is
+genuinely redundant — the grid concept is gone — so the migration is to
+delete it and add the three new keys. SDL surface: `:oversample n` is
+removed from the scene constructor; `:min-samples n`, `:max-samples m`,
+`:variance-threshold t` are added with sensible defaults so most scenes
+omit them. The few `scenes/*.lisp` files that currently set
+`:oversample` get migrated alongside.
+
+Starting defaults to tune empirically after landing:
+
+- `min_samples = 4` (matches today's 2×2)
+- `max_samples = 32`
+- `variance_threshold = 0.005` (linear color)
+
+Test impact: byte-pinned tests re-pin again. The whole point is
+visually equivalent output for less work, so bytes differ from Phase 1
+but renders should look as good or better. The heatmap becomes
+substantially more informative — bright pixels are exactly the ones
+taking more samples — which is the diagnostic story that justifies
+this work.
+
+### Phase 3 — Diagnostics and polish
+
+Small enough to fold into Phase 2 unless it grows. Candidates:
+
+- A "sample count" heatmap mode recording `n_samples` per pixel
+  alongside (or instead of) per-pixel timing. The existing
+  `HeatmapTarget` machinery handles this with a separate target type
+  or a payload variant; the time heatmap already correlates strongly
+  with sample count, so this is a nice-to-have, not a need.
+- A way to disable adaptive sampling for benchmark comparisons —
+  either an env var (`ADAPTIVE=0` forces uniform sampling at
+  `max_samples`) or a Scene field. Useful for sanity-checking the
+  speed-up and for visual diffing.
+
+### Decisions to settle before Phase 1 starts
+
+- **Sequence choice.** Halton (2, 3) is the recommendation. Sobol
+  gives marginally better 2D coverage at very low sample counts but
+  adds state-tracking; pure hash-based jitter is simpler but less
+  uniform. Halton fits this codebase's "no extra deps, hand-rolled
+  math" style.
+- **Cranley-Patterson rotation.** Adds a few cheap lines and
+  meaningfully reduces inter-pixel correlation. Recommend yes.
+- **Variance metric for Phase 2.** Min/max spread is simpler and
+  recommended; statistical variance is more principled. Either works.
+- **SDL migration shape.** Delete `:oversample` and add three new
+  keys (recommended), or keep `:oversample` as a back-compat alias
+  meaning `max_samples = n²` (avoids touching scene files but leaves
+  a stale field name in the SDL surface).
+
+### Verification
+
+This work doesn't visually change anything — the speed-up shows up in
+the heatmap and in `cargo run --release` timings, not in rendered
+images. Byte-pinning regressions catch correctness; an end-to-end check
+is rendering `scenes/teapot.lisp` (or another non-trivial scene) before
+and after each phase, comparing both the time-elapsed line and the
+rendered PNG. PNG should look equivalent; time should not regress in
+Phase 1 and should improve noticeably in Phase 2.
+
+### Relationship to depth of field
+
+DOF is the next big feature after this lands (see "Future directions").
+The `Sampler` abstraction from Phase 1 is what makes DOF cheap: aperture
+jittering uses the same sample-index-keyed sequence, and adaptive
+termination from Phase 2 routes the extra samples that DOF needs (for
+clean bokeh) only to the out-of-focus pixels that actually have
+variance. Doing adaptive first means DOF gets adaptive sample
+distribution for free instead of forcing a global oversample crank.
+
 ## Future directions
 
 The README's own "Potential Futures" list overlaps these but is now somewhat
