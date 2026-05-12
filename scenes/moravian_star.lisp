@@ -106,17 +106,17 @@
     {:name          "Moravian Star"
      :camera        moravian-star-camera
      :background    [0.0 0.0 0.0]
-     :lights        [;; Key light: warm white, above and to the right.
-                     (light-white [10 10 10])
-                     ;; Fill light: cool blue from the opposite side,
-                     ;; lower intensity. The blue tint plays nicely
-                     ;; off the gold star, and the two lights give
-                     ;; visible specular highlights on different spikes.
-                     (light-point [-8 4 6] [0.5 0.6 1.0] 0.5)]
      :reflect-limit 2
      :oversample    2
      :objects
-     [;; The star itself. Bounded so a ray that misses the world-space
+     [;; Key light: warm white, above and to the right.
+      (light-white [10 10 10])
+      ;; Fill light: cool blue from the opposite side, lower intensity.
+      ;; The blue tint plays nicely off the gold star, and the two
+      ;; lights give visible specular highlights on different spikes.
+      (light-point [-8 4 6] [0.5 0.6 1.0] 0.5)
+
+      ;; The star itself. Bounded so a ray that misses the world-space
       ;; AABB skips every per-triangle test — a small win at 24
       ;; triangles, but the right idiom for any mesh-shaped object
       ;; and the pattern teapot.lisp uses too.

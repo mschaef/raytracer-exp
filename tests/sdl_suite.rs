@@ -181,8 +181,8 @@ fn render_dispatch_save() {
 (def s (scene {:name "phase3-save"
                :camera (camera-looking-at [0 0 5] [0 0 0] [0 1 0] 1.0)
                :background [0 0 0]
-               :lights [(light-white [10 10 10])]
-               :objects [(sphere {:center [0 0 0] :r 1.0 :surface red})]
+               :objects [(light-white [10 10 10])
+                         (sphere {:center [0 0 0] :r 1.0 :surface red})]
                :reflect-limit 0
                :oversample 1}))
 (def t (png-target 16 16))
@@ -227,19 +227,22 @@ fn render_dispatch_save() {
     fs::remove_file(&path).ok();
 }
 
-/// Lights-as-shapes equivalence: a scene whose only light lives in
-/// `Scene::lights` at world-space `[5 5 5]` must render byte-identically
+/// Lights-as-shapes affine equivalence: a scene with a bare
+/// `(light-white [5 5 5])` in `:objects` must render byte-identically
 /// to a scene where the same light is positioned by wrapping a
-/// origin-located `(light-white [0 0 0])` in `(translate [5 5 5] ...)`
-/// inside `:objects`. This pins down two stage-1 properties at once:
-/// `Shape::collect_lights` actually walks the object tree, and the
-/// accumulated affine is being applied to the light position.
+/// origin-located `(light-white [0 0 0])` in `(translate [5 5 5] ...)`.
+/// This pins down the invariant that motivated the whole migration —
+/// transforms apply to lights the same way they apply to geometry —
+/// and is the regression that would catch any future change to
+/// `Shape::collect_lights`'s affine accumulation. Pre-stage-2 this
+/// test compared `:lights` (the historical field) against `:objects`;
+/// after the stage-2 collapse `:lights` is gone, so both scenes use
+/// `:objects` and the comparison is "bare placement" vs
+/// "translate-wrapped placement."
 ///
-/// The renderer is per-pixel deterministic (same convention as
-/// scenes.rs::scene_teapot under parallel = true in earlier phases),
-/// so byte-equality is meaningful even with `parallel = true` —
-/// any divergence indicates a real arithmetic difference, not
-/// scheduling noise.
+/// The renderer is per-pixel deterministic, so byte-equality is
+/// meaningful even with `parallel = true` — any divergence
+/// indicates a real arithmetic difference, not scheduling noise.
 #[test]
 fn lights_in_objects_equivalence() {
     let env = sdl::default_env();
@@ -262,11 +265,12 @@ fn lights_in_objects_equivalence() {
     );
 
     // Identical surfaces, camera, and geometry in both scenes —
-    // only the *placement* of the light differs. A is the historical
-    // form (light in :lights). B is the new form (light in :objects,
-    // positioned by translate). Anything other than byte-equality
-    // means the lights-as-shapes wiring is producing a different
-    // shading result for what is supposed to be the same light.
+    // only the *expression* used to place the light differs. A is
+    // the direct form (bare light at world coordinates). B is the
+    // transform-wrapped form (light at origin in local coordinates,
+    // translated to the same world position). Anything other than
+    // byte-equality means `Shape::collect_lights` is applying the
+    // accumulated affine incorrectly.
     let source = r#"
 (def red (surface {:color [1.0 0.2 0.2] :ambient 0.2 :specular 0.5 :light 0.6}))
 (def white-c (surface {:color [0.2 0.2 0.2] :ambient 0.2 :specular 0.5
@@ -279,8 +283,8 @@ fn lights_in_objects_equivalence() {
           :background [0 0 0]
           :reflect-limit 0
           :oversample 1
-          :lights [(light-white [5 5 5])]
-          :objects [(sphere {:center [0 0 0] :r 1.0 :surface red})
+          :objects [(light-white [5 5 5])
+                    (sphere {:center [0 0 0] :r 1.0 :surface red})
                     (plane {:normal [0 0 1] :p0 [0 0 -1] :surface white-c})]}))
 
 (def s-b
@@ -289,7 +293,6 @@ fn lights_in_objects_equivalence() {
           :background [0 0 0]
           :reflect-limit 0
           :oversample 1
-          :lights []
           :objects [(translate [5 5 5] (light-white [0 0 0]))
                     (sphere {:center [0 0 0] :r 1.0 :surface red})
                     (plane {:normal [0 0 1] :p0 [0 0 -1] :surface white-c})]}))
@@ -325,7 +328,8 @@ fn lights_in_objects_equivalence() {
     assert_eq!(
         rgb_a.as_raw(),
         rgb_b.as_raw(),
-        "lights-in-objects render diverged from lights-in-Scene::lights render \
+        "translate-wrapped light render diverged from bare light render \
+         — Shape::collect_lights is applying the affine incorrectly \
          (see {} and {})",
         path_a.display(),
         path_b.display(),
@@ -414,6 +418,11 @@ fn cylinder_test_scene_loads() {
 #[test]
 fn group_test_scene_loads() {
     assert_scene_loads("group_test.lisp", "group-test-scene");
+}
+
+#[test]
+fn moravian_star_scene_loads() {
+    assert_scene_loads("moravian_star.lisp", "moravian-star-scene");
 }
 
 #[test]

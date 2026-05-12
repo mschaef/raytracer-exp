@@ -13,11 +13,11 @@
     {:name          "Occlusion Test"
      :camera        default-camera
      :background    [0.0 0.0 0.0]
-     :lights        [(light-white [5 5 5])]
      :reflect-limit 2
      :oversample    2
      :objects
-     [(sphere {:center [ 1.5  2.0  0.0] :r 0.7 :surface surface-orange})
+     [(light-white [5 5 5])
+      (sphere {:center [ 1.5  2.0  0.0] :r 0.7 :surface surface-orange})
       (sphere {:center [ 3.0  0.0  0.0] :r 1.0 :surface surface-red})
       (sphere {:center [-3.0  0.0  0.0] :r 1.0 :surface surface-blue})
       (sphere {:center [ 0.0  0.0  0.0] :r 1.0 :surface surface-green})

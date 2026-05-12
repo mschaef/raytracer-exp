@@ -12,11 +12,11 @@
     {:name          "Axis Spheres"
      :camera        default-camera
      :background    [0.0 0.0 0.0]
-     :lights        [(light-white [10 10 10])]
      :reflect-limit 2
      :oversample    2
      :objects
-     [(sphere {:center [0 0 0] :r 1.0  :surface surface-white})
+     [(light-white [10 10 10])
+      (sphere {:center [0 0 0] :r 1.0  :surface surface-white})
       (sphere {:center [3 0 0] :r 0.25 :surface surface-red})
       (sphere {:center [0 3 0] :r 0.25 :surface surface-green})
       (sphere {:center [0 0 3] :r 0.25 :surface surface-blue})]}))

@@ -14,11 +14,11 @@
     {:name          "Group Test"
      :camera        default-camera
      :background    [0.0 0.0 0.0]
-     :lights        [(light-white [10 10 10])]
      :reflect-limit 2
      :oversample    2
      :objects
-     [;; A "snowman": three stacked spheres treated as a single
+     [(light-white [10 10 10])
+      ;; A "snowman": three stacked spheres treated as a single
       ;; child of the scene.
       (group [(sphere {:center [-2 0 -1]   :r 0.6 :surface surface-white})
               (sphere {:center [-2 0  0]   :r 0.5 :surface surface-white})

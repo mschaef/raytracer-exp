@@ -11,11 +11,11 @@
     {:name          "Cuboid Test"
      :camera        default-camera
      :background    [0.0 0.0 0.0]
-     :lights        [(light-white [10 10 10])]
      :reflect-limit 2
      :oversample    2
      :objects
-     [;; Tall narrow red box at the origin.
+     [(light-white [10 10 10])
+      ;; Tall narrow red box at the origin.
       (cuboid {:center [0 0 0]      :size [1.5 1.5 2.5] :surface surface-red})
       ;; Small green cube floating to the right.
       (cuboid {:center [3 0 0.5]    :size [1 1 1]       :surface surface-green})

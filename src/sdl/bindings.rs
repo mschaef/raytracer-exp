@@ -399,34 +399,22 @@ fn require_shape_value(v: &Value, ctx: &str, pos: &Position) -> Shape {
         // clone; the deep-clone only happens at host-binding boundaries
         // when we hand the shape to a host function that takes ownership.
         Value::Shape(s) => (**s).clone(),
-        // Lights are also acceptable wherever a shape is expected: the
-        // `Shape::Light` variant is what makes "lights live in the
-        // scene graph" work, and the SDL light constructors still
-        // return `Value::Light` so existing scenes that use
-        // `:lights [(light-white ...) ...]` keep working. Auto-wrapping
-        // here lets the same `(light-white ...)` value also be passed
-        // into `(translate ...)`, `(group [...])`, or `:objects`
-        // without any explicit "convert to shape" step. The light
-        // value's `Rc` stays cheap to clone in the script; the
-        // deep-clone via `(**l).clone()` is the same boundary
-        // crossing as for `Value::Shape`.
+        // Lights are also acceptable wherever a shape is expected.
+        // The `Shape::Light` variant is what makes "lights live in
+        // the scene graph" work, and the SDL light constructors
+        // return `Value::Light` (a separate variant from
+        // `Value::Shape` so `light?` stays distinct from `shape?`).
+        // Auto-wrapping here lets the same `(light-white ...)` /
+        // `(light-point ...)` value flow through `(translate ...)`,
+        // `(group [...])`, and `:objects` without any explicit
+        // "convert to shape" step. The light value's `Rc` stays
+        // cheap to clone in the script; the deep-clone via
+        // `(**l).clone()` is the same boundary crossing as for
+        // `Value::Shape`.
         Value::Light(l) => Shape::Light((**l).clone()),
         other => sdl_panic!(
             pos.clone(),
             "{} expected a shape, got {} ({})",
-            ctx,
-            other,
-            other.type_name()
-        ),
-    }
-}
-
-fn require_light_value(v: &Value, ctx: &str, pos: &Position) -> Light {
-    match v {
-        Value::Light(l) => (**l).clone(),
-        other => sdl_panic!(
-            pos.clone(),
-            "{} expected a light, got {} ({})",
             ctx,
             other,
             other.type_name()
@@ -892,22 +880,39 @@ fn builtin_aabb(args: &[Value], pos: &Position) -> Value {
 // Scene
 // ---------------------------------------------------------------------------
 
-/// `(scene {:name "..." :camera C :background [r g b] :lights [...] :objects [...] :reflect-limit n :oversample n})`
+/// `(scene {:name "..." :camera C :background [r g b] :objects [...] :reflect-limit n :oversample n})`
+///
+/// After the stage-2 collapse the scene is a single top-level
+/// `Shape`. `:objects` is exposed at the SDL surface as a list for
+/// ergonomics — scripts continue to write a flat vector of geometry
+/// and lights — but the constructor wraps it in `Shape::Group(...)`
+/// and stores it as `Scene::root`. Lights, geometry, and any
+/// composite shape can all appear in `:objects`; bare
+/// `(light-white ...)` values are auto-wrapped as `Shape::Light` via
+/// `require_shape_value` exactly as in stage 1.
+///
+/// The `:lights` key was removed in stage 2. Scenes still carrying it
+/// get an explicit migration error rather than a silent ignore, so a
+/// missed migration shows up loudly the first time someone tries to
+/// load the scene.
 fn builtin_scene(args: &[Value], pos: &Position) -> Value {
     require_arity(args, 1, "scene", pos);
     let map = require_map(&args[0], "scene", pos);
+
+    if map.contains_key("lights") {
+        sdl_panic!(
+            pos.clone(),
+            "scene: the :lights key was removed in stage 2 of the lights-as-shapes \
+             migration. Move every light into :objects — bare (light-white ...) / \
+             (light-point ...) values are auto-wrapped as shapes by the scene \
+             constructor (see lights_in_objects.lisp for the migration pattern)."
+        );
+    }
 
     let name = require_key_string(&map, "name", "scene", pos);
     let camera = require_key_camera(&map, "camera", "scene", pos);
     let background = maybe_key_point(&map, "background", "scene", pos)
         .unwrap_or([0.0, 0.0, 0.0]);
-
-    let lights_v = require_key(&map, "lights", "scene", pos);
-    let lights_items = require_vec(lights_v, "scene :lights", pos);
-    let lights: Vec<Light> = lights_items
-        .iter()
-        .map(|v| require_light_value(v, "scene :lights element", pos))
-        .collect();
 
     let objects_v = require_key(&map, "objects", "scene", pos);
     let objects_items = require_vec(objects_v, "scene :objects", pos);
@@ -916,7 +921,14 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         .map(|v| require_shape_value(v, "scene :objects element", pos))
         .collect();
 
-    // Defaulted to match scenes.rs constants. Scripts that care can
+    // Wrap the object list in a Shape::Group as the scene root.
+    // `Shape::Group::hit_test` is identical to the previous
+    // `nearest_hit(ray, &scene.objects)` traversal: same fold, same
+    // children, no overhead. `collect_lights` walks straight through
+    // the Group into each child.
+    let root = Shape::Group(objects);
+
+    // Defaulted to match the pre-SDL constants. Scripts that care can
     // override.
     let reflect_limit = maybe_key_int(&map, "reflect-limit", "scene", pos)
         .unwrap_or(2) as u32;
@@ -926,8 +938,7 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
     Value::Scene(Rc::new(Scene {
         name,
         camera,
-        lights,
-        objects,
+        root,
         background,
         reflect_limit,
         oversample,

@@ -14,13 +14,20 @@
 ; assert that the two results are structurally equal. (Phase 4 will
 ; add `defn` as `(def x (fn ...))` sugar; for now `def` + `fn` is the
 ; idiom.)
+;
+; After the stage-2 collapse the scene constructor no longer takes a
+; `:lights` key — lights live alongside geometry in `:objects` and
+; the constructor wraps the list in a top-level `Shape::Group` as
+; `Scene::root`. Bare `(light-white ...)` values are auto-wrapped
+; into `Shape::Light` by `require_shape_value` at the binding
+; boundary, so this composes without any explicit wrap.
 (def make-scene
   (fn []
     (scene {:name "Test Scene"
             :camera cam
             :background [0 0 0]
-            :lights [(light-white [10 10 10])]
-            :objects [(sphere {:center [0 0 0] :r 1.0 :surface red})
+            :objects [(light-white [10 10 10])
+                      (sphere {:center [0 0 0] :r 1.0 :surface red})
                       (sphere {:center [3 0 0] :r 0.5 :surface green})
                       (plane  {:normal [0 0 1] :p0 [0 0 -2] :surface ground})]
             :reflect-limit 2
@@ -39,8 +46,8 @@
 (def s3 (scene {:name "Different Scene"
                 :camera cam
                 :background [0 0 0]
-                :lights [(light-white [10 10 10])]
-                :objects [(sphere {:center [0 0 0] :r 1.0 :surface red})]
+                :objects [(light-white [10 10 10])
+                          (sphere {:center [0 0 0] :r 1.0 :surface red})]
                 :reflect-limit 2
                 :oversample 2}))
 (assert (not= s1 s3))
@@ -48,14 +55,13 @@
 ; :background, :reflect-limit, :oversample default if omitted.
 (def s4 (scene {:name "Minimal"
                 :camera cam
-                :lights []
                 :objects []}))
 (assert (scene? s4))
 
-; Empty lights / objects vectors are valid (debug mode renders).
+; Empty :objects is valid (debug mode renders — no lights, no
+; geometry, just the background color).
 (assert= s4 (scene {:name "Minimal"
                     :camera cam
-                    :lights []
                     :objects []}))
 
 ; Negative check.

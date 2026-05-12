@@ -45,7 +45,11 @@
     {:name          "Surface Finish Test"
      :camera        default-camera
      :background    [0.0 0.0 0.0]
-     :lights        [(light-white [5 5 5])]
      :reflect-limit 2
      :oversample    2
-     :objects       (map make-sphere (range 25))}))
+     ;; Prepend the light to the 5×5 grid: `apply conj` appends each
+     ;; sphere in turn to the starting vector. End result is a single
+     ;; flat vector [light sphere0 sphere1 ... sphere24] suitable
+     ;; as the scene `:objects` list.
+     :objects       (apply conj [(light-white [5 5 5])]
+                                (map make-sphere (range 25)))}))

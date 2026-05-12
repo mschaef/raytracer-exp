@@ -7,14 +7,11 @@
 ; present, and the ground catches color-tinted shadows from each light
 ; cast in opposite directions.
 ;
-; First scene ported to the lights-as-shapes layout: the two lights
-; live in `:objects` alongside the geometry. They're still invisible
-; to rays (no spot on the image where the light is, no shadow cast on
-; itself) — the renderer extracts them with `Shape::collect_lights` at
-; render entry and treats them exactly like the historical
-; `Scene::lights` list. `:lights []` here is the empty backwards-compat
-; channel; equivalent forms put the same `(light-point ...)`
-; expressions in `:lights` and `:objects` and either render identically.
+; Lights live in `:objects` alongside the geometry. They're invisible
+; to rays — the renderer extracts them with `Shape::collect_lights` at
+; render entry. After the stage-2 collapse there is no separate
+; `:lights` key on the scene constructor; everything in the scene
+; graph (geometry, lights, transforms, groups) goes in `:objects`.
 
 (load "_common.lisp")
 
@@ -25,7 +22,6 @@
      :background    [0.0 0.0 0.0]
      :reflect-limit 2
      :oversample    2
-     :lights        []
      :objects
      [;; Red light coming from image-left, slightly behind the camera.
       (light-point [-5 5 5] [1.0 0.2 0.2] 1.0)

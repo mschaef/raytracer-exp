@@ -52,8 +52,8 @@
   (scene {:name          "mesh-load-test"
           :camera        (camera-looking-at [0 0 5] [0 0 0] [0 1 0] 1.0)
           :background    [0 0 0]
-          :lights        [(light-white [10 10 10])]
-          :objects       [mesh]
+          :objects       [(light-white [10 10 10])
+                          mesh]
           :reflect-limit 1
           :oversample    1}))
 

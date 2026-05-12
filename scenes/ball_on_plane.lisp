@@ -11,9 +11,9 @@
     {:name          "Ball on Plane"
      :camera        default-camera
      :background    [0.0 0.0 0.0]
-     :lights        [(light-white [10 10 10])]
      :reflect-limit 2
      :oversample    2
      :objects
-     [(sphere {:center [0 -2 -1] :r 0.66 :surface surface-blue})
+     [(light-white [10 10 10])
+      (sphere {:center [0 -2 -1] :r 0.66 :surface surface-blue})
       (plane  {:normal [0 0 1]   :p0 [0 0 -2] :surface surface-white-c})]}))

@@ -22,11 +22,11 @@
     {:name          "Cylinder Test"
      :camera        default-camera
      :background    [0.0 0.0 0.0]
-     :lights        [(light-white [10 10 10])]
      :reflect-limit 2
      :oversample    2
      :objects
-     [;; Vertical, axis along +z. Bottom cap on the ground.
+     [(light-white [10 10 10])
+      ;; Vertical, axis along +z. Bottom cap on the ground.
       (cylinder {:p0 [-2.5 0 -2] :p1 [-2.5 0 1] :r 0.6 :surface surface-red})
 
       ;; End-on, axis along +y. p1 (near end) cap normal is +y,

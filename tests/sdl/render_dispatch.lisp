@@ -35,8 +35,8 @@
 (def s (scene {:name "phase3-render"
                :camera cam
                :background [0 0 0]
-               :lights [(light-white [10 10 10])]
-               :objects [(sphere {:center [0 0 0] :r 1.0 :surface red})]
+               :objects [(light-white [10 10 10])
+                         (sphere {:center [0 0 0] :r 1.0 :surface red})]
                :reflect-limit 0
                :oversample 1}))
 

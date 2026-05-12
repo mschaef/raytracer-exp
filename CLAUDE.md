@@ -78,6 +78,7 @@ scenes/
   cuboid_test.lisp     for the quadrant layout via load_sdl_scene; tests/
   cylinder_test.lisp   sdl_suite.rs has a smoke test per file that
   group_test.lisp      verifies the script evaluates and produces a Scene.
+  moravian_star.lisp
   multi_light_test.lisp
   one_sphere.lisp      teapot.lisp uses (load-obj ...) to pull in
   sphere_occlusion_test.lisp  models/utah_teapot.obj — that file isn't
@@ -287,40 +288,39 @@ Convenience constructors: `Light::white(location)` for full-intensity white
 (matches the legacy implicit defaults), `Light::point(location, color,
 intensity)` for the general case.
 
-Lights can live in either of two places: `Scene::lights: Vec<Light>`
-(the historical top-level list) and inside `Scene::objects` as
-`Shape::Light` nodes. The renderer treats them identically — at
-`render()` entry, an "effective lights" `Vec<Light>` is built by
-cloning `scene.lights` and extending it with the result of
-`Shape::collect_lights` over `scene.objects`, then a `&[Light]` slice
-is threaded through `render_one_row` → `pixel_color` → `ray_color` →
-`shade_pixel` (which iterates the slice). `shade_pixel` sums each
-visible light's Phong specular highlight and Lambertian diffuse
-contribution, both multiplied by `light.color * light.intensity`. The
-diffuse term has the surface color modulated component-wise by the
-light tint; the specular term takes on the pure light color (i.e. a
-red light produces a red highlight on any surface, regardless of body
-color, which is physically right for microfacet specularity). An
-empty effective list yields ambient + reflection only — useful as a
-debug mode.
+Lights live inside `Scene::root` as `Shape::Light` nodes alongside
+geometry. The renderer reaches them via `Shape::collect_lights`,
+called once at `render()` entry against `scene.root` with the
+identity affine; the result is a `Vec<Light>` of world-space lights
+that gets threaded as `&[Light]` through `render_one_row` →
+`pixel_color` → `ray_color` → `shade_pixel` (which iterates the
+slice). `shade_pixel` sums each visible light's Phong specular
+highlight and Lambertian diffuse contribution, both multiplied by
+`light.color * light.intensity`. The diffuse term has the surface
+color modulated component-wise by the light tint; the specular term
+takes on the pure light color (a red light produces a red highlight
+on any surface regardless of body color, which is physically right
+for microfacet specularity). A scene with no lights renders ambient
++ reflection only — useful as a debug mode.
 
-The point of `Shape::Light` is that lights inside the object tree
-inherit affine transforms from enclosing `Shape::Transform` wrappers,
-the same way geometry does. `(translate [5 5 5] (light-white [0 0 0]))`
-in SDL puts a light at world `[5 5 5]`. Useful for two reasons:
-positioning lights in the same coordinate system as the surrounding
-geometry (e.g. an `(rotate-z θ (group [body lamp]))` rotates the
-"lamp" — geometry plus its light — around the body); and a future
-diagnostic-imaging pass that wants to render visible markers at light
-positions can build them from the same `Shape::Light` nodes the
-renderer extracts from.
+The point of `Shape::Light` is that lights inherit affine transforms
+from enclosing `Shape::Transform` wrappers, the same way geometry
+does. `(translate [5 5 5] (light-white [0 0 0]))` in SDL puts a
+light at world `[5 5 5]`. Useful for two reasons: positioning lights
+in the same coordinate system as the surrounding geometry (e.g. an
+`(rotate-z θ (group [body lamp]))` rotates the "lamp" — geometry
+plus its light — around the body); and a future diagnostic-imaging
+pass that wants to render visible markers at light positions can
+build them from the same `Shape::Light` nodes the renderer extracts
+from.
 
-`Scene::lights` is kept for backwards compatibility and for scenes
-that just want a top-level light without wrapping it in `Shape::Light`.
-Stage 2 of this migration (deferred — see "Future directions") is the
-`Scene::root: Shape` collapse, after which `Scene::lights` can come
-out entirely and the render-entry call becomes
-`scene.root.collect_lights(...)`.
+At the SDL surface, `:objects` is a flat list that the scene
+constructor wraps in `Shape::Group` to form `Scene::root`. Bare
+`(light-white ...)` / `(light-point ...)` values auto-wrap into
+`Shape::Light` at the binding boundary via `require_shape_value`, so
+no explicit conversion is needed. The constructor rejects the
+historical `:lights` key with a migration error so unmigrated scenes
+fail loudly instead of silently dropping their lights.
 
 ## Recent work history
 
@@ -791,6 +791,45 @@ Approximate order of recent commits, oldest first:
     the render-entry call becomes `scene.root.collect_lights(...)`
     and `Scene::lights` comes out entirely.
 
+22. **Lights as scene-graph shapes (stage 2): `Scene::root` collapse.**
+    Finishes the migration started in entry 21. `Scene::lights:
+    Vec<Light>` and `Scene::objects: Vec<Shape>` are gone, replaced
+    by a single `Scene::root: Shape` (typically a `Shape::Group`).
+    The renderer's top-level traversal is just `scene.root.hit_test(ray)`
+    in `ray_color` and `light_vector`; the standalone `nearest_hit`
+    call sites in `render.rs` are gone (the function itself stays in
+    `shapes.rs`, used internally by `Shape::Group::hit_test`).
+    `render()` builds the effective lights with one
+    `scene.root.collect_lights(Affine::identity(), &mut lights)` call
+    and no separate `clone()` of a top-level list. SDL surface:
+    `builtin_scene` drops the `:lights` key, keeps `:objects` as the
+    flat vector it has always been, wraps it in `Shape::Group(...)`
+    internally and stores as `root`. Bare `(light-white ...)` /
+    `(light-point ...)` values continue to auto-wrap via
+    `require_shape_value`, so the script surface for placing lights
+    is unchanged from stage 1 — the only thing scenes had to do to
+    migrate was move the `:lights` contents into `:objects` and drop
+    the key. The constructor rejects `:lights` with an explicit
+    migration error rather than silently ignoring it: unmigrated
+    scenes panic on load, which is what `<scene>_scene_loads` smoke
+    tests in `tests/sdl_suite.rs` will surface. Every `scenes/*.lisp`
+    file was migrated; `sphere_surface_test.lisp` is the one that
+    needed real lisp work (`(apply conj [light] (map make-sphere
+    (range 25)))` to prepend the light to the 5×5 grid generator
+    instead of dropping into a hand-written list). `bindings_scene.lisp`,
+    `bindings_mesh.lisp`, `render_dispatch.lisp`, and the inline
+    sources of `render_dispatch_save` and `lights_in_objects_equivalence`
+    in `tests/sdl_suite.rs` all got the same treatment.
+    `lights_in_objects_equivalence` was repurposed: pre-stage-2 it
+    compared `:lights` vs `:objects` placements; after stage 2 it
+    compares "bare light at world `[5 5 5]` in `:objects`" vs
+    "`(translate [5 5 5] (light-white [0 0 0]))` in `:objects`",
+    which is the same affine-application invariant from a different
+    direction. Added `moravian_star_scene_loads` smoke test (the
+    scene file landed between sessions and didn't have one). The
+    `require_light_value` helper in `bindings.rs` is gone — it was
+    only ever called by the `:lights` parser, which no longer exists.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -1071,11 +1110,6 @@ in this list.
 **Camera animation.** Now that `default_camera()` is a function returning a
 fresh `Camera`, varying its parameters per frame is one new function call.
 Render multiple frames, encode as video.
-
-**Refactor: `Scene::objects: Vec<Shape>` → `Scene::root: Shape`.** The scene
-is conceptually a top-level group; making it literally one would remove a
-small special case in the renderer (top-level fold vs. recursive Group case).
-Cosmetic, not load-bearing.
 
 ## Build / dev notes
 

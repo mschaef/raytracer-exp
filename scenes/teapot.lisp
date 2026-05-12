@@ -27,11 +27,11 @@
     {:name          "Utah Teapot"
      :camera        default-camera
      :background    [0.0 0.0 0.0]
-     :lights        [(light-white [10 10 10])]
      :reflect-limit 2
      :oversample    2
      :objects
-     [;; Reflective checkered ground.
+     [(light-white [10 10 10])
+      ;; Reflective checkered ground.
       (plane {:normal [0 0 1] :p0 [0 0 -2] :surface surface-white-c})
 
       ;; Loaded mesh, scaled and positioned to sit on the ground, with

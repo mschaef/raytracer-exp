@@ -14,11 +14,11 @@
     {:name           "Transform Test"
      :camera         default-camera
      :background     [0.0 0.0 0.0]
-     :lights         [(light-white [10 10 10])]
      :reflect-limit  2
      :oversample     2
      :objects
-     [;; A unit cube translated to (3, 0, 0). Should look identical
+     [(light-white [10 10 10])
+      ;; A unit cube translated to (3, 0, 0). Should look identical
       ;; to a cuboid declared with center=[3,0,0] directly.
       (translate [3 0 0]
         (cuboid {:center [0 0 0] :size [1 1 1] :surface surface-red}))

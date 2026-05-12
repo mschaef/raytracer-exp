@@ -18,7 +18,7 @@ pub mod output;
 use std::convert::TryFrom;
 use std::time::Instant;
 
-use shapes::{Shape, nearest_hit};
+use shapes::Shape;
 use output::{RenderTarget, HeatmapTarget};
 use transform::Affine;
 
@@ -184,8 +184,20 @@ pub struct Scene {
     /// literals just use `.to_string()` at construction.
     pub name: String,
     pub camera: Camera,
-    pub lights: Vec<Light>,
-    pub objects: Vec<Shape>,
+    /// The whole scene is a single top-level `Shape`. Typically a
+    /// `Shape::Group` containing the geometry and lights at the top
+    /// level, but the renderer doesn't care about the shape — it just
+    /// dispatches `hit_test` and `collect_lights` against it. Lights
+    /// live inside this tree as `Shape::Light` nodes alongside
+    /// geometry, with the SDL constructor auto-wrapping `Value::Light`
+    /// values that appear in `:objects`.
+    ///
+    /// Stage 2 of the lights-as-shapes migration consolidated this:
+    /// the previous `lights: Vec<Light>` + `objects: Vec<Shape>` pair
+    /// became one field. Existing scenes were rewritten to put their
+    /// lights in the `:objects` list (which the SDL now exposes as
+    /// the canonical place for everything in the scene graph).
+    pub root: Shape,
     pub background: LinearColor,
 
     pub reflect_limit: u32,
@@ -264,7 +276,7 @@ fn light_vector(point: &Point, scene: &Scene, light: &Light) -> Option<Vector> {
         delta: normalizep(light_direction)
     };
 
-    match nearest_hit(&ray, &scene.objects) {
+    match scene.root.hit_test(&ray) {
         Some(hit) =>
             if hit.distance > light_distance - EPSILON {
                 Some(ray)
@@ -303,14 +315,14 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, refl
         [0.0, 0.0, 0.0]
     };
 
-    // Sum direct lighting contributions from every light in the
-    // effective list (Scene::lights ++ lights collected from
-    // Scene::objects). Each visible light contributes a Phong specular
-    // highlight and a Lambertian diffuse term, both tinted by
-    // `light.color * light.intensity`. With one white, unit-intensity
-    // light this is identical to the earlier behavior; with multiple
-    // lights the contributions just add. An empty list gives a pure
-    // ambient + reflection render, useful as a debug mode.
+    // Sum direct lighting contributions from every light extracted
+    // from `scene.root`. Each visible light contributes a Phong
+    // specular highlight and a Lambertian diffuse term, both tinted
+    // by `light.color * light.intensity`. With one white,
+    // unit-intensity light this is identical to the earlier behavior;
+    // with multiple lights the contributions just add. An empty list
+    // gives a pure ambient + reflection render, useful as a debug
+    // mode.
     let mut light: LinearColor = [0.0, 0.0, 0.0];
     for l in lights {
         if let Some(lv) = light_vector(&hit.hit_point, scene, l) {
@@ -340,7 +352,7 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, refl
 }
 
 fn ray_color(ray: &Vector, scene: &Scene, lights: &[Light], reflect_count: u32) -> LinearColor {
-    match nearest_hit(ray, &scene.objects) {
+    match scene.root.hit_test(ray) {
         Some(hit) => shade_pixel(ray, scene, lights, &hit, reflect_count),
         None => scene.background
     }
@@ -445,21 +457,15 @@ pub fn render<T: RenderTarget + ?Sized>(
         oversample: scene.oversample,
     };
 
-    // Build the effective list of lights once at render entry.
-    // `Scene::lights` (the historical top-level list) is concatenated
-    // with every `Shape::Light` discovered inside `Scene::objects` —
-    // each such light has its location transformed into world space by
-    // any enclosing `Shape::Transform` wrappers. Stage 1 of the
-    // lights-as-shapes migration: scenes that only ever used
-    // `Scene::lights` are unchanged; scenes that move some or all of
-    // their lights into the object tree also work; mixed-style scenes
-    // work too. The shading code below iterates a single flat slice
-    // and is agnostic to where each light came from.
-    let identity = Affine::identity();
-    let mut effective_lights: Vec<Light> = scene.lights.clone();
-    for obj in &scene.objects {
-        obj.collect_lights(identity, &mut effective_lights);
-    }
+    // Build the flat world-space list of lights once at render entry
+    // by walking `scene.root`. Every `Shape::Light` leaf in the tree
+    // contributes a world-space `Light`, with the affines of any
+    // enclosing `Shape::Transform` nodes accumulated on the way down.
+    // After the stage-2 collapse the scene is a single top-level
+    // `Shape`; the renderer no longer carries any distinction between
+    // "top-level lights" and "lights inside the object tree."
+    let mut effective_lights: Vec<Light> = Vec::new();
+    scene.root.collect_lights(Affine::identity(), &mut effective_lights);
     let lights = effective_lights.as_slice();
 
     if parallel {
