@@ -27,9 +27,9 @@
 (assert (target? t-nested))
 
 ; A trivial scene rendered into the target. 4×4 keeps the test cheap;
-; reflect-limit 0 and oversample 1 minimize work per pixel. The
-; resulting buffer isn't introspected here — `render` returning a
-; target and not panicking is the assertion.
+; reflect-limit 0 and a fixed 1 sample per pixel (min == max == 1)
+; minimize work. The resulting buffer isn't introspected here —
+; `render` returning a target and not panicking is the assertion.
 (def red (surface {:color [1 0 0] :ambient 0.5 :light 0.5}))
 (def cam (camera-looking-at [0 0 5] [0 0 0] [0 1 0] 1.0))
 (def s (scene {:name "phase3-render"
@@ -38,7 +38,8 @@
                :objects [(light-white [10 10 10])
                          (sphere {:center [0 0 0] :r 1.0 :surface red})]
                :reflect-limit 0
-               :oversample 1}))
+               :min-samples 1
+               :max-samples 1}))
 
 ; render returns its target so calls can be chained or threaded.
 (def returned (render s t 4 4))

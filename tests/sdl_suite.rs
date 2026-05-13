@@ -184,7 +184,8 @@ fn render_dispatch_save() {
                :objects [(light-white [10 10 10])
                          (sphere {:center [0 0 0] :r 1.0 :surface red})]
                :reflect-limit 0
-               :oversample 1}))
+               :min-samples 1
+               :max-samples 1}))
 (def t (png-target 16 16))
 (render s t 16 16)
 (save-png t OUTPUT-PATH)
@@ -282,7 +283,8 @@ fn lights_in_objects_equivalence() {
           :camera cam
           :background [0 0 0]
           :reflect-limit 0
-          :oversample 1
+          :min-samples 1
+          :max-samples 1
           :objects [(light-white [5 5 5])
                     (sphere {:center [0 0 0] :r 1.0 :surface red})
                     (plane {:normal [0 0 1] :p0 [0 0 -1] :surface white-c})]}))
@@ -292,7 +294,8 @@ fn lights_in_objects_equivalence() {
           :camera cam
           :background [0 0 0]
           :reflect-limit 0
-          :oversample 1
+          :min-samples 1
+          :max-samples 1
           :objects [(translate [5 5 5] (light-white [0 0 0]))
                     (sphere {:center [0 0 0] :r 1.0 :surface red})
                     (plane {:normal [0 0 1] :p0 [0 0 -1] :surface white-c})]}))

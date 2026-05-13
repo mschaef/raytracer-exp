@@ -880,7 +880,9 @@ fn builtin_aabb(args: &[Value], pos: &Position) -> Value {
 // Scene
 // ---------------------------------------------------------------------------
 
-/// `(scene {:name "..." :camera C :background [r g b] :objects [...] :reflect-limit n :oversample n})`
+/// `(scene {:name "..." :camera C :background [r g b] :objects [...]
+///          :reflect-limit n :min-samples n :max-samples m
+///          :variance-threshold t})`
 ///
 /// After the stage-2 collapse the scene is a single top-level
 /// `Shape`. `:objects` is exposed at the SDL surface as a list for
@@ -891,10 +893,20 @@ fn builtin_aabb(args: &[Value], pos: &Position) -> Value {
 /// `(light-white ...)` values are auto-wrapped as `Shape::Light` via
 /// `require_shape_value` exactly as in stage 1.
 ///
-/// The `:lights` key was removed in stage 2. Scenes still carrying it
-/// get an explicit migration error rather than a silent ignore, so a
-/// missed migration shows up loudly the first time someone tries to
-/// load the scene.
+/// `:min-samples` / `:max-samples` / `:variance-threshold` configure
+/// the adaptive-oversampling loop in `pixel_color` (Phase 2 of the
+/// adaptive-oversampling plan). Defaults: `min-samples = 4`,
+/// `max-samples = 32`, `variance-threshold = 0.005` (linear color).
+/// Setting `min-samples = max-samples` reproduces the previous
+/// fixed-count behavior, which byte-pinned tests rely on for
+/// determinism.
+///
+/// Removed keys: `:lights` (stage 2 of the lights-as-shapes
+/// migration — move lights into `:objects`) and `:oversample`
+/// (Phase 2 of adaptive oversampling — replaced by the three keys
+/// above). Scripts still carrying either get an explicit migration
+/// error rather than a silent ignore, so a missed migration shows
+/// up loudly the first time someone tries to load the scene.
 fn builtin_scene(args: &[Value], pos: &Position) -> Value {
     require_arity(args, 1, "scene", pos);
     let map = require_map(&args[0], "scene", pos);
@@ -906,6 +918,19 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
              migration. Move every light into :objects — bare (light-white ...) / \
              (light-point ...) values are auto-wrapped as shapes by the scene \
              constructor (see lights_in_objects.lisp for the migration pattern)."
+        );
+    }
+
+    if map.contains_key("oversample") {
+        sdl_panic!(
+            pos.clone(),
+            "scene: the :oversample key was removed in Phase 2 of the \
+             adaptive-oversampling plan. Per-pixel sample count is now adaptive — \
+             replace :oversample with some combination of :min-samples (default 4), \
+             :max-samples (default 32), and :variance-threshold (default 0.005). \
+             A drop-in for `:oversample 2` is omitting all three (defaults match) \
+             or setting :min-samples 4 :max-samples 4 if you specifically want the \
+             old fixed-count behavior."
         );
     }
 
@@ -932,8 +957,17 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
     // override.
     let reflect_limit = maybe_key_int(&map, "reflect-limit", "scene", pos)
         .unwrap_or(2) as u32;
-    let oversample = maybe_key_int(&map, "oversample", "scene", pos)
-        .unwrap_or(2) as u32;
+
+    // Adaptive-sampling defaults: 4 samples on flat surfaces (which
+    // matches the previous fixed `oversample = 2` cost exactly), up
+    // to 32 in noisy regions, with a per-channel min/max spread of
+    // 0.005 linear-color units as the early-termination threshold.
+    let min_samples = maybe_key_int(&map, "min-samples", "scene", pos)
+        .unwrap_or(4) as u32;
+    let max_samples = maybe_key_int(&map, "max-samples", "scene", pos)
+        .unwrap_or(32) as u32;
+    let variance_threshold = maybe_key_number(&map, "variance-threshold", "scene", pos)
+        .unwrap_or(0.005);
 
     Value::Scene(Rc::new(Scene {
         name,
@@ -941,7 +975,9 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         root,
         background,
         reflect_limit,
-        oversample,
+        min_samples,
+        max_samples,
+        variance_threshold,
     }))
 }
 

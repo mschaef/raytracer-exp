@@ -174,7 +174,6 @@ struct CameraDetails {
     pub dx: f64,
     pub dy: f64,
     pub aspect: f64,
-    pub oversample: u32,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -202,7 +201,33 @@ pub struct Scene {
     pub background: LinearColor,
 
     pub reflect_limit: u32,
-    pub oversample: u32,
+
+    /// Adaptive oversampling parameters. The per-pixel sample loop in
+    /// `pixel_color` takes at least `min_samples` samples, then keeps
+    /// going batch-by-batch while the per-channel min/max spread
+    /// exceeds `variance_threshold`, up to a cap of `max_samples`.
+    /// A pixel sitting on a flat surface usually terminates at
+    /// `min_samples`; pixels on a geometric edge or in a high-contrast
+    /// region keep sampling until they either stabilize or hit the cap.
+    ///
+    /// Phase 2 of the adaptive-oversampling plan replaced the previous
+    /// single `oversample: u32` field. The old "fixed N×N grid" model
+    /// is gone — sample positions come from the Halton sampler in
+    /// `render::sampler`, and total count per pixel is variable.
+    ///
+    /// Sample positions: see `pixel_color` / `render::sampler`.
+    /// The convention is that `min_samples == max_samples` reproduces
+    /// the previous "fixed sample count, take exactly N samples and
+    /// move on" behavior, which is useful for benchmarking and for
+    /// byte-pinning equivalence tests that want determinism.
+    pub min_samples: u32,
+    pub max_samples: u32,
+    /// Per-channel min/max spread threshold for early termination.
+    /// Linear-color units, so `0.005` ≈ "half a percent of full
+    /// channel range." Lower → more samples in noisy regions
+    /// (better quality, slower); higher → cheaper, more apparent
+    /// noise.
+    pub variance_threshold: f64,
 }
 
 pub trait Hittable {
@@ -359,6 +384,13 @@ fn ray_color(ray: &Vector, scene: &Scene, lights: &[Light], reflect_count: u32) 
     }
 }
 
+/// Batch size for the adaptive sample loop. The variance check runs
+/// once per batch rather than per individual sample, so the check's
+/// cost is amortized; 4 also happens to match the previous fixed
+/// `oversample = 2` case exactly, which keeps the "starting" point
+/// of the new loop intuitive ("two samples deep in each axis").
+const SAMPLE_BATCH: u32 = 4;
+
 fn pixel_color(
     camera: &CameraDetails,
     scene: &Scene,
@@ -366,49 +398,116 @@ fn pixel_color(
     x: u32,
     y: u32,
 ) -> LinearColor {
-    // Sub-pixel sample positions: Halton-(2, 3) low-discrepancy
-    // sequence indexed by sample number, decorrelated across pixels
-    // by a per-pixel Cranley-Patterson rotation. See `render::sampler`
-    // for the mechanics. Phase 1 of the adaptive-oversampling plan
-    // swaps *where* within the pixel the samples land — total sample
-    // count per pixel is still `oversample²`, same as the prior fixed
-    // grid. Phase 2 will extend this loop past `total_samples` for
-    // pixels with high variance; the property that makes that work is
-    // that sample `i` has a well-defined offset regardless of total
-    // count, which the Halton sequence gives us naturally.
-    let total_samples = camera.oversample * camera.oversample;
-
-    // CP rotation is cheap (a handful of integer ops) but invariant
-    // across the per-sample loop, so hoist it out. Adding `(ox, oy)`
-    // mod 1 to each Halton point is what shifts this pixel's sample
-    // set to a different offset than its neighbors'.
+    // Phase 2 of the adaptive-oversampling plan: sample count per
+    // pixel is variable, driven by a per-channel min/max spread
+    // check. The loop takes at least `min_samples` samples, then
+    // keeps going one batch at a time while max channel spread
+    // exceeds `variance_threshold`, up to a cap of `max_samples`.
+    //
+    // Sample positions still come from the Phase 1 Halton-(2, 3)
+    // sampler in `render::sampler`, with per-pixel Cranley-Patterson
+    // rotation to decorrelate neighbors. The Halton sequence stays
+    // well-distributed at arbitrary index, which is what makes the
+    // open-ended sample count work without quality cliffs as
+    // `samples` grows.
     let (ox, oy) = sampler::cranley_patterson_offset(x, y);
 
-    let mut pc = [0.0, 0.0, 0.0];
-    for i in 0..total_samples {
-        // Start at Halton index 1: index 0 sits at the pixel's
-        // top-left corner `(0, 0)`. Without the CP rotation that
-        // would always be the first sample of every pixel and bias
-        // the average; even with rotation it's cleaner to skip it.
-        let (hx, hy) = sampler::halton_pair(i + 1);
-        let sx = (hx + ox).fract();
-        let sy = (hy + oy).fract();
+    // Min/max spread metric: track per-channel min and max across
+    // all samples taken so far. After each batch, the per-channel
+    // spread is `max - min`; the loop terminates when the largest
+    // channel's spread drops below `variance_threshold`. This is
+    // simpler and cheaper than computing statistical variance, and
+    // the threshold is intuitive — "any channel allowed to differ
+    // by this much across samples." A scene's flat regions usually
+    // terminate at `min_samples`; edges and high-contrast areas
+    // sample further.
+    let mut sum: LinearColor = [0.0, 0.0, 0.0];
+    let mut min_c: LinearColor = [f64::INFINITY; 3];
+    let mut max_c: LinearColor = [f64::NEG_INFINITY; 3];
+    let mut samples: u32 = 0;
 
-        // Pixel-center convention is "pixel x is centered at
-        // view-plane coordinate `x * dx`" (see camera_ray, and the
-        // image-y note in CLAUDE.md). A sample at fractional offset
-        // `s` in `[0, 1)` within the pixel lands at view-plane
-        // coordinate `(x + s - 0.5) * dx`, so `s = 0` is the left
-        // edge of the pixel and `s = 0.5` is its center.
-        let xt = (x as f64 + sx - 0.5) * camera.dx;
-        let yt = (y as f64 + sy - 0.5) * camera.dy;
+    // Sample-count contract for the adaptive loop:
+    //
+    // * At least `min_samples` samples are always taken (even if
+    //   the early ones already agree to within the threshold —
+    //   variance is a *noisy* estimate at very low sample counts,
+    //   and the floor protects against terminating on spurious
+    //   agreement).
+    //
+    // * After that, additional batches of `SAMPLE_BATCH` are taken
+    //   whenever max channel spread is above the threshold, up to
+    //   a hard cap of `max_samples`.
+    //
+    // * `min_samples == max_samples` reproduces the previous
+    //   fixed-count behavior, which is what the byte-pinned tests
+    //   in `tests/sdl_suite.rs` rely on for determinism.
+    let min_samples = scene.min_samples.max(1);
+    let max_samples = scene.max_samples.max(min_samples);
+    let threshold = scene.variance_threshold;
 
-        let rc = ray_color(&camera_ray(&camera.camera, camera.aspect, xt, yt), scene, lights, 0);
+    loop {
+        // Batch size: normally `SAMPLE_BATCH`, capped at the remaining
+        // budget so a `max_samples` smaller than the batch (e.g. the
+        // byte-pinned tests using `min == max == 1` for determinism)
+        // takes exactly the requested count, not a batch-rounded count.
+        let batch = SAMPLE_BATCH.min(max_samples - samples);
 
-        pc = add_linear_color(&pc, &rc);
+        // Take this batch's worth of samples. Each sample's sub-pixel
+        // offset comes from `(halton_pair(i + 1) + (ox, oy)) mod 1` —
+        // Halton index 0 sits at the pixel corner so we shift past it.
+        for k in 0..batch {
+            let i = samples + k;
+            let (hx, hy) = sampler::halton_pair(i + 1);
+            let sx = (hx + ox).fract();
+            let sy = (hy + oy).fract();
+
+            // Pixel-center convention is "pixel x is centered at
+            // view-plane coordinate `x * dx`" (see camera_ray, and
+            // the image-y note in CLAUDE.md). Sample at fractional
+            // offset `s` in [0, 1) lands at view-plane coordinate
+            // `(x + s - 0.5) * dx`.
+            let xt = (x as f64 + sx - 0.5) * camera.dx;
+            let yt = (y as f64 + sy - 0.5) * camera.dy;
+
+            let rc = ray_color(
+                &camera_ray(&camera.camera, camera.aspect, xt, yt),
+                scene,
+                lights,
+                0,
+            );
+
+            sum = add_linear_color(&sum, &rc);
+            for c in 0..3 {
+                if rc[c] < min_c[c] {
+                    min_c[c] = rc[c];
+                }
+                if rc[c] > max_c[c] {
+                    max_c[c] = rc[c];
+                }
+            }
+        }
+        samples += batch;
+
+        // Hit the cap → done regardless of variance.
+        if samples >= max_samples {
+            break;
+        }
+
+        // Below the min floor → keep going regardless of variance.
+        if samples < min_samples {
+            continue;
+        }
+
+        // Past the floor and under the cap → check spread.
+        let spread = (max_c[0] - min_c[0])
+            .max(max_c[1] - min_c[1])
+            .max(max_c[2] - min_c[2]);
+        if spread <= threshold {
+            break;
+        }
     }
 
-    scale_linear_color(&pc, 1.0 / total_samples as f64)
+    scale_linear_color(&sum, 1.0 / samples as f64)
 }
 
 fn render_one_row<T: RenderTarget + ?Sized>(
@@ -478,7 +577,6 @@ pub fn render<T: RenderTarget + ?Sized>(
         dx: 1.0 / imgx as f64,
         dy: 1.0 / imgy as f64,
         aspect: imgx as f64 / imgy as f64,
-        oversample: scene.oversample,
     };
 
     // Build the flat world-space list of lights once at render entry

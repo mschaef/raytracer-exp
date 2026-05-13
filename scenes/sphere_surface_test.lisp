@@ -46,7 +46,6 @@
      :camera        default-camera
      :background    [0.0 0.0 0.0]
      :reflect-limit 2
-     :oversample    2
      ;; Prepend the light to the 5×5 grid: `apply conj` appends each
      ;; sphere in turn to the starting vector. End result is a single
      ;; flat vector [light sphere0 sphere1 ... sphere24] suitable

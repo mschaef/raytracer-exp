@@ -31,7 +31,9 @@
                       (sphere {:center [3 0 0] :r 0.5 :surface green})
                       (plane  {:normal [0 0 1] :p0 [0 0 -2] :surface ground})]
             :reflect-limit 2
-            :oversample 2})))
+            :min-samples 4
+            :max-samples 16
+            :variance-threshold 0.01})))
 
 (def s1 (make-scene))
 (assert (scene? s1))
@@ -49,10 +51,13 @@
                 :objects [(light-white [10 10 10])
                           (sphere {:center [0 0 0] :r 1.0 :surface red})]
                 :reflect-limit 2
-                :oversample 2}))
+                :min-samples 4
+                :max-samples 16
+                :variance-threshold 0.01}))
 (assert (not= s1 s3))
 
-; :background, :reflect-limit, :oversample default if omitted.
+; :background, :reflect-limit, :min-samples, :max-samples, and
+; :variance-threshold all default if omitted.
 (def s4 (scene {:name "Minimal"
                 :camera cam
                 :objects []}))

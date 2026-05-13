@@ -67,7 +67,8 @@
      :camera        cam
      :background    [0 0 0]
      :reflect-limit 0
-     :oversample    1
+     :min-samples   1
+     :max-samples   1
      :objects
      [(translate [5 5 5] (light-white [0 0 0]))
       (light-point [-5 5 5] [1.0 0.5 0.5] 0.8)
@@ -84,7 +85,8 @@
      :camera        cam
      :background    [0 0 0]
      :reflect-limit 0
-     :oversample    1
+     :min-samples   1
+     :max-samples   1
      :objects
      [(light-white [10 0 0])
       (light-white [-10 0 0])

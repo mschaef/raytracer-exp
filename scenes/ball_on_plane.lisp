@@ -12,7 +12,6 @@
      :camera        default-camera
      :background    [0.0 0.0 0.0]
      :reflect-limit 2
-     :oversample    2
      :objects
      [(light-white [10 10 10])
       (sphere {:center [0 -2 -1] :r 0.66 :surface surface-blue})

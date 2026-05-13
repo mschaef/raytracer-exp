@@ -257,7 +257,11 @@ render(scene, imgx, imgy, &target, parallel)
   └─ for each y in 0..imgy (rayon::into_par_iter if parallel):
        render_one_row
          └─ for each x in 0..imgx:
-              pixel_color   ← oversample loop (2×2 by default)
+              pixel_color   ← adaptive sample loop (min_samples..max_samples)
+                              with Halton-(2,3) + CP rotation per
+                              sample, batch-checked variance for early
+                              termination — see `render::sampler` and
+                              Scene::{min,max}_samples / variance_threshold.
                 └─ camera_ray (uses cached aspect, basis)
                 └─ ray_color
                      └─ nearest_hit (fold over scene.objects: &[Shape])
@@ -908,6 +912,52 @@ Approximate order of recent commits, oldest first:
     sample `i` now has a well-defined offset regardless of total
     sample count.
 
+25. **Adaptive oversampling phase 2: variance-driven termination.**
+    `pixel_color`'s per-pixel sample count is now adaptive. The loop
+    takes a batch of `SAMPLE_BATCH = 4` samples at a time, tracks
+    per-channel min/max across all samples so far, and terminates
+    when the largest channel's `max - min` spread drops below
+    `variance_threshold` — subject to a `min_samples` floor (the
+    metric is too noisy at very low sample counts to trust) and a
+    `max_samples` cap (so a stubbornly noisy pixel doesn't sample
+    forever). Flat regions of typical scenes terminate at
+    `min_samples`; edges and high-contrast areas keep sampling until
+    they stabilize. Min/max spread was chosen over running statistical
+    variance because the threshold is easier to reason about and the
+    per-sample tracking is two channels of `min`/`max` rather than
+    `sum` + `sum_of_squares`. `Scene::oversample` was deleted and
+    replaced with three new fields: `min_samples: u32`, `max_samples:
+    u32`, `variance_threshold: f64`. `CameraDetails` lost its
+    `oversample` field at the same time (no longer needed since
+    `pixel_color` reads adaptive parameters straight from `Scene`).
+    Defaults: `min_samples = 4` (matches the previous fixed
+    `oversample = 2` cost), `max_samples = 32`, `variance_threshold
+    = 0.005` linear-color units. Setting `min_samples == max_samples`
+    reproduces the previous fixed-count behavior exactly; the
+    byte-pinned tests in `tests/sdl_suite.rs` rely on this for
+    determinism (both `render_dispatch_save` and
+    `lights_in_objects_equivalence` set `min = max = 1`). SDL side:
+    `builtin_scene` in `src/sdl/bindings.rs` drops the `:oversample`
+    key and adds `:min-samples`, `:max-samples`, `:variance-threshold`,
+    all optional with the same defaults as the Rust struct. Scripts
+    still carrying `:oversample` get an explicit migration error
+    (same pattern as the stage-2 `:lights` rejection) directing them
+    at the replacement keys. Every `scenes/*.lisp` file had its
+    `:oversample 2` line dropped — the defaults match its cost on
+    flat geometry and adapt up on the parts that need more. The
+    test scripts `bindings_scene.lisp`, `bindings_mesh.lisp`,
+    `render_dispatch.lisp`, `lights_in_objects.lisp`, and the inline
+    sources for `render_dispatch_save` and
+    `lights_in_objects_equivalence` were also migrated:
+    `:oversample 1` (tests that wanted exactly one sample per pixel
+    for determinism) became `:min-samples 1 :max-samples 1`;
+    `:oversample 2` in `bindings_scene.lisp` became a slightly more
+    interesting `:min-samples 4 :max-samples 16 :variance-threshold
+    0.01` to exercise the new keys. The byte-pinned equivalence
+    test holds for the same reason it always did — both scenes go
+    through the same deterministic sampler and now the same
+    deterministic batch-of-1 sample-count path.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -1141,48 +1191,7 @@ Done; see "Recent work history."
 
 ### Phase 2 — Adaptive termination
 
-Replace the fixed `oversample²` loop with a variance-checked loop:
-
-```
-while samples < min_samples
-   || (samples < max_samples && variance > threshold) {
-    take another batch of samples
-}
-```
-
-Variance metric — two viable choices, both fine in practice:
-
-- **Statistical variance.** Per-channel running `sum` and
-  `sum_of_squares` (6 f64 per pixel during sampling). Compute variance
-  in closed form, compare max channel variance to threshold.
-- **Min/max spread.** Per-channel `min` and `max` across samples (6
-  f64 per pixel). Compare `max - min` to threshold. Simpler, less
-  principled, threshold more intuitive to tune.
-
-Variance checks happen between batches (every 4 samples), not after
-every individual sample, so metric cost is negligible.
-
-`Scene` gains three new fields: `min_samples: usize`, `max_samples:
-usize`, `variance_threshold: f64`. The existing `oversample: usize` is
-genuinely redundant — the grid concept is gone — so the migration is to
-delete it and add the three new keys. SDL surface: `:oversample n` is
-removed from the scene constructor; `:min-samples n`, `:max-samples m`,
-`:variance-threshold t` are added with sensible defaults so most scenes
-omit them. The few `scenes/*.lisp` files that currently set
-`:oversample` get migrated alongside.
-
-Starting defaults to tune empirically after landing:
-
-- `min_samples = 4` (matches today's 2×2)
-- `max_samples = 32`
-- `variance_threshold = 0.005` (linear color)
-
-Test impact: byte-pinned tests re-pin again. The whole point is
-visually equivalent output for less work, so bytes differ from Phase 1
-but renders should look as good or better. The heatmap becomes
-substantially more informative — bright pixels are exactly the ones
-taking more samples — which is the diagnostic story that justifies
-this work.
+Done; see "Recent work history."
 
 ### Phase 3 — Diagnostics and polish
 
@@ -1200,12 +1209,9 @@ Small enough to fold into Phase 2 unless it grows. Candidates:
 
 ### Decisions still open
 
-- **Variance metric for Phase 2.** Min/max spread is simpler and
-  recommended; statistical variance is more principled. Either works.
-- **SDL migration shape.** Delete `:oversample` and add three new
-  keys (recommended), or keep `:oversample` as a back-compat alias
-  meaning `max_samples = n²` (avoids touching scene files but leaves
-  a stale field name in the SDL surface).
+Nothing structural — Phases 1 and 2 settled the sampler shape and the
+adaptive-loop shape. Phase 3 candidates above are all opt-in tuning
+rather than required design choices.
 
 Settled in Phase 1:
 
@@ -1215,15 +1221,35 @@ Settled in Phase 1:
   `(x, y)` shifts each pixel's Halton sequence by a distinct
   `(ox, oy)` in `[0, 1)²`, decorrelating neighbors.
 
+Settled in Phase 2:
+
+- **Variance metric.** Per-channel min/max spread, `max - min`
+  compared against `variance_threshold`. Simpler than running
+  statistical variance, threshold is intuitive ("any channel allowed
+  to differ by this much across samples"), and the per-sample
+  bookkeeping is two channels of min and max rather than `sum +
+  sum_of_squares`.
+- **SDL migration shape.** `:oversample` deleted, `:min-samples`,
+  `:max-samples`, `:variance-threshold` added with defaults that
+  reproduce the previous fixed-grid cost on flat regions and adapt
+  up on the parts that need more. Legacy `:oversample` rejected
+  with an explicit migration error.
+- **Batch size for adaptive checks.** `SAMPLE_BATCH = 4`. Variance
+  estimates are noisy at very low sample counts; batching amortizes
+  the metric cost and lets the floor on `min_samples` filter out
+  spurious early-termination on accidental sample agreement.
+
 ### Verification
 
-This work doesn't visually change anything — the speed-up shows up in
-the heatmap and in `cargo run --release` timings, not in rendered
-images. Byte-pinning regressions catch correctness; an end-to-end check
-is rendering `scenes/teapot.lisp` (or another non-trivial scene) before
-and after each phase, comparing both the time-elapsed line and the
-rendered PNG. PNG should look equivalent; time should not regress in
-Phase 1 and should improve noticeably in Phase 2.
+Phase 2 should produce noticeably faster `cargo run --release` timings
+on every existing scene with no visible quality regression. The
+heatmap (still per-pixel time, not sample count yet — that's a Phase 3
+candidate) becomes a sample-count proxy at this point, and is the
+go-to diagnostic for "is adaptive doing what it claims": bright pixels
+on geometric edges, dim pixels in flat regions. End-to-end check is
+rendering `scenes/teapot.lisp` (or another non-trivial scene) before
+and after a change and comparing both the elapsed-time line and the
+rendered PNG. PNG should look equivalent; time should improve.
 
 ### Relationship to depth of field
 
@@ -1296,9 +1322,13 @@ require multiple shadow-ray samples per shading point.
 equations, IOR per surface, and accounting for the medium the ray is
 currently traveling through.
 
-**Depth of field.** Aperture-based ray jittering at `camera_ray` time, with a
-focus distance on the camera. The existing `oversample` loop is the right
-place to integrate aperture sampling.
+**Depth of field.** Aperture-based ray jittering at `camera_ray` time,
+with a focus distance on the camera. The Halton sampler in
+`render::sampler` plus the adaptive-sampling loop in `pixel_color` are
+exactly the right hooks: aperture jitter uses the same per-sample
+Halton index (a third base — 5 — could carry the aperture
+coordinate), and the variance-driven termination naturally routes
+extra samples to out-of-focus regions that actually need them.
 
 **Scene definition language.** See the dedicated "Scene definition
 language: implementation plan" section above — this is the next major

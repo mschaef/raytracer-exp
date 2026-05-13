@@ -107,7 +107,6 @@
      :camera        moravian-star-camera
      :background    [0.0 0.0 0.0]
      :reflect-limit 2
-     :oversample    2
      :objects
      [;; Key light: warm white, above and to the right.
       (light-white [10 10 10])

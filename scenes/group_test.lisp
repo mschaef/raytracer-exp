@@ -15,7 +15,6 @@
      :camera        default-camera
      :background    [0.0 0.0 0.0]
      :reflect-limit 2
-     :oversample    2
      :objects
      [(light-white [10 10 10])
       ;; A "snowman": three stacked spheres treated as a single

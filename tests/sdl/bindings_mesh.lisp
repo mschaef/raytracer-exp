@@ -55,6 +55,7 @@
           :objects       [(light-white [10 10 10])
                           mesh]
           :reflect-limit 1
-          :oversample    1}))
+          :min-samples   1
+          :max-samples   1}))
 
 (assert (scene? mesh-scene))

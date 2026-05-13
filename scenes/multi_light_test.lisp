@@ -21,7 +21,6 @@
      :camera        default-camera
      :background    [0.0 0.0 0.0]
      :reflect-limit 2
-     :oversample    2
      :objects
      [;; Red light coming from image-left, slightly behind the camera.
       (light-point [-5 5 5] [1.0 0.2 0.2] 1.0)

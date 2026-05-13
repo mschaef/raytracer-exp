@@ -15,7 +15,6 @@
      :camera         default-camera
      :background     [0.0 0.0 0.0]
      :reflect-limit  2
-     :oversample     2
      :objects
      [(light-white [10 10 10])
       ;; A unit cube translated to (3, 0, 0). Should look identical
