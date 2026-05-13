@@ -14,6 +14,7 @@ pub mod transform;
 pub mod shapes;
 pub mod mesh;
 pub mod output;
+pub mod sampler;
 
 use std::convert::TryFrom;
 use std::time::Instant;
@@ -365,26 +366,49 @@ fn pixel_color(
     x: u32,
     y: u32,
 ) -> LinearColor {
-    let subdx = camera.dx / (camera.oversample as f64 * 2.0);
-    let subdy = camera.dy / (camera.oversample as f64 * 2.0);
+    // Sub-pixel sample positions: Halton-(2, 3) low-discrepancy
+    // sequence indexed by sample number, decorrelated across pixels
+    // by a per-pixel Cranley-Patterson rotation. See `render::sampler`
+    // for the mechanics. Phase 1 of the adaptive-oversampling plan
+    // swaps *where* within the pixel the samples land — total sample
+    // count per pixel is still `oversample²`, same as the prior fixed
+    // grid. Phase 2 will extend this loop past `total_samples` for
+    // pixels with high variance; the property that makes that work is
+    // that sample `i` has a well-defined offset regardless of total
+    // count, which the Halton sequence gives us naturally.
+    let total_samples = camera.oversample * camera.oversample;
 
-    let xc = x as f64 * camera.dx - camera.dx / 2.0;
-    let yc = y as f64 * camera.dy - camera.dy / 2.0;
+    // CP rotation is cheap (a handful of integer ops) but invariant
+    // across the per-sample loop, so hoist it out. Adding `(ox, oy)`
+    // mod 1 to each Halton point is what shifts this pixel's sample
+    // set to a different offset than its neighbors'.
+    let (ox, oy) = sampler::cranley_patterson_offset(x, y);
 
     let mut pc = [0.0, 0.0, 0.0];
-    for iix in 0..scene.oversample {
-        for iiy in 0..scene.oversample {
+    for i in 0..total_samples {
+        // Start at Halton index 1: index 0 sits at the pixel's
+        // top-left corner `(0, 0)`. Without the CP rotation that
+        // would always be the first sample of every pixel and bias
+        // the average; even with rotation it's cleaner to skip it.
+        let (hx, hy) = sampler::halton_pair(i + 1);
+        let sx = (hx + ox).fract();
+        let sy = (hy + oy).fract();
 
-            let xt = xc + subdx * (1 + 2 * iix) as f64;
-            let yt = yc + subdy * (1 + 2 * iiy) as f64;
+        // Pixel-center convention is "pixel x is centered at
+        // view-plane coordinate `x * dx`" (see camera_ray, and the
+        // image-y note in CLAUDE.md). A sample at fractional offset
+        // `s` in `[0, 1)` within the pixel lands at view-plane
+        // coordinate `(x + s - 0.5) * dx`, so `s = 0` is the left
+        // edge of the pixel and `s = 0.5` is its center.
+        let xt = (x as f64 + sx - 0.5) * camera.dx;
+        let yt = (y as f64 + sy - 0.5) * camera.dy;
 
-            let rc = ray_color(&camera_ray(&camera.camera, camera.aspect, xt, yt), scene, lights, 0);
+        let rc = ray_color(&camera_ray(&camera.camera, camera.aspect, xt, yt), scene, lights, 0);
 
-            pc = add_linear_color(&pc, &rc)
-        }
+        pc = add_linear_color(&pc, &rc);
     }
 
-    scale_linear_color(&pc, 1.0 / (scene.oversample * scene.oversample) as f64)
+    scale_linear_color(&pc, 1.0 / total_samples as f64)
 }
 
 fn render_one_row<T: RenderTarget + ?Sized>(

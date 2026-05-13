@@ -875,6 +875,39 @@ Approximate order of recent commits, oldest first:
     result — at which point `main.rs` reduces to "evaluate this
     script" and the convention-based binding lookup goes away.
 
+24. **Adaptive oversampling phase 1: Halton sampler.** Swapped the
+    fixed N×N sub-pixel grid in `pixel_color` for a Halton-(2, 3)
+    low-discrepancy sequence indexed by sample number, decorrelated
+    across pixels via a per-pixel Cranley-Patterson rotation. New
+    `src/render/sampler.rs` exposes `halton_pair(i)` (radical inverse
+    base 2 / base 3, returns a point in `[0, 1)²`; callers start at
+    `i = 1` since `i = 0` sits at the pixel corner) and
+    `cranley_patterson_offset(x, y)` (splitmix64-style mix of the
+    pixel coordinates yielding a per-pixel `(ox, oy)` rotation, also
+    in `[0, 1)²`). The actual sub-pixel sample position is
+    `(halton_pair(i + 1) + (ox, oy)) mod 1`, evaluated in
+    `pixel_color`'s newly flat `for i in 0..oversample² { ... }`
+    loop. CP offset is hoisted outside the loop because it's
+    invariant across samples for a given pixel. Sample count per
+    pixel is unchanged at `oversample²` — Phase 1 only changes
+    *where* within the pixel the samples land; the grid arithmetic
+    (`subdx`, `iix`/`iiy`, the 2× stride) is gone. The module ships
+    with unit tests pinning the first few base-2 / base-3 radical
+    inverses to known fractions, asserting all outputs stay in
+    `[0, 1)²` across a 64×64 grid, and checking that neighboring
+    pixels receive distinct CP rotations (guards against a
+    degenerate xor-only hash). Existing byte-pinned tests carry
+    through unchanged: `lights_in_objects_equivalence` compares
+    two scenes that both go through the same deterministic
+    `(x, y, i) → sample-position` map, so byte-equality holds
+    for any reason geometry would; `render_dispatch_save`'s
+    "center pixel is lit" check survives any reasonable sub-pixel
+    offset. Visual output for existing scenes is comparable — the
+    intent isn't a quality change, it's the foundation for Phase 2's
+    variance-driven termination, which only works cleanly because
+    sample `i` now has a well-defined offset regardless of total
+    sample count.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -1104,30 +1137,7 @@ diagnostics and polish.
 
 ### Phase 1 — Sample-indexed sampling foundation
 
-Replace the deterministic 2×2 grid in `pixel_color` with a Halton (2, 3)
-sequence indexed by sample number. Total sample count per pixel is
-unchanged; only the within-pixel offsets change. Pieces:
-
-- A small `Sampler` helper (function or struct, no trait needed yet)
-  that maps `(pixel_x, pixel_y, sample_index) → (dx, dy)` in `[0,1)²`.
-  Halton bases 2 and 3 for the two coordinates; both compute stateless
-  in a handful of integer divisions per index.
-- Optional per-pixel Cranley-Patterson rotation: hash `(x, y)` to a
-  constant `(ox, oy)` and shift the Halton output by it mod 1. This
-  decorrelates neighboring pixels so any residual sampling artifact
-  looks like noise instead of a tiled pattern. Cheap; recommend yes.
-- The `pixel_color` loop body becomes `for i in 0..oversample² { let
-  (dx, dy) = sampler(x, y, i); ... }`. Grid arithmetic goes away.
-
-Test impact: byte-pinned tests (`lights_in_objects_equivalence`, the
-`render_dispatch_save` PNG check in `sdl_suite.rs`, anything else
-asserting byte-equality) re-pin once. Visual quality should be
-comparable to today.
-
-This phase is separate from the variance work because it's mechanical
-and self-contained — reviewing variance logic is easier when it's not
-bundled with a sampler swap. It also positions DOF (a later feature) to
-use the same `Sampler` without revisiting the sequence choice.
+Done; see "Recent work history."
 
 ### Phase 2 — Adaptive termination
 
@@ -1188,21 +1198,22 @@ Small enough to fold into Phase 2 unless it grows. Candidates:
   `max_samples`) or a Scene field. Useful for sanity-checking the
   speed-up and for visual diffing.
 
-### Decisions to settle before Phase 1 starts
+### Decisions still open
 
-- **Sequence choice.** Halton (2, 3) is the recommendation. Sobol
-  gives marginally better 2D coverage at very low sample counts but
-  adds state-tracking; pure hash-based jitter is simpler but less
-  uniform. Halton fits this codebase's "no extra deps, hand-rolled
-  math" style.
-- **Cranley-Patterson rotation.** Adds a few cheap lines and
-  meaningfully reduces inter-pixel correlation. Recommend yes.
 - **Variance metric for Phase 2.** Min/max spread is simpler and
   recommended; statistical variance is more principled. Either works.
 - **SDL migration shape.** Delete `:oversample` and add three new
   keys (recommended), or keep `:oversample` as a back-compat alias
   meaning `max_samples = n²` (avoids touching scene files but leaves
   a stale field name in the SDL surface).
+
+Settled in Phase 1:
+
+- **Sequence choice.** Halton (2, 3). Hand-rolled radical inverse in
+  `src/render/sampler.rs`; no new dependency.
+- **Cranley-Patterson rotation.** Yes. Splitmix64-style hash of
+  `(x, y)` shifts each pixel's Halton sequence by a distinct
+  `(ox, oy)` in `[0, 1)²`, decorrelating neighbors.
 
 ### Verification
 
