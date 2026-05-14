@@ -430,6 +430,11 @@ fn group_test_scene_loads() {
 }
 
 #[test]
+fn metallic_test_scene_loads() {
+    assert_scene_loads("metallic_test.lisp", "metallic-test-scene");
+}
+
+#[test]
 fn moravian_star_scene_loads() {
     assert_scene_loads("moravian_star.lisp", "moravian-star-scene");
 }

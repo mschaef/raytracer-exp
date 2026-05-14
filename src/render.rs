@@ -69,6 +69,19 @@ pub struct Surface {
     /// transparency — a transparent object still casts a solid
     /// shadow; that's Phase 2.
     pub transparency: f64,
+    /// Metallic flag. `false` (the default for every pre-metallic
+    /// scene) is an ordinary dielectric surface. When `true`,
+    /// `shade_pixel` reinterprets the existing fields the way a metal
+    /// behaves: the mirror reflection and the specular highlight are
+    /// both tinted component-wise by the surface `color` (a gold
+    /// surface reflects gold-tinted, not chrome-white), and the
+    /// Lambertian diffuse term is suppressed entirely (metals have
+    /// essentially no diffuse lobe). A metallic surface is always
+    /// opaque: `transparency` is ignored when `metallic` is `true`.
+    /// This is the simplified "metalness" workflow — one base color
+    /// drives body, reflection, and highlight. Rough/glossy metal
+    /// (scattered reflections) is a deferred follow-on.
+    pub metallic: bool,
 }
 
 /// A point light source. Carries an emitted color and a scalar intensity
@@ -588,7 +601,18 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, dept
             delta: normalizep(rvec)
         }, scene, lights, Depth { reflect: depth.reflect + 1, ..depth });
 
-        scale_linear_color(&rcolor, hit.surface.reflection)
+        let scaled = scale_linear_color(&rcolor, hit.surface.reflection);
+
+        // A metal tints what it reflects by its own color (gold
+        // reflects gold-ish); a dielectric reflects untinted, like
+        // chrome. The tint uses `scolor` so a checked metal's
+        // reflection picks up the checker pattern, consistent with
+        // the ambient and diffuse terms below.
+        if hit.surface.metallic {
+            multiply_linear_color(&scaled, &scolor)
+        } else {
+            scaled
+        }
     } else {
         [0.0, 0.0, 0.0]
     };
@@ -611,16 +635,35 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, dept
             // light's color and intensity.
             let light_tint = scale_linear_color(&l.color, l.intensity);
 
-            // Specular: highlight takes the color of the light.
-            let spec_term = scale_linear_color(&light_tint, kspecular * hit.surface.specular);
+            // Specular: the highlight takes the color of the light
+            // for a dielectric (a white light makes a white highlight
+            // on red plastic). A metal additionally tints the
+            // highlight by its own color — a gold surface has gold
+            // highlights regardless of the light.
+            let spec_term = {
+                let s = scale_linear_color(&light_tint, kspecular * hit.surface.specular);
+                if hit.surface.metallic {
+                    multiply_linear_color(&s, &scolor)
+                } else {
+                    s
+                }
+            };
 
             // Diffuse: surface color is modulated by light color
             // (component-wise), then scaled by the Lambert factor and
-            // the surface's diffuse coefficient.
-            let diff_term = scale_linear_color(
-                &multiply_linear_color(&scolor, &light_tint),
-                hit.surface.light * lambert,
-            );
+            // the surface's diffuse coefficient. Metals have
+            // essentially no diffuse lobe — all their apparent color
+            // comes from the tinted reflection and specular terms —
+            // so the diffuse contribution is suppressed entirely for
+            // a metallic surface.
+            let diff_term = if hit.surface.metallic {
+                [0.0, 0.0, 0.0]
+            } else {
+                scale_linear_color(
+                    &multiply_linear_color(&scolor, &light_tint),
+                    hit.surface.light * lambert,
+                )
+            };
 
             // Scale this light's full contribution by the shadow-ray
             // transmittance: `1.0` for an unobstructed light (the
@@ -661,7 +704,11 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, dept
     // At the recursion cap (`depth.transmit >= scene.transmit_limit`)
     // a transparent surface falls back to rendering fully opaque,
     // which is a graceful, bounded degradation.
-    if (hit.surface.transparency > EPSILON) && (depth.transmit < scene.transmit_limit) {
+    //
+    // A metallic surface is always opaque: `transparency` is ignored
+    // when `metallic` is set, so the `!metallic` guard short-circuits
+    // the transmitted ray entirely and `opaque` is returned as-is.
+    if (hit.surface.transparency > EPSILON) && !hit.surface.metallic && (depth.transmit < scene.transmit_limit) {
         let transmitted = ray_color(
             &Vector {
                 start: hit.hit_point,

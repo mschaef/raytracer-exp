@@ -496,17 +496,23 @@ fn require_u32(v: &Value, ctx: &str, pos: &Position) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// `(surface {:color [r g b] :ambient n :specular n :light n :checked b
-///            :reflection n :transparency n})`
+///            :reflection n :transparency n :metallic b})`
 ///
 /// All keys except `:color` have defaults. The defaults match an
 /// uninteresting matte surface so that omitting a key gives a
 /// predictable result (no specular highlight, full diffuse, no
-/// reflection, no checkering, fully opaque).
+/// reflection, no checkering, fully opaque, non-metallic).
 ///
 /// `:transparency` is the Phase 1 transmission coefficient in
 /// `[0.0, 1.0]` — `0.0` (the default) is fully opaque, `1.0` is
 /// fully see-through. Omitting it reproduces every pre-transparency
 /// scene exactly.
+///
+/// `:metallic` (default `false`) flags a metal surface. When `true`,
+/// the renderer tints the mirror reflection and specular highlight by
+/// the surface `color` and suppresses the diffuse term; the surface
+/// is also forced opaque (`:transparency` is ignored). Omitting it
+/// reproduces every pre-metallic scene exactly.
 fn builtin_surface(args: &[Value], pos: &Position) -> Value {
     require_arity(args, 1, "surface", pos);
     let map = require_map(&args[0], "surface", pos);
@@ -518,6 +524,7 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
     let checked = maybe_key_bool(&map, "checked", "surface", pos).unwrap_or(false);
     let reflection = maybe_key_number(&map, "reflection", "surface", pos).unwrap_or(0.0);
     let transparency = maybe_key_number(&map, "transparency", "surface", pos).unwrap_or(0.0);
+    let metallic = maybe_key_bool(&map, "metallic", "surface", pos).unwrap_or(false);
 
     Value::Surface(Surface {
         color,
@@ -527,6 +534,7 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
         checked,
         reflection,
         transparency,
+        metallic,
     })
 }
 

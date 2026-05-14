@@ -90,10 +90,11 @@ Scene definitions live at the repo root:
 ```
 scenes/
   _common.lisp         Surface coefficients (ambient/specular/light), the
-                       glossy and reflective helpers, surface-* presets,
-                       and default-camera. Loaded by every scene file via
-                       (load "_common.lisp"). Underscore prefix signals
-                       "not a standalone scene."
+                       glossy/reflective/glassy/metallic helpers, surface-*
+                       presets (including the surface-gold/-silver/-copper
+                       metals), and default-camera. Loaded by every scene
+                       file via (load "_common.lisp"). Underscore prefix
+                       signals "not a standalone scene."
 
   axis_spheres.lisp    Each scene file defines a single `<name>-scene`
   ball_on_plane.lisp   binding (Value::Scene). main.rs derives the
@@ -308,11 +309,30 @@ the future).
 
 ## Surface model
 
-`Surface { color, ambient, specular, light, checked, reflection, transparency }`.
+`Surface { color, ambient, specular, light, checked, reflection, transparency,
+metallic }`.
 Lighting is Lambertian diffuse + Phong specular (50-power), with ambient as a
 flat multiplier of the surface color and a single bounce of mirror reflection
 (recursion gated by `Scene::reflect_limit`). The `checked` flag enables a
 simple world-space checker pattern keyed off `floor(x+y+z)`.
+
+`metallic` (bool, default `false`) flags a metal surface. The default
+`false` is an ordinary dielectric — every pre-metallic scene renders
+byte-identically. When `true`, `shade_pixel` reinterprets the existing
+fields the way a metal behaves: the mirror reflection and the Phong
+specular highlight are both tinted component-wise by the surface color
+(a gold surface reflects gold-tinted rather than chrome-white, and has
+gold highlights regardless of light color), and the Lambertian diffuse
+term is suppressed entirely (metals have essentially no diffuse lobe,
+so all their apparent color comes from the tinted reflection and
+specular). A metallic surface is always opaque: the `!metallic` guard
+on the transmission branch means `transparency` is ignored when
+`metallic` is set. This is the simplified "metalness" workflow — one
+base color drives body, reflection, and highlight — and reuses the
+existing `reflection` field as the reflection strength. Rough/glossy
+metal (scattered reflections, needing a `roughness` field and
+per-sample reflection-ray jittering) is a deferred follow-on; so is
+Fresnel.
 
 `transparency` (0.0 = opaque, 1.0 = fully see-through) is the
 transmission coefficient. `shade_pixel` computes the surface's opaque
@@ -338,10 +358,12 @@ with the untinted primary-ray transmission above; colored shadows are
 deferred to land with colored transmission (see the refraction note in
 "Future directions").
 
-Surface presets and the `glossy` / `reflective` / `glassy` constructor
-helpers live in `scenes/_common.lisp`. Common ones: `surface-red`,
-`surface-green`, …, `surface-white-c` (the reflective checkered ground
-used by most scenes). Every `scenes/<name>.lisp` file pulls these in via
+Surface presets and the `glossy` / `reflective` / `glassy` / `metallic`
+constructor helpers live in `scenes/_common.lisp`. Common ones:
+`surface-red`, `surface-green`, …, `surface-white-c` (the reflective
+checkered ground used by most scenes), and the `surface-gold` /
+`surface-silver` / `surface-copper` metal presets. Every
+`scenes/<name>.lisp` file pulls these in via
 `(load "_common.lisp")`.
 
 ## Lights
@@ -1172,6 +1194,39 @@ Approximate order of recent commits, oldest first:
     functions. Existing scenes render byte-identically — aperture
     defaults to 0.0 and the pinhole branch is bit-identical — so the
     byte-pinned tests in `tests/sdl_suite.rs` are unaffected.
+
+30. **Metallic surfaces (basic case).** `Surface` gained a
+    `metallic: bool` field (default `false` = ordinary dielectric).
+    When `true`, `shade_pixel` reinterprets the existing fields the
+    way a metal behaves: the mirror reflection term and the Phong
+    specular highlight are both tinted component-wise by the surface
+    color (via `multiply_linear_color` against `scolor`, so a checked
+    metal's reflection picks up the checker pattern consistently with
+    the ambient/diffuse terms), and the Lambertian diffuse term is
+    suppressed entirely — metals have essentially no diffuse lobe, so
+    all their apparent color comes from the tinted reflection and
+    specular. A metallic surface is also forced opaque: a `!metallic`
+    guard was added to the transmission branch's condition, so
+    `transparency` is ignored when `metallic` is set (the two are
+    physically contradictory). The change is three localized edits to
+    `shade_pixel` plus the one field; no new recursion, no pipeline
+    changes, reuses the existing `reflection` field as the reflection
+    strength. SDL surface: `(surface ...)` gained an optional
+    `:metallic` key (default `false`), and `scenes/_common.lisp`
+    gained a `metallic` helper (alongside `glossy` / `reflective` /
+    `glassy`) plus `surface-gold` / `surface-silver` /
+    `surface-copper` presets. New `scenes/metallic_test.lisp` (gold,
+    silver, copper spheres on the checker ground, `reflect-limit 3`
+    so metal-to-metal reflections resolve) with a
+    `metallic_test_scene_loads` smoke test;
+    `tests/sdl/bindings_surface.lisp` extended to exercise the
+    `:metallic` key and its default. Since `metallic` defaults to
+    `false`, every existing scene renders byte-identically and the
+    byte-pinned tests in `tests/sdl_suite.rs` are unaffected.
+    Rough/glossy metal (scattered reflections — a `roughness` field
+    and per-sample reflection-ray jittering, with the sample-index
+    wrinkle that reflection happens inside the non-sample-indexed
+    `ray_color` recursion) and Fresnel are deferred follow-ons.
 
 ## Pitfalls and conventions
 

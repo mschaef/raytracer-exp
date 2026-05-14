@@ -61,6 +61,39 @@
 ; A differing :transparency makes surfaces non-equal.
 (assert (not= s1 s-glass))
 
+; :metallic key — flags a metal surface.
+(def s-metal (surface {:color [1.0 0.78 0.34]
+                       :ambient 0.2
+                       :specular 0.5
+                       :light 0.6
+                       :checked false
+                       :reflection 0.7
+                       :metallic true}))
+(assert (surface? s-metal))
+
+; :metallic defaults to false when omitted. s1 was built with every
+; *other* key but no :metallic; an explicit :metallic false surface
+; with otherwise-identical fields must compare equal to it.
+(def s-nonmetal-explicit (surface {:color [1.0 0.0 0.0]
+                                   :ambient 0.2
+                                   :specular 0.5
+                                   :light 0.6
+                                   :checked false
+                                   :reflection 0.0
+                                   :transparency 0.0
+                                   :metallic false}))
+(assert= s1 s-nonmetal-explicit)
+
+; A differing :metallic makes surfaces non-equal.
+(def s1-metallic (surface {:color [1.0 0.0 0.0]
+                           :ambient 0.2
+                           :specular 0.5
+                           :light 0.6
+                           :checked false
+                           :reflection 0.0
+                           :metallic true}))
+(assert (not= s1 s1-metallic))
+
 ; Negative checks: surface? rejects non-surfaces.
 (assert (not (surface? nil)))
 (assert (not (surface? 42)))

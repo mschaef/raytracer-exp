@@ -67,6 +67,24 @@
               :reflection   0.0
               :transparency transparency})))
 
+;; `metallic` builds a metal surface: the :metallic flag tells the
+;; renderer to tint both the mirror reflection and the specular
+;; highlight by the body color and to suppress the Lambertian diffuse
+;; term entirely (metals have essentially no diffuse lobe). A metallic
+;; surface is always opaque — :transparency is ignored when :metallic
+;; is true. Takes the reflection strength as a parameter since
+;; polished-vs-dull is the main knob worth varying.
+
+(def metallic
+  (fn [color reflection]
+    (surface {:color      color
+              :ambient    ambient
+              :specular   specular
+              :light      light
+              :checked    false
+              :reflection reflection
+              :metallic   true})))
+
 ;; --------------------------------------------------------------------
 ;; Surface presets — match SURFACE_* constants in scenes.rs
 ;; --------------------------------------------------------------------
@@ -88,6 +106,13 @@
             :light      light
             :checked    true
             :reflection 0.5}))
+
+; Metal presets. The color is the reflectance tint, not a diffuse
+; body color — these surfaces take their appearance from what they
+; reflect, tinted by these values.
+(def surface-gold   (metallic [1.0  0.78 0.34] 0.7))
+(def surface-silver (metallic [0.95 0.95 0.95] 0.8))
+(def surface-copper (metallic [0.95 0.64 0.54] 0.6))
 
 ;; --------------------------------------------------------------------
 ;; Camera
