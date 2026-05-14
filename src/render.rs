@@ -341,7 +341,36 @@ impl PartialEq for RayHit {
     }
 }
 
-fn light_vector(point: &Point, scene: &Scene, light: &Light) -> Option<Vector> {
+/// Shadow-ray test from `light` to `point`, returning the light's
+/// direction-of-travel ray together with the *transmittance* along
+/// it — the fraction of the light that survives the trip.
+///
+/// Phase 2 of the transparency plan: instead of a binary
+/// reaches / fully-occluded answer, the shadow ray is walked from the
+/// light toward the shaded point with a repeated-nearest-hit loop,
+/// and every occluder strictly between the light and the point
+/// multiplies the running transmittance by its surface `transparency`
+/// (0.0 = opaque, 1.0 = fully clear). An opaque occluder drives
+/// transmittance to 0 and the walk stops early; transparent occluders
+/// attenuate and the walk continues to the next hit.
+///
+/// Returns:
+/// - `None` when transmittance reaches 0 — fully shadowed, and the
+///   caller can skip this light's shading entirely.
+/// - `Some((ray, transmittance))` otherwise, with `transmittance` in
+///   `(0.0, 1.0]`. `1.0` means nothing transparent was in the way
+///   (the pre-Phase-2 "unoccluded" case); the caller scales this
+///   light's full contribution by the returned factor.
+///
+/// Transmittance is a scalar, not a per-channel color: the light is
+/// attenuated greyscale, not tinted by the occluder's body color.
+/// This keeps Phase 2 consistent with Phase 1's primary-ray
+/// transmission, which is likewise untinted (`lerp(opaque,
+/// transmitted, transparency)` in `shade_pixel`). Colored shadows —
+/// red glass casting a red-tinted shadow — are deferred to land
+/// alongside colored transmission, most naturally with the
+/// refraction work.
+fn light_vector(point: &Point, scene: &Scene, light: &Light) -> Option<(Vector, f64)> {
     let light_direction = subp(*point, light.location);
 
     let light_distance = lenp(light_direction);
@@ -351,14 +380,57 @@ fn light_vector(point: &Point, scene: &Scene, light: &Light) -> Option<Vector> {
         delta: normalizep(light_direction)
     };
 
-    match scene.root.hit_test(&ray) {
-        Some(hit) =>
-            if hit.distance > light_distance - EPSILON {
-                Some(ray)
-            } else {
-                None
+    // Walk the shadow ray from the light toward the shaded point.
+    // `cursor` is the current origin for the next segment test; it
+    // advances to each occluder's hit point in turn. Because every
+    // primitive's `hit_test` rejects `t <= EPSILON`, restarting the
+    // test from a hit point never re-finds that same surface — the
+    // same self-intersection guard the reflection and transmission
+    // rays rely on.
+    let mut transmittance = 1.0;
+    let mut cursor = ray.start;
+
+    loop {
+        let segment = Vector { start: cursor, delta: ray.delta };
+
+        match scene.root.hit_test(&segment) {
+            Some(hit) => {
+                // Distance of this hit measured from the light along
+                // the (unit-length) ray direction. Every hit point
+                // lies on the original ray line, so this is just the
+                // length from the light's location.
+                let dist_from_light = lenp(subp(hit.hit_point, ray.start));
+
+                // A hit at (or beyond) the shaded point itself is not
+                // an occluder — it is the surface we are lighting.
+                // Stop the walk; whatever transmittance we have is
+                // the answer.
+                if dist_from_light > light_distance - EPSILON {
+                    break;
+                }
+
+                // A genuine occluder strictly between light and
+                // point. Attenuate by its transparency. An opaque
+                // surface (transparency 0.0) zeroes transmittance and
+                // we can stop immediately.
+                transmittance *= hit.surface.transparency;
+                if transmittance <= EPSILON {
+                    return None;
+                }
+
+                // Advance past this occluder and continue the walk.
+                cursor = hit.hit_point;
             }
-        None => None
+            // The shadow ray hit nothing further along — no more
+            // occluders between here and the light's reach. Done.
+            None => break,
+        }
+    }
+
+    if transmittance <= EPSILON {
+        None
+    } else {
+        Some((ray, transmittance))
     }
 }
 
@@ -423,7 +495,7 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, dept
     // mode.
     let mut light: LinearColor = [0.0, 0.0, 0.0];
     for l in lights {
-        if let Some(lv) = light_vector(&hit.hit_point, scene, l) {
+        if let Some((lv, transmittance)) = light_vector(&hit.hit_point, scene, l) {
             let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0);
             let lambert = dotp(hit.normal, negp(lv.delta));
 
@@ -442,7 +514,18 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, dept
                 hit.surface.light * lambert,
             );
 
-            light = add_linear_color(&light, &add_linear_color(&spec_term, &diff_term));
+            // Scale this light's full contribution by the shadow-ray
+            // transmittance: `1.0` for an unobstructed light (the
+            // pre-Phase-2 behavior), between 0 and 1 when transparent
+            // occluders sit between the point and the light. Opaque
+            // occluders never reach here — `light_vector` returns
+            // `None` for those.
+            let contribution = scale_linear_color(
+                &add_linear_color(&spec_term, &diff_term),
+                transmittance,
+            );
+
+            light = add_linear_color(&light, &contribution);
         }
     }
 

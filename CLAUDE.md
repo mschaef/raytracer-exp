@@ -299,20 +299,29 @@ flat multiplier of the surface color and a single bounce of mirror reflection
 (recursion gated by `Scene::reflect_limit`). The `checked` flag enables a
 simple world-space checker pattern keyed off `floor(x+y+z)`.
 
-`transparency` (0.0 = opaque, 1.0 = fully see-through) is the Phase 1
+`transparency` (0.0 = opaque, 1.0 = fully see-through) is the
 transmission coefficient. `shade_pixel` computes the surface's opaque
 shading (ambient + direct lighting + reflection), then — if the surface
 is at all transparent — casts a *straight-through* transmitted ray
 (same direction as the incoming ray, originating at the hit point) and
-returns `lerp(opaque, transmitted, transparency)`. Phase 1 transmission
-is non-refractive: the transmitted ray does not bend, so geometry behind
+returns `lerp(opaque, transmitted, transparency)`. Transmission is
+non-refractive: the transmitted ray does not bend, so geometry behind
 a transparent surface shows up undistorted. Transmission recursion is
 gated by `Scene::transmit_limit` — a separate budget from `reflect_limit`,
 tracked by the independent `transmit` counter in the private `Depth`
-struct that threads through `ray_color` / `shade_pixel`. Phase 1 shadow
-rays do *not* yet honor transparency — a transparent object still casts a
-solid shadow; that's Phase 2 (see "Transparency / transmission:
-implementation plan").
+struct that threads through `ray_color` / `shade_pixel`.
+
+Shadow rays honor transparency too (Phase 2): `light_vector` walks the
+shadow ray from the light to the shaded point with a
+repeated-nearest-hit loop, multiplying a running *transmittance* by
+each occluder's `transparency`. An opaque occluder zeroes it (full
+shadow, early-out); transparent occluders attenuate it. `shade_pixel`
+scales each light's contribution by that transmittance, so transparent
+objects cast lightened shadows rather than solid ones. Transmittance
+is greyscale, not tinted by the occluder's body color — consistent
+with the untinted primary-ray transmission above; colored shadows are
+deferred to land with colored transmission (see the refraction note in
+"Future directions").
 
 Surface presets and the `glossy` / `reflective` / `glassy` constructor
 helpers live in `scenes/_common.lisp`. Common ones: `surface-red`,
@@ -1060,6 +1069,49 @@ Approximate order of recent commits, oldest first:
     `tests/sdl/bindings_surface.lisp` extended to exercise the
     `:transparency` key and its default.
 
+28. **Transparency phase 2: transparent shadows.** Shadow rays now
+    honor surface transparency, so a transparent object casts a
+    lightened shadow instead of a solid black one. `light_vector`
+    changed from a binary reaches / fully-occluded test
+    (`Option<Vector>`) to an accumulated-transmittance walk
+    (`Option<(Vector, f64)>`): it steps the shadow ray from the
+    light toward the shaded point with a repeated-nearest-hit loop,
+    advancing the segment origin to each hit point in turn (the
+    `t <= EPSILON` rejection in every primitive's `hit_test` keeps
+    the walk from re-finding the surface it just left, same guard
+    the reflection / transmission rays use), and multiplies a
+    running transmittance by each occluder's `surface.transparency`.
+    An opaque occluder (`transparency == 0.0`) zeroes transmittance
+    and the function returns `None` immediately — the early-out that
+    keeps the common opaque case as cheap as the old single
+    `hit_test`. A hit at or beyond the shaded point itself
+    (`dist_from_light > light_distance - EPSILON`) ends the walk
+    without counting as an occluder. `shade_pixel` destructures the
+    new `(lv, transmittance)` pair and scales each light's combined
+    specular + diffuse contribution by `transmittance` —
+    `transmittance == 1.0` reproduces the pre-Phase-2 unobstructed
+    result exactly. Two judgment calls settled here: (1) the
+    transmittance is a *scalar*, not a per-channel color — the light
+    is attenuated greyscale, not tinted by the occluder's body
+    color, matching Phase 1's untinted primary-ray transmission;
+    colored shadows are deferred to land with colored transmission
+    (most naturally with refraction). (2) The plan's draft formula
+    said "multiply in `(1 - occluder.transparency)`," which has the
+    polarity backwards — opaque is `transparency == 0.0`, and an
+    opaque occluder must drive transmittance to 0, so the factor is
+    `occluder.transparency` directly; implemented that way. No new
+    `Surface` / `Scene` fields and no SDL surface change — Phase 2 is
+    purely a renderer-internal change to the shadow-ray traversal.
+    Determinism: the byte-pinned tests in `tests/sdl_suite.rs` use
+    only opaque surfaces, where an opaque occluder still drives
+    transmittance to exactly 0 (→ `None`, same as the old binary
+    "occluded") and an unobstructed light still yields
+    `transmittance == 1.0` (→ identity scale), so those renders are
+    bit-for-bit unchanged. Visual check: render
+    `scenes/transparency_test.lisp` — the glassy sphere should now
+    cast a soft, partial shadow on the checker floor rather than a
+    solid one.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -1365,13 +1417,14 @@ distribution for free instead of forcing a global oversample crank.
 
 ## Transparency / transmission: implementation plan
 
-Adds see-through surfaces to the renderer. The work splits into two
-phases that ship back-to-back. Phase 1 (transmission for primary and
-reflection rays, non-refractive) is done; Phase 2 (transparent
-shadows) immediately follows. Refraction — Snell's-law bending and
-per-surface IOR — is explicitly *not* part of this plan; it's a
-later, larger piece of work that builds on the transmission
-machinery landed here.
+Adds see-through surfaces to the renderer. The work split into two
+phases that shipped back-to-back, and both are now done — this plan
+is complete. Phase 1 delivered transmission for primary and
+reflection rays (non-refractive); Phase 2 made shadow rays honor
+transparency. Refraction — Snell's-law bending and per-surface IOR —
+was explicitly *not* part of this plan; it's a later, larger piece
+of work that builds on the transmission machinery landed here (see
+the refraction note in "Future directions").
 
 ### Phase 1 — Transmission through surfaces
 
@@ -1386,65 +1439,36 @@ helper in `_common.lisp`.
 
 ### Phase 2 — Transparent shadows
 
-The Phase 1 limitation: `light_vector` treats *any* hit on the
-shadow ray as full occlusion, so a transparent object casts a solid
-black shadow — visually wrong for glass. Phase 2 makes shadow rays
-honor transparency.
-
-The change is concentrated in `light_vector` (in `render.rs`). Today
-it returns `Option<Vector>` — `Some` means "light reaches the point,"
-`None` means "fully occluded." That binary needs to become an
-*accumulated transmittance*: walk the shadow ray, and for every
-occluder between the point and the light, multiply in
-`(1 - occluder.transparency)` (or pass transmittance through tinted
-by the occluder color, if we want colored shadows — decide when the
-phase begins). An opaque occluder drives transmittance to 0 and we
-can stop early; a fully transparent one contributes nothing and the
-walk continues. The shading loop in `shade_pixel` then scales each
-light's diffuse + specular contribution by that transmittance
-instead of gating it on a boolean.
-
-Implementation notes / open questions to settle when the phase
-starts:
-
-- **Traversal shape.** `light_vector` currently calls
-  `scene.root.hit_test` once and inspects the single nearest hit.
-  Accumulating transmittance needs *all* occluders along the
-  segment, not just the nearest — so this needs either a repeated
-  "nearest hit, advance past it, repeat" loop or a dedicated
-  traversal that collects every hit in the `[EPSILON,
-  light_distance]` range. The repeated-nearest-hit loop is simplest
-  and reuses existing `hit_test`; it's O(occluders²) in the
-  pathological case but occluder counts on a shadow ray are
-  small in practice.
-- **Interaction with the "any-hit" optimization.** CLAUDE.md's
-  Future Directions notes a shadow-ray `any_hit` early-exit
-  optimization. Phase 2 changes the shape of shadow traversal, so
-  the two should be designed together: the early-exit becomes
-  "stop once transmittance hits 0" (an opaque occluder), which is
-  the same early-out, just expressed against accumulated
-  transmittance rather than a boolean.
-- **Colored shadows.** Whether a colored transparent surface tints
-  the light passing through it (red glass → red-tinted shadow) or
-  just attenuates it greyscale. Tinting is barely more code
-  (multiply by the occluder's color, not just `1 - transparency`)
-  and looks markedly better, but it's a small judgment call worth
-  making explicitly.
-- **Determinism.** The byte-pinned equivalence tests in
-  `tests/sdl_suite.rs` use opaque surfaces only, so Phase 2 leaves
-  them unaffected — an opaque occluder still drives transmittance
-  to exactly 0, reproducing the current boolean behavior bit-for-bit.
+Done; see "Recent work history" entry 28. Summary: `light_vector`
+changed from a binary `Option<Vector>` test to an
+accumulated-transmittance walk `Option<(Vector, f64)>` — it steps
+the shadow ray from light to shaded point with a
+repeated-nearest-hit loop, multiplying a running transmittance by
+each occluder's `transparency`, with an opaque occluder zeroing it
+(early-out → `None`). `shade_pixel` scales each light's contribution
+by the returned transmittance. Two judgment calls settled at
+implementation time: transmittance is a *scalar* (greyscale
+attenuation, not colored-shadow tinting — consistent with Phase 1's
+untinted transmission; colored shadows deferred to land with colored
+transmission); and the per-occluder factor is `occluder.transparency`
+directly, not the `(1 - transparency)` the plan draft had — the
+draft's polarity was backwards (opaque is `transparency == 0.0` and
+must drive transmittance to 0). No new `Surface` / `Scene` fields,
+no SDL surface change — Phase 2 is purely internal to the shadow-ray
+traversal. The byte-pinned tests use only opaque surfaces, so they
+are bit-for-bit unaffected.
 
 ### Verification
 
 Phase 1: render `scenes/transparency_test.lisp` and confirm the red
 sphere and checker floor are visible through the glassy sphere,
 blended by the 0.7 coefficient, with the glassy sphere's own shading
-still present. Existing scenes must render byte-identically (they do
-— `transparency` defaults to 0.0), which the byte-pinned tests pin
-down. Phase 2: the same scene's glassy sphere should cast a
-*lightened* shadow on the checker floor rather than a solid one;
-compare before/after renders of `transparency_test.lisp`.
+still present. Phase 2: the same scene's glassy sphere should cast a
+*lightened*, partial shadow on the checker floor rather than a solid
+one. Existing scenes must render byte-identically across both phases
+(they do — `transparency` defaults to 0.0 and opaque occluders
+reproduce the old binary shadow behavior exactly), which the
+byte-pinned tests in `tests/sdl_suite.rs` pin down.
 
 ## Future directions
 
@@ -1488,12 +1512,21 @@ test models like the Stanford bunny); the loader interface is already
 shaped right — add a `load_ply` to `mesh.rs` that returns `Shape` the
 same way `load_obj` does.
 
-**Shadow-ray "any-hit" optimization.** `light_vector` currently uses
-`nearest_hit` to test occlusion, but a shadow ray only needs to know
-*whether* something is in the way, not what's nearest. Splitting the helper
-into an `any_hit` variant that early-exits on the first occluder would
-speed up shadow tests substantially, especially in scenes with many lights
-or many objects. Independent of any other work; cleanly self-contained.
+**Shadow-ray traversal optimization.** Since Phase 2 of the
+transparency work, `light_vector` walks the shadow ray with a
+repeated-nearest-hit loop, accumulating transmittance through
+transparent occluders. For the common all-opaque case this is still
+"find one occluder and stop" (the first opaque hit zeroes
+transmittance and returns immediately), but each step calls the full
+`hit_test`, which computes a hit point, normal, and surface it
+doesn't need — a shadow ray only needs *whether* something opaque is
+in the way (or, for a transparent occluder, just its `transparency`).
+A dedicated traversal that returns the minimal information — a
+boolean for opaque-occluder-found, or just the transparency of the
+next occluder — would speed shadow tests up, especially in scenes
+with many lights or many objects. The early-exit is already
+"transmittance hit 0"; this is about making each step cheaper, not
+changing the loop shape. Cleanly self-contained.
 
 **Light types beyond point.** `Light` is currently a single struct. To
 add directional lights (parallel rays from infinity, like the sun),
