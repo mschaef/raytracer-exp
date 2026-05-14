@@ -420,6 +420,11 @@ fn cylinder_test_scene_loads() {
 }
 
 #[test]
+fn depth_of_field_test_scene_loads() {
+    assert_scene_loads("depth_of_field_test.lisp", "depth-of-field-test-scene");
+}
+
+#[test]
 fn group_test_scene_loads() {
     assert_scene_loads("group_test.lisp", "group-test-scene");
 }

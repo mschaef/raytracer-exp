@@ -102,11 +102,12 @@ impl Light {
 
 /// Look-at camera in pre-computed form.
 ///
-/// Construct via `Camera::looking_at` (zoom-based) or `Camera::with_fov`
-/// (field-of-view based) rather than building this struct directly — the
-/// constructors derive an orthonormal basis from the user-friendly inputs
-/// `(location, look_at, up_hint)` and cache the result here so per-ray
-/// work is just additions and scales.
+/// Construct via `Camera::looking_at` (zoom-based), `Camera::with_fov`
+/// (field-of-view based), or `Camera::with_dof` (adds a thin-lens
+/// aperture) rather than building this struct directly — the
+/// constructors derive an orthonormal basis from the user-friendly
+/// inputs `(location, look_at, up_hint)` and cache the result here so
+/// per-ray work is just additions and scales.
 ///
 /// Fields:
 /// - `location`     — world-space camera position.
@@ -116,6 +117,21 @@ impl Light {
 ///                    Re-orthogonalized from the user's `up_hint`.
 /// - `half_height`  — half the height of the view plane at unit distance.
 ///                    Smaller values = more zoomed in.
+/// - `aperture_radius` — thin-lens aperture radius in world units.
+///                    `0.0` is an ideal pinhole; `camera_ray` takes a
+///                    dedicated branch for it that is bit-identical to
+///                    the pre-depth-of-field renderer. A positive
+///                    radius jitters each primary ray's origin over a
+///                    disk of this radius in the `right`/`up` plane,
+///                    producing depth-of-field blur. Set to `0.0` by
+///                    `looking_at` / `with_fov`.
+/// - `focus_distance` — distance from `location` along `forward` to
+///                    the focus plane. Geometry at this depth stays
+///                    sharp regardless of `aperture_radius`; nearer or
+///                    farther geometry blurs. The constructors set
+///                    this to the `location`→`look_at` distance —
+///                    "focus on what you're aimed at." Only consulted
+///                    when `aperture_radius` is nonzero.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct Camera {
     pub location: Point,
@@ -123,6 +139,8 @@ pub struct Camera {
     pub right: Point,
     pub up: Point,
     pub half_height: f64,
+    pub aperture_radius: f64,
+    pub focus_distance: f64,
 }
 
 impl Camera {
@@ -144,7 +162,10 @@ impl Camera {
         up_hint: Point,
         zoom: f64,
     ) -> Camera {
-        let forward = normalizep(subp(look_at, location));
+        // `to_look_at` is reused twice: normalized for `forward`, and
+        // its length is the default focus distance.
+        let to_look_at = subp(look_at, location);
+        let forward = normalizep(to_look_at);
 
         // right = up_hint × forward, then renormalize. This convention
         // gives the intuitive result for a camera placed above the scene
@@ -163,7 +184,44 @@ impl Camera {
         // distance when zoom = 1, giving 2*atan(0.5) ≈ 53° vertical FOV.
         let half_height = 0.5 / zoom;
 
-        Camera { location, forward, right, up, half_height }
+        Camera {
+            location,
+            forward,
+            right,
+            up,
+            half_height,
+            // Pinhole by default — `camera_ray`'s zero-aperture branch
+            // makes this bit-identical to the pre-DOF renderer.
+            aperture_radius: 0.0,
+            // Focus on the look-at point. Inert while
+            // `aperture_radius` is 0; `with_dof` keeps this default
+            // and only overrides the aperture.
+            focus_distance: lenp(to_look_at),
+        }
+    }
+
+    /// Construct a depth-of-field camera: the same look-at framing as
+    /// `looking_at`, plus a thin-lens aperture of radius
+    /// `aperture_radius` (world units). The focus distance is the
+    /// `location`→`look_at` distance, so the look-at point is in
+    /// focus and geometry nearer or farther blurs by an amount that
+    /// grows with `aperture_radius`.
+    ///
+    /// `aperture_radius = 0.0` produces exactly the camera
+    /// `looking_at` would — an ideal pinhole. (Focusing at a depth
+    /// other than the look-at point is deliberately not exposed here;
+    /// it's a Phase 2 ergonomics item.)
+    pub fn with_dof(
+        location: Point,
+        look_at: Point,
+        up_hint: Point,
+        zoom: f64,
+        aperture_radius: f64,
+    ) -> Camera {
+        Camera {
+            aperture_radius,
+            ..Camera::looking_at(location, look_at, up_hint, zoom)
+        }
     }
 
     /// Construct a camera using a vertical field of view (in radians)
@@ -283,7 +341,15 @@ pub trait Hittable {
     fn hit_test(&self, ray: &Vector) -> Option<RayHit>;
 }
 
-fn camera_ray(c: &Camera, aspect: f64, xt: f64, yt: f64) -> Vector {
+/// Generate the primary ray for a sub-pixel sample.
+///
+/// `xt`, `yt` are normalized view-plane coordinates in `[0, 1]`;
+/// `lens` is a point on the unit disk (already mapped through
+/// `sampler::concentric_disk`) selecting where on the aperture this
+/// ray's origin sits. For a pinhole camera (`aperture_radius == 0.0`)
+/// `lens` is ignored — `pixel_color` passes `(0.0, 0.0)` and this
+/// function takes its fast path.
+fn camera_ray(c: &Camera, aspect: f64, xt: f64, yt: f64, lens: (f64, f64)) -> Vector {
     // Map normalized pixel coordinates [0, 1] to view-plane offsets [-1, 1].
     // The y axis is flipped so that yt=0 (top of image) corresponds to
     // +up in the camera's local frame, matching standard image orientation.
@@ -293,6 +359,10 @@ fn camera_ray(c: &Camera, aspect: f64, xt: f64, yt: f64) -> Vector {
     let half_width = c.half_height * aspect;
 
     // direction = forward + sx*half_width*right + sy*half_height*up
+    //
+    // This is the unnormalized view-plane direction: its `forward`
+    // component is exactly 1, so scaling the whole vector by a
+    // distance `d` lands a point exactly `d` units along `forward`.
     let dir = addp(
         addp(
             c.forward,
@@ -301,9 +371,47 @@ fn camera_ray(c: &Camera, aspect: f64, xt: f64, yt: f64) -> Vector {
         scalep(c.up, sy * c.half_height),
     );
 
+    // Pinhole fast path. Bit-identical to the pre-depth-of-field
+    // renderer — same `normalizep(dir)`, same origin — and it skips
+    // the focal-point and lens-offset arithmetic entirely, so a scene
+    // with no depth of field pays nothing for the feature. Keeping
+    // this an explicit branch (rather than letting the thin-lens math
+    // collapse to the same result at `aperture_radius == 0`) is what
+    // guarantees the byte-pinned tests stay byte-identical: scaling
+    // `dir` by `focus_distance` and renormalizing is not bitwise the
+    // same as renormalizing `dir` directly.
+    if c.aperture_radius == 0.0 {
+        return Vector {
+            start: c.location,
+            delta: normalizep(dir),
+        };
+    }
+
+    // Thin-lens path. The focal point is where the pinhole ray would
+    // cross the focus plane: since `dir`'s forward component is 1,
+    // scaling it by `focus_distance` puts the point exactly
+    // `focus_distance` along `forward`.
+    let focal_point = addp(c.location, scalep(dir, c.focus_distance));
+
+    // Jitter the ray origin over the aperture disk, in the camera's
+    // right/up plane. `lens` is already a unit-disk point, so scaling
+    // by `aperture_radius` gives the world-space offset directly.
+    let (lu, lv) = lens;
+    let origin = addp(
+        c.location,
+        addp(
+            scalep(c.right, lu * c.aperture_radius),
+            scalep(c.up, lv * c.aperture_radius),
+        ),
+    );
+
+    // Every ray for this sub-pixel sample aims at the same focal
+    // point, so geometry at the focus plane converges (stays sharp)
+    // while nearer/farther geometry spreads across the aperture
+    // (blurs).
     Vector {
-        start: c.location,
-        delta: normalizep(dir),
+        start: origin,
+        delta: normalizep(subp(focal_point, origin)),
     }
 }
 
@@ -619,6 +727,22 @@ fn pixel_color(
     // `samples` grows.
     let (ox, oy) = sampler::cranley_patterson_offset(x, y);
 
+    // Depth-of-field lens sampling. Only meaningful when the camera
+    // has a nonzero aperture; for a pinhole camera we skip the
+    // per-sample lens-coordinate work entirely and `camera_ray` takes
+    // its bit-identical pinhole branch. This mirrors the `want_time`
+    // pattern in `render_one_row` — branch on the feature flag once,
+    // outside the hot loop, so the disabled case costs nothing. The
+    // lens sample gets its own Cranley-Patterson rotation (distinct
+    // hash seed) so the aperture coordinate is decorrelated from the
+    // sub-pixel coordinate of the same sample index.
+    let dof = camera.camera.aperture_radius != 0.0;
+    let (lox, loy) = if dof {
+        sampler::cranley_patterson_lens_offset(x, y)
+    } else {
+        (0.0, 0.0)
+    };
+
     // Min/max spread metric: track per-channel min and max across
     // all samples taken so far. After each batch, the per-channel
     // spread is `max - min`; the loop terminates when the largest
@@ -676,8 +800,25 @@ fn pixel_color(
             let xt = (x as f64 + sx - 0.5) * camera.dx;
             let yt = (y as f64 + sy - 0.5) * camera.dy;
 
+            // Lens sample for depth of field. When `dof` is false
+            // this stays `(0.0, 0.0)` and `camera_ray` ignores it via
+            // the pinhole branch — no `halton_lens` / `concentric_disk`
+            // calls on the pinhole path. When `dof` is true, the lens
+            // Halton point gets the lens CP rotation, then the
+            // concentric mapping turns it into a unit-disk aperture
+            // offset.
+            let lens = if dof {
+                let (lhx, lhy) = sampler::halton_lens(i + 1);
+                sampler::concentric_disk(
+                    (lhx + lox).fract(),
+                    (lhy + loy).fract(),
+                )
+            } else {
+                (0.0, 0.0)
+            };
+
             let rc = ray_color(
-                &camera_ray(&camera.camera, camera.aspect, xt, yt),
+                &camera_ray(&camera.camera, camera.aspect, xt, yt, lens),
                 scene,
                 lights,
                 Depth::zero(),

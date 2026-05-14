@@ -8,24 +8,40 @@
 //
 // You must not remove this notice, or any other, from this software.
 
-//! Sub-pixel sample positioning.
+//! Sub-pixel and lens sample positioning.
 //!
-//! The Halton-(2, 3) low-discrepancy sequence drives `pixel_color`'s
-//! sub-pixel offsets. Sample positions are indexed by sample number,
-//! so the adaptive-termination loop in `pixel_color` can extend the
-//! sample count for any individual pixel without quality cliffs —
-//! sample `i` always has a well-defined position no matter how many
-//! samples a pixel ultimately takes. Phase 2 of the
-//! adaptive-oversampling plan made this load-bearing: pixels in flat
-//! regions terminate at `min_samples`, pixels on edges sample further,
-//! and the Halton sequence stays well-distributed for all of them.
+//! The Halton low-discrepancy sequence drives `pixel_color`'s
+//! sub-pixel offsets (and, for depth-of-field cameras, the aperture
+//! sample). Sample positions are indexed by sample number, so the
+//! adaptive-termination loop in `pixel_color` can extend the sample
+//! count for any individual pixel without quality cliffs — sample
+//! `i` always has a well-defined position no matter how many samples
+//! a pixel ultimately takes. Phase 2 of the adaptive-oversampling
+//! plan made this load-bearing: pixels in flat regions terminate at
+//! `min_samples`, pixels on edges sample further, and the Halton
+//! sequence stays well-distributed for all of them.
 //!
-//! Two pieces, both stateless:
+//! The pieces, all stateless:
 //!
 //! * `halton_pair(i)` — radical-inverse base 2 for the x coordinate,
 //!   base 3 for y. Returns a point in `[0, 1)²`. `i = 0` returns the
 //!   pixel corner `(0, 0)`; callers should start at `i = 1` so the
-//!   first sample lands inside the pixel.
+//!   first sample lands inside the pixel. This is the sub-pixel
+//!   (anti-aliasing) sample.
+//!
+//! * `halton_lens(i)` — the same idea on bases 5 and 7, used for the
+//!   depth-of-field aperture sample. A separate pair of bases keeps
+//!   the lens coordinate from being correlated with the sub-pixel
+//!   coordinate of the same sample index. Higher bases have slightly
+//!   worse distribution than (2, 3), but 5 and 7 are still fine for
+//!   the modest per-pixel sample counts here.
+//!
+//! * `concentric_disk(u, v)` — maps a `[0, 1)²` point (e.g. a
+//!   rotated `halton_lens` value) onto the unit disk via the
+//!   Shirley–Chiu concentric mapping. Used to turn the lens Halton
+//!   sample into an aperture offset. Concentric mapping preserves
+//!   area and adjacency far better than the naive
+//!   `r = √u, θ = 2πv` polar map, which matters for clean bokeh.
 //!
 //! * `cranley_patterson_offset(x, y)` — a per-pixel `(ox, oy)`
 //!   rotation in `[0, 1)²` derived from the pixel coordinates. The
@@ -36,6 +52,12 @@
 //!   noise instead. The hash is a splitmix64-style mixer; nothing
 //!   here is cryptographic — the only property we need is that
 //!   different `(x, y)` produce well-spread offsets.
+//!
+//! * `cranley_patterson_lens_offset(x, y)` — the same rotation for
+//!   the lens sample, with a distinct hash seed so the lens
+//!   rotation is decorrelated from the sub-pixel rotation. Both go
+//!   through the same `cp_hash` helper; the seed is the only
+//!   difference.
 
 /// Radical inverse in `base`, evaluated at index `i`. Returns a value
 /// in `[0, 1)`. For `i = 0` returns `0.0`. Standard low-discrepancy
@@ -68,26 +90,87 @@ pub fn halton_pair(i: u32) -> (f64, f64) {
     (radical_inverse(2, i), radical_inverse(3, i))
 }
 
-/// A deterministic per-pixel `(ox, oy)` offset in `[0, 1)²` derived
-/// from the pixel coordinates. Adding this to a Halton point and
-/// taking the fractional part rotates the sequence by a different
-/// vector for each pixel — Cranley-Patterson rotation —
-/// decorrelating neighbors so that any structural sampling artifact
-/// dissolves into per-pixel noise.
+/// The pair `(H_5(i), H_7(i))` — point `i` of the 2D Halton sequence
+/// with bases 5 and 7, used for the depth-of-field aperture sample.
+/// Returned values are in `[0, 1)²`.
+///
+/// Distinct bases from `halton_pair` so that, for a given sample
+/// index `i`, the lens coordinate and the sub-pixel coordinate are
+/// drawn from different sequences and aren't correlated. As with
+/// `halton_pair`, `i = 0` returns `(0, 0)` (a corner); callers pass
+/// `i >= 1`.
+pub fn halton_lens(i: u32) -> (f64, f64) {
+    (radical_inverse(5, i), radical_inverse(7, i))
+}
+
+/// Shirley–Chiu concentric mapping from the unit square to the unit
+/// disk. Takes `(u, v)` in `[0, 1)²` (typically a Cranley-Patterson-
+/// rotated `halton_lens` value) and returns a point `(x, y)` with
+/// `x² + y² <= 1` — an offset on the camera's aperture disk.
+///
+/// The mapping divides the square into four triangular wedges and
+/// maps each to a quarter of the disk, so equal-area regions of the
+/// square map to equal-area regions of the disk and neighbouring
+/// square points stay neighbouring on the disk. That low distortion
+/// is what keeps depth-of-field blur disks (bokeh) smooth instead of
+/// clumped — the naive `r = √u, θ = 2πv` polar map oversamples the
+/// rim relative to the centre and shows it.
+///
+/// The exact centre `(0.5, 0.5)` maps to the origin; the special-case
+/// guard avoids a `0/0` in the `b / a` ratio there.
+pub fn concentric_disk(u: f64, v: f64) -> (f64, f64) {
+    // Remap [0, 1)² to [-1, 1]².
+    let a = 2.0 * u - 1.0;
+    let b = 2.0 * v - 1.0;
+
+    // Degenerate centre point: no well-defined angle, and the ratio
+    // below would be 0/0. Map it straight to the disk centre.
+    if a == 0.0 && b == 0.0 {
+        return (0.0, 0.0);
+    }
+
+    use std::f64::consts::FRAC_PI_4;
+
+    // Pick the wedge by whichever of |a|, |b| dominates: `r` is the
+    // dominant coordinate (so |r| is the Chebyshev distance, which
+    // becomes the disk radius), and `theta` sweeps ±45° within the
+    // wedge.
+    let (r, theta) = if a * a > b * b {
+        (a, FRAC_PI_4 * (b / a))
+    } else {
+        (b, FRAC_PI_4 * 2.0 - FRAC_PI_4 * (a / b))
+    };
+
+    (r * theta.cos(), r * theta.sin())
+}
+
+/// Core hash behind the Cranley-Patterson rotations: maps a pixel
+/// coordinate plus a `seed` to an `(ox, oy)` offset in `[0, 1)²`.
+///
+/// The `seed` lets two independent rotations (sub-pixel and lens)
+/// share this hash without colliding — different seeds give
+/// uncorrelated offsets for the same pixel. `seed = 0` is folded in
+/// as `+ 0` (`0u64.wrapping_mul(_) == 0`), so the seed-0 result is
+/// bit-for-bit what the original seedless `cranley_patterson_offset`
+/// produced — important, because the byte-pinned tests in
+/// `tests/sdl_suite.rs` render through this exact sub-pixel offset.
 ///
 /// The hash is a Weyl-style accumulation followed by a splitmix64
 /// finalizer. The constants are odd 64-bit values, chosen for good
 /// avalanche behavior; nothing about the choice depends on the pixel
 /// dimensions, so axis-aligned arrays of any size remain
 /// well-decorrelated.
-pub fn cranley_patterson_offset(x: u32, y: u32) -> (f64, f64) {
+fn cp_hash(x: u32, y: u32, seed: u64) -> (f64, f64) {
     // Weyl-style accumulation: each coordinate gets multiplied by a
     // different large odd constant and the results are summed. Odd
     // multipliers ensure that no input bits are lost to a power-of-two
     // factor, which keeps small (x, y) pairs (the top-left corner of
-    // the image) from mapping to small or correlated hashes.
+    // the image) from mapping to small or correlated hashes. The seed
+    // joins the accumulation the same way; with `seed = 0` this term
+    // is exactly 0 and the hash is unchanged from the seedless form.
     let mut h = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     h = h.wrapping_add((y as u64).wrapping_mul(0xBB67_AE85_84CA_A73B));
+    h = h.wrapping_add(seed.wrapping_mul(0xD1B5_4A32_D192_ED03));
 
     // splitmix64 finalizer: three rounds of "xor with right-shift,
     // multiply by an odd constant." Standard avalanche pattern; the
@@ -106,6 +189,28 @@ pub fn cranley_patterson_offset(x: u32, y: u32) -> (f64, f64) {
     let hi = ((h >> 32) as u32) as f64;
     let denom = (1u64 << 32) as f64;
     (lo / denom, hi / denom)
+}
+
+/// A deterministic per-pixel `(ox, oy)` offset in `[0, 1)²` derived
+/// from the pixel coordinates. Adding this to a `halton_pair` point
+/// and taking the fractional part rotates the sequence by a
+/// different vector for each pixel — Cranley-Patterson rotation —
+/// decorrelating neighbors so that any structural sampling artifact
+/// dissolves into per-pixel noise.
+pub fn cranley_patterson_offset(x: u32, y: u32) -> (f64, f64) {
+    cp_hash(x, y, 0)
+}
+
+/// The Cranley-Patterson rotation for the depth-of-field lens sample:
+/// a per-pixel `(ox, oy)` offset in `[0, 1)²` applied to a
+/// `halton_lens` point before it's mapped onto the aperture disk.
+///
+/// Uses a distinct hash seed from `cranley_patterson_offset`, so a
+/// pixel's lens rotation is uncorrelated with its sub-pixel rotation
+/// — the two sampled dimensions stay independent even though both
+/// are keyed off the same `(x, y)`.
+pub fn cranley_patterson_lens_offset(x: u32, y: u32) -> (f64, f64) {
+    cp_hash(x, y, 1)
 }
 
 #[cfg(test)]
@@ -202,5 +307,94 @@ mod tests {
         assert_ne!(a, c);
         assert_ne!(a, d);
         assert_ne!(b, c);
+    }
+
+    /// First few base-5 / base-7 radical inverses, the bases
+    /// `halton_lens` uses. H_5(1) = 1/5, H_5(2) = 2/5; H_7(1) = 1/7.
+    #[test]
+    fn halton_lens_known_values() {
+        let (x1, y1) = halton_lens(1);
+        assert!((x1 - 0.2).abs() < 1e-15, "H_5(1) = {}", x1);
+        assert!((y1 - 1.0 / 7.0).abs() < 1e-15, "H_7(1) = {}", y1);
+        let (x2, _) = halton_lens(2);
+        assert!((x2 - 0.4).abs() < 1e-15, "H_5(2) = {}", x2);
+    }
+
+    /// `halton_lens` stays in `[0, 1)²` across a modest index range —
+    /// same contract as `halton_pair`, since the lens point is fed
+    /// through the same Cranley-Patterson rotation before use.
+    #[test]
+    fn halton_lens_in_unit_square() {
+        for i in 0..1024 {
+            let (a, b) = halton_lens(i);
+            assert!(a >= 0.0 && a < 1.0, "lens x out of range at i={}: {}", i, a);
+            assert!(b >= 0.0 && b < 1.0, "lens y out of range at i={}: {}", i, b);
+        }
+    }
+
+    /// The concentric map never escapes the unit disk: every
+    /// `[0, 1)²` input maps to a point with `x² + y² <= 1`. If it
+    /// did escape, depth-of-field rays would aim from outside the
+    /// intended aperture.
+    #[test]
+    fn concentric_disk_within_unit_disk() {
+        for ui in 0..64 {
+            for vi in 0..64 {
+                let u = ui as f64 / 64.0;
+                let v = vi as f64 / 64.0;
+                let (x, y) = concentric_disk(u, v);
+                let r2 = x * x + y * y;
+                // Small slack for floating-point error at the rim.
+                assert!(
+                    r2 <= 1.0 + 1e-9,
+                    "concentric_disk({}, {}) = ({}, {}), r² = {}",
+                    u, v, x, y, r2
+                );
+            }
+        }
+    }
+
+    /// The centre of the square maps to the centre of the disk, and
+    /// the four square corners map to the rim (radius ≈ 1).
+    #[test]
+    fn concentric_disk_landmarks() {
+        let (cx, cy) = concentric_disk(0.5, 0.5);
+        assert!(
+            cx.abs() < 1e-15 && cy.abs() < 1e-15,
+            "centre maps to ({}, {})",
+            cx, cy
+        );
+        for &(u, v) in &[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+            let (x, y) = concentric_disk(u, v);
+            let r = (x * x + y * y).sqrt();
+            assert!(
+                (r - 1.0).abs() < 1e-12,
+                "corner ({}, {}) maps to radius {}",
+                u, v, r
+            );
+        }
+    }
+
+    /// The lens Cranley-Patterson rotation is in range and is
+    /// decorrelated from the sub-pixel rotation: for the same pixel,
+    /// the seeded lens offset must differ from the seedless sub-pixel
+    /// offset. (If the seed weren't actually folded into the hash,
+    /// these would be identical and the two sampled dimensions would
+    /// march in lockstep.)
+    #[test]
+    fn lens_cp_offset_distinct_from_pixel() {
+        for x in 0..64 {
+            for y in 0..64 {
+                let (a, b) = cranley_patterson_lens_offset(x, y);
+                assert!(a >= 0.0 && a < 1.0, "lens CP x out of range: {}", a);
+                assert!(b >= 0.0 && b < 1.0, "lens CP y out of range: {}", b);
+                assert_ne!(
+                    cranley_patterson_lens_offset(x, y),
+                    cranley_patterson_offset(x, y),
+                    "lens and pixel CP offsets collided at ({}, {})",
+                    x, y
+                );
+            }
+        }
     }
 }

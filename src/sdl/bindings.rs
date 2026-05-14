@@ -73,6 +73,7 @@ pub fn install(env: &EnvRef) {
     // Cameras.
     define_native(env, "camera-looking-at", builtin_camera_looking_at);
     define_native(env, "camera-with-fov", builtin_camera_with_fov);
+    define_native(env, "camera-dof", builtin_camera_dof);
 
     // Leaf shapes.
     define_native(env, "sphere", builtin_sphere);
@@ -571,6 +572,28 @@ fn builtin_camera_with_fov(args: &[Value], pos: &Position) -> Value {
     let up_hint = require_point(&args[2], "camera-with-fov up-hint", pos);
     let fov = require_number(&args[3], "camera-with-fov fov-radians", pos);
     Value::Camera(Camera::with_fov(location, look_at, up_hint, fov))
+}
+
+/// `(camera-dof location look-at up-hint zoom aperture-radius)` —
+/// depth-of-field camera. Same framing as `camera-looking-at`, plus a
+/// thin-lens aperture of radius `aperture-radius` (world units). The
+/// focus distance is the location→look-at distance, so the look-at
+/// point is sharp and nearer/farther geometry blurs. An
+/// `aperture-radius` of 0 is exactly `camera-looking-at`.
+///
+/// Positional rather than map-keyed: it's the same four arguments as
+/// `camera-looking-at` with one more on the end, and a separate
+/// constructor keeps `camera-looking-at` callers untouched. Focusing
+/// at a depth other than the look-at point is a Phase 2 ergonomics
+/// item, not exposed here yet.
+fn builtin_camera_dof(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 5, "camera-dof", pos);
+    let location = require_point(&args[0], "camera-dof location", pos);
+    let look_at = require_point(&args[1], "camera-dof look-at", pos);
+    let up_hint = require_point(&args[2], "camera-dof up-hint", pos);
+    let zoom = require_number(&args[3], "camera-dof zoom", pos);
+    let aperture_radius = require_number(&args[4], "camera-dof aperture-radius", pos);
+    Value::Camera(Camera::with_dof(location, look_at, up_hint, zoom, aperture_radius))
 }
 
 // ---------------------------------------------------------------------------

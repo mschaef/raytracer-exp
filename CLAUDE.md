@@ -231,27 +231,42 @@ the Rust functions above with the same composition semantics.
 
 ## The Camera
 
-Standard look-at model with a precomputed orthonormal basis:
+Standard look-at model with a precomputed orthonormal basis, plus an
+optional thin-lens aperture for depth of field:
 
 ```rust
 pub struct Camera {
     pub location: Point,
-    pub forward: Point,    // unit
-    pub right: Point,      // unit
-    pub up: Point,         // unit, re-orthogonalized from up_hint
-    pub half_height: f64,  // half of view-plane height at unit distance
+    pub forward: Point,        // unit
+    pub right: Point,          // unit
+    pub up: Point,             // unit, re-orthogonalized from up_hint
+    pub half_height: f64,      // half of view-plane height at unit distance
+    pub aperture_radius: f64,  // 0.0 = ideal pinhole; >0 = depth-of-field blur
+    pub focus_distance: f64,   // depth (along forward) that stays sharp
 }
 ```
 
-Built via `Camera::looking_at(location, look_at, up_hint, zoom)` or
-`Camera::with_fov(location, look_at, up_hint, fov_radians)`. The user's
-`up_hint` doesn't have to be perpendicular to `forward`; the constructor
-projects out the parallel component. It will panic if `up_hint` is *parallel*
-to `forward` (no orientation degree of freedom).
+Built via `Camera::looking_at(location, look_at, up_hint, zoom)`,
+`Camera::with_fov(location, look_at, up_hint, fov_radians)`, or
+`Camera::with_dof(location, look_at, up_hint, zoom, aperture_radius)`.
+The user's `up_hint` doesn't have to be perpendicular to `forward`; the
+constructor projects out the parallel component. It will panic if
+`up_hint` is *parallel* to `forward` (no orientation degree of freedom).
 
 `zoom = 1.0` corresponds to vertical FOV ≈ 53° and matches the framing of the
 older fixed camera. `with_fov` is a thin wrapper that converts to zoom and
 forwards to `looking_at`.
+
+`looking_at` and `with_fov` set `aperture_radius = 0.0` — an ideal
+pinhole — and `focus_distance` to the `location`→`look_at` distance
+(inert while the aperture is 0). `with_dof` is `looking_at` with the
+aperture overridden: the look-at point is the focus plane, geometry
+nearer or farther blurs by an amount that grows with
+`aperture_radius`. `camera_ray` takes an explicit pinhole fast-path
+branch when `aperture_radius == 0.0` that is bit-identical to the
+pre-depth-of-field renderer; the thin-lens path aims every sub-pixel
+sample's ray at the same focal point from a jittered origin on the
+aperture disk. See "Depth of field: implementation plan."
 
 Aspect ratio is the renderer's concern, not the camera's. `CameraDetails`
 caches `aspect = imgx / imgy` and `camera_ray` computes `half_width` per call.
@@ -1112,6 +1127,52 @@ Approximate order of recent commits, oldest first:
     cast a soft, partial shadow on the checker floor rather than a
     solid one.
 
+29. **Depth of field phase 1: thin-lens camera.** The camera can now
+    have a finite aperture, producing depth-of-field blur. `Camera`
+    gained `aperture_radius: f64` (world units; `0.0` = ideal
+    pinhole) and `focus_distance: f64` (depth along `forward` that
+    stays sharp). `Camera::looking_at` / `with_fov` set
+    `aperture_radius = 0.0` and `focus_distance` to the
+    `location`→`look_at` distance; a new `Camera::with_dof(location,
+    look_at, up_hint, zoom, aperture_radius)` is `looking_at` with
+    the aperture overridden (focus stays on the look-at point —
+    focusing at some other depth is a Phase 2 ergonomics item).
+    `camera_ray` gained a `lens: (f64, f64)` parameter (a unit-disk
+    point) and an explicit pinhole fast-path branch: when
+    `aperture_radius == 0.0` it returns exactly the pre-DOF
+    `Vector { start: location, delta: normalizep(dir) }`, which is
+    what keeps the byte-pinned tests bit-identical — scaling `dir`
+    by `focus_distance` and renormalizing is *not* bitwise the same
+    as renormalizing `dir` directly, so the zero-aperture case can't
+    just fall out of the thin-lens math. The thin-lens path computes
+    the focal point (`location + focus_distance * dir`, exploiting
+    that `dir`'s forward component is exactly 1) and jitters the ray
+    origin over the aperture disk in the `right`/`up` plane.
+    `render::sampler` gained the lens-sampling pieces: `halton_lens`
+    (bases 5, 7 — distinct from `halton_pair`'s 2, 3 so the lens and
+    sub-pixel coordinates of a given sample index are uncorrelated),
+    `concentric_disk` (Shirley–Chiu unit-square→unit-disk mapping,
+    for smooth bokeh), and `cranley_patterson_lens_offset` (the lens
+    CP rotation; the existing `cranley_patterson_offset` was
+    refactored to share a `cp_hash(x, y, seed)` helper, with seed 0
+    folded in as `+ 0` so its output is bit-identical to before).
+    `pixel_color` computes the lens sample per sub-pixel sample, but
+    only when `aperture_radius != 0.0` — the `dof` flag is hoisted
+    outside the loop exactly like `render_one_row`'s `want_time`, so
+    the pinhole path makes no `halton_lens` / `concentric_disk`
+    calls and pays nothing for the feature. SDL: a positional
+    `(camera-dof location look-at up-hint zoom aperture-radius)`
+    binding alongside `camera-looking-at` / `camera-with-fov`; a
+    zero aperture argument makes it structurally equal to the
+    `camera-looking-at` camera. New `scenes/depth_of_field_test.lisp`
+    (three spheres at staggered depths, the middle one on the focus
+    plane) with a `depth_of_field_test_scene_loads` smoke test;
+    `tests/sdl/bindings_camera.lisp` extended for `camera-dof`, and
+    new unit tests in `src/render/sampler.rs` for the lens sampler
+    functions. Existing scenes render byte-identically — aperture
+    defaults to 0.0 and the pinhole branch is bit-identical — so the
+    byte-pinned tests in `tests/sdl_suite.rs` are unaffected.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -1407,13 +1468,15 @@ time should improve.
 
 ### Relationship to depth of field
 
-DOF is the next big feature after this lands (see "Future directions").
-The `Sampler` abstraction from Phase 1 is what makes DOF cheap: aperture
-jittering uses the same sample-index-keyed sequence, and adaptive
-termination from Phase 2 routes the extra samples that DOF needs (for
-clean bokeh) only to the out-of-focus pixels that actually have
-variance. Doing adaptive first means DOF gets adaptive sample
-distribution for free instead of forcing a global oversample crank.
+DOF Phase 1 has since landed on top of this work — see "Depth of
+field: implementation plan". The sampler abstraction from Phase 1 is
+what made it cheap: aperture jittering uses the same
+sample-index-keyed sequence (`halton_lens`, distinct bases from the
+sub-pixel `halton_pair`), so the lens sample for sample `i` has a
+well-defined position no matter how many samples a pixel takes. The
+claim that adaptive termination "routes the extra samples DOF needs
+to the out-of-focus pixels for free" is exactly what DOF Phase 2
+sets out to verify against the sample-count heatmap.
 
 ## Transparency / transmission: implementation plan
 
@@ -1469,6 +1532,81 @@ one. Existing scenes must render byte-identically across both phases
 (they do — `transparency` defaults to 0.0 and opaque occluders
 reproduce the old binary shadow behavior exactly), which the
 byte-pinned tests in `tests/sdl_suite.rs` pin down.
+
+## Depth of field: implementation plan
+
+Adds a thin-lens camera so scenes can have depth-of-field blur —
+geometry away from the focus plane goes soft, the amount of blur set
+by an aperture radius. The work splits into two phases. Phase 1 (the
+complete rendering-side feature) is done; Phase 2 (ergonomics and
+adaptive-sampling interplay) is optional polish that benefits from
+landing after Phase 1 is renderable.
+
+### The model
+
+A thin-lens camera replaces the pinhole. A pinhole camera originates
+every primary ray at the single point `camera.location`; the
+thin-lens version picks a jittered origin on a disk of
+`aperture_radius` around `location` (in the `right`/`up` plane) and
+aims it at the **focal point** — the spot on the focus plane
+(perpendicular to `forward`, at `focus_distance`) the pinhole ray
+would have passed through. Rays for in-focus geometry converge
+regardless of where on the lens they start; rays for out-of-focus
+geometry spread, producing blur. `aperture_radius = 0` reduces to the
+pinhole exactly — and `camera_ray` keeps that as an explicit branch
+so it's *bit-identical*, not just numerically close (see entry 29).
+
+### Phase 1 — Thin-lens camera
+
+Done; see "Recent work history" entry 29. Summary: `Camera` gained
+`aperture_radius` + `focus_distance`, `Camera::with_dof` constructs a
+DOF camera (focus on the look-at point), `camera_ray` gained a lens
+sample parameter and a pinhole fast-path branch, `render::sampler`
+gained `halton_lens` / `concentric_disk` /
+`cranley_patterson_lens_offset`, and `pixel_color` threads a
+per-sample lens point through — but only when the aperture is
+nonzero. SDL: a positional `(camera-dof ...)` constructor. Existing
+scenes render byte-identically (aperture defaults to 0.0).
+
+### Phase 2 — Ergonomics and adaptive interplay
+
+Deferred so Phase 1 stayed focused on a working core. Candidates,
+none of them required for the feature to function:
+
+- **Adaptive-sampling interaction.** DOF is the first feature to
+  introduce pixel variance that *isn't* a geometric edge — the
+  adaptive-oversampling plan anticipated this ("DOF gets adaptive
+  sample distribution for free"). Phase 2 verifies that with the
+  existing `render-samples.png` heatmap: out-of-focus regions
+  *should* pull more samples automatically. If a smoothly-blurred
+  area instead under-samples (low local variance but still visibly
+  noisy) or over-samples badly, that's a real tuning question —
+  possibly `min_samples` guidance, possibly a metric tweak. Can't be
+  assessed until Phase 1 is renderable, which is why it's its own
+  checkpoint.
+- **Focus and aperture ergonomics.** An explicit focus distance
+  independent of the look-at point (focus nearer/farther than the
+  subject); aperture expressed as an f-number rather than a raw
+  world-unit radius; possibly an autofocus-on-a-named-object helper.
+  Which of these earn their keep is easier to judge with Phase 1 in
+  hand. A new positional constructor is the likely shape for any of
+  them — the user has flagged possible SDL geometry-format changes
+  that could affect a map-keyed camera later, so positional stays
+  the convention for now.
+- **A DOF-specific diagnostic** if one turns out to be warranted.
+
+### Verification
+
+Phase 1: render `scenes/depth_of_field_test.lisp` — the middle green
+sphere (on the focus plane) should be sharp, the red and blue
+spheres (nearer and farther) visibly blurred, the blur growing with
+the `0.3` aperture radius. Existing scenes must render
+byte-identically (they do — aperture defaults to 0.0 and
+`camera_ray`'s pinhole branch is bit-identical), which the
+byte-pinned tests in `tests/sdl_suite.rs` pin down. The lens sampler
+functions have unit tests in `src/render/sampler.rs` (concentric map
+stays in the unit disk, landmarks map correctly, lens CP rotation is
+decorrelated from the sub-pixel rotation).
 
 ## Future directions
 
@@ -1547,13 +1685,11 @@ the `transmit` recursion budget in `Depth`); refraction is "bend the
 transmitted ray and weight reflection vs. transmission by Fresnel"
 rather than a from-scratch feature.
 
-**Depth of field.** Aperture-based ray jittering at `camera_ray` time,
-with a focus distance on the camera. The Halton sampler in
-`render::sampler` plus the adaptive-sampling loop in `pixel_color` are
-exactly the right hooks: aperture jitter uses the same per-sample
-Halton index (a third base — 5 — could carry the aperture
-coordinate), and the variance-driven termination naturally routes
-extra samples to out-of-focus regions that actually need them.
+**Depth of field.** Phase 1 (the thin-lens camera) has landed — see
+"Depth of field: implementation plan" and "The Camera". What's left
+is the Phase 2 ergonomics work captured in that plan section
+(explicit focus distance, f-number aperture, verifying the
+adaptive-sampling interplay).
 
 **Scene definition language.** See the dedicated "Scene definition
 language: implementation plan" section above — this is the next major

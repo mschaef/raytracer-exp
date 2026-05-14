@@ -26,6 +26,26 @@
 ; conversion isn't guaranteed to be bit-identical to zoom=1 here).
 (assert (camera? (camera-with-fov [0 10 0] [0 0 0] [0 0 1] 0.5)))
 
+; camera-dof: depth-of-field camera, same framing as camera-looking-at
+; plus an aperture radius.
+(def cd (camera-dof [0 10 0] [0 0 0] [0 0 1] 1.0 0.3))
+(assert (camera? cd))
+
+; Same parameters → structurally equal.
+(assert= cd (camera-dof [0 10 0] [0 0 0] [0 0 1] 1.0 0.3))
+
+; A different aperture → different camera.
+(assert (not= cd (camera-dof [0 10 0] [0 0 0] [0 0 1] 1.0 0.5)))
+
+; camera-dof with a zero aperture is exactly camera-looking-at: same
+; framing, focus distance set the same way, aperture 0. This is the
+; invariant that keeps the pinhole fast path in camera_ray
+; byte-identical to the pre-DOF renderer.
+(assert= c1 (camera-dof [0 10 0] [0 0 0] [0 0 1] 1.0 0))
+
+; Aperture accepted as int or float (numeric coercion).
+(assert (camera? (camera-dof [0 10 0] [0 0 0] [0 0 1] 1.0 1)))
+
 ; Negative checks.
 (assert (not (camera? nil)))
 (assert (not (camera? [0 10 0])))
