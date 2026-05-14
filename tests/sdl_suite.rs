@@ -450,6 +450,11 @@ fn sphere_surface_test_scene_loads() {
 }
 
 #[test]
+fn transparency_test_scene_loads() {
+    assert_scene_loads("transparency_test.lisp", "transparency-test-scene");
+}
+
+#[test]
 fn transform_test_scene_loads() {
     assert_scene_loads("transform_test.lisp", "transform-test-scene");
 }

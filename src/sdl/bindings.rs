@@ -46,7 +46,7 @@ use crate::render::shapes::{
     Triangle,
 };
 use crate::render::transform::Affine;
-use crate::render::{Camera, Light, Scene, Surface};
+use crate::render::{Camera, HeatmapTargets, Light, Scene, Surface};
 
 use crate::sdl::env::EnvRef;
 use crate::sdl::error::Position;
@@ -494,12 +494,18 @@ fn require_u32(v: &Value, ctx: &str, pos: &Position) -> u32 {
 // Surface
 // ---------------------------------------------------------------------------
 
-/// `(surface {:color [r g b] :ambient n :specular n :light n :checked b :reflection n})`
+/// `(surface {:color [r g b] :ambient n :specular n :light n :checked b
+///            :reflection n :transparency n})`
 ///
 /// All keys except `:color` have defaults. The defaults match an
 /// uninteresting matte surface so that omitting a key gives a
 /// predictable result (no specular highlight, full diffuse, no
-/// reflection, no checkering).
+/// reflection, no checkering, fully opaque).
+///
+/// `:transparency` is the Phase 1 transmission coefficient in
+/// `[0.0, 1.0]` — `0.0` (the default) is fully opaque, `1.0` is
+/// fully see-through. Omitting it reproduces every pre-transparency
+/// scene exactly.
 fn builtin_surface(args: &[Value], pos: &Position) -> Value {
     require_arity(args, 1, "surface", pos);
     let map = require_map(&args[0], "surface", pos);
@@ -510,6 +516,7 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
     let light = maybe_key_number(&map, "light", "surface", pos).unwrap_or(1.0);
     let checked = maybe_key_bool(&map, "checked", "surface", pos).unwrap_or(false);
     let reflection = maybe_key_number(&map, "reflection", "surface", pos).unwrap_or(0.0);
+    let transparency = maybe_key_number(&map, "transparency", "surface", pos).unwrap_or(0.0);
 
     Value::Surface(Surface {
         color,
@@ -518,6 +525,7 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
         light,
         checked,
         reflection,
+        transparency,
     })
 }
 
@@ -881,8 +889,8 @@ fn builtin_aabb(args: &[Value], pos: &Position) -> Value {
 // ---------------------------------------------------------------------------
 
 /// `(scene {:name "..." :camera C :background [r g b] :objects [...]
-///          :reflect-limit n :min-samples n :max-samples m
-///          :variance-threshold t})`
+///          :reflect-limit n :transmit-limit n :min-samples n
+///          :max-samples m :variance-threshold t})`
 ///
 /// After the stage-2 collapse the scene is a single top-level
 /// `Shape`. `:objects` is exposed at the SDL surface as a list for
@@ -958,6 +966,15 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
     let reflect_limit = maybe_key_int(&map, "reflect-limit", "scene", pos)
         .unwrap_or(2) as u32;
 
+    // Transmission recursion cap for transparent surfaces. Default 8 —
+    // generous enough for a ray through several stacked transparent
+    // surfaces, since transmission depth is naturally larger than
+    // reflection depth (see Scene::transmit_limit). Scenes with no
+    // transparent surfaces never spawn a transmitted ray, so the
+    // value is irrelevant to them.
+    let transmit_limit = maybe_key_int(&map, "transmit-limit", "scene", pos)
+        .unwrap_or(8) as u32;
+
     // Adaptive-sampling defaults: 4 samples on flat surfaces (which
     // matches the previous fixed `oversample = 2` cost exactly), up
     // to 32 in noisy regions, with a per-channel min/max spread of
@@ -975,6 +992,7 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         root,
         background,
         reflect_limit,
+        transmit_limit,
         min_samples,
         max_samples,
         variance_threshold,
@@ -1076,7 +1094,8 @@ fn builtin_render(args: &[Value], pos: &Position) -> Value {
     let width = require_u32(&args[2], "render width", pos);
     let height = require_u32(&args[3], "render height", pos);
 
-    render(&scene, width, height, target.as_render_target(), None, true);
+    render(&scene, width, height, target.as_render_target(),
+           HeatmapTargets::default(), true);
 
     // Hand the target back so chained pipelines work without holding
     // a separate binding. The Rc is cheap to clone.

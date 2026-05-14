@@ -14,13 +14,12 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Instant;
 
-use raytracer::render::{render, Scene};
+use raytracer::render::{render, HeatmapTargets, Scene};
 use raytracer::render::output::{
     PngTarget,
     StreamTarget,
     ProgressTarget,
     RenderTarget,
-    HeatmapTarget,
     HeatmapScale,
     PngHeatmapTarget,
 };
@@ -132,7 +131,7 @@ fn load_scene(path: &Path) -> Scene {
 
 fn render_into<T: RenderTarget + ?Sized>(
     target: &T,
-    heatmap: Option<&dyn HeatmapTarget>,
+    heatmaps: HeatmapTargets<'_>,
     scene: &Scene, w: u32, h: u32,
 ) {
     let parallel = is_parallel();
@@ -144,7 +143,7 @@ fn render_into<T: RenderTarget + ?Sized>(
     let progress = ProgressTarget::new(target, h, &scene.name);
 
     let start = Instant::now();
-    render(scene, w, h, &progress, heatmap, parallel);
+    render(scene, w, h, &progress, heatmaps, parallel);
     let duration = start.elapsed();
 
     println!("Time elapsed in {} is: {:?} (parallel: {})", scene.name, duration, parallel);
@@ -188,12 +187,28 @@ fn main() {
     let scene = load_scene(&script_path);
     let (width, height) = image_size();
 
-    // Parallel heatmap target: same dimensions as the pixel target,
-    // accumulating per-pixel render times in nanoseconds. Saved as a
-    // separate single-channel PNG (`render-heatmap.png`) at the end.
-    // The renderer always populates this; switching to `None` in the
-    // `render_into` calls below would skip it.
-    let heatmap = PngHeatmapTarget::new(width, height);
+    // Diagnostic heatmaps: same dimensions as the pixel target.
+    //
+    // - `time_heatmap` accumulates per-pixel render time in
+    //   nanoseconds; saved as `render-heatmap.png`.
+    // - `samples_heatmap` accumulates per-pixel adaptive sample
+    //   counts; saved as `render-samples.png`. The two views
+    //   correlate strongly with each other, but they're not
+    //   redundant — time picks up per-sample cost variation (a
+    //   ray that hits the teapot's BVH is more expensive than one
+    //   that hits a plane, even at the same sample count), while
+    //   sample count isolates "where is the adaptive sampler
+    //   actually working harder."
+    //
+    // Both are always built. Switch either to `None` in the
+    // `HeatmapTargets` below and `render()` skips its per-pixel
+    // bookkeeping for that metric entirely.
+    let time_heatmap = PngHeatmapTarget::new(width, height);
+    let samples_heatmap = PngHeatmapTarget::new(width, height);
+    let heatmaps = HeatmapTargets {
+        time: Some(&time_heatmap),
+        samples: Some(&samples_heatmap),
+    };
 
     // RTVIEW_ADDR=host:port routes pixels to a streaming receiver
     // instead of writing render.png. With the quadrant layout gone
@@ -204,18 +219,28 @@ fn main() {
         Ok(addr) => {
             let target = StreamTarget::connect(&addr, width, height)
                 .expect("rtview receiver not reachable at RTVIEW_ADDR");
-            render_into(&target, Some(&heatmap), &scene, width, height);
+            render_into(&target, heatmaps, &scene, width, height);
         }
         Err(_) => {
             let target = PngTarget::new(width, height);
-            render_into(&target, Some(&heatmap), &scene, width, height);
+            render_into(&target, heatmaps, &scene, width, height);
             target.save("render.png").unwrap();
         }
     }
 
-    // `HeatmapScale::Log` compresses the bright end so the body of the
-    // distribution gets more grayscale gradient — useful when scenes
-    // contain a complex mesh alongside cheap primitives. Swap to
-    // `HeatmapScale::Linear` to see direct proportional brightness.
-    heatmap.save("render-heatmap.png", HeatmapScale::Log).unwrap();
+    // Time heatmap: `HeatmapScale::Log` compresses the bright end so
+    // the body of the distribution gets more grayscale gradient —
+    // useful when scenes contain a complex mesh alongside cheap
+    // primitives, where a handful of expensive pixels otherwise
+    // dominate the dynamic range even after the 99th-percentile
+    // clamp. Swap to `Linear` to see direct proportional brightness.
+    time_heatmap.save("render-heatmap.png", HeatmapScale::Log).unwrap();
+
+    // Sample-count heatmap: `HeatmapScale::Linear`. Sample counts are
+    // bounded between `min_samples` and `max_samples` (4..32 with the
+    // defaults), so the distribution isn't heavy-tailed and log
+    // compression would mislead — proportional brightness is the
+    // honest read of "how many samples did this pixel take vs. the
+    // typical pixel."
+    samples_heatmap.save("render-samples.png", HeatmapScale::Linear).unwrap();
 }

@@ -55,7 +55,20 @@ pub struct Surface {
     pub specular: f64,
     pub light: f64,
     pub checked: bool,
-    pub reflection: f64
+    pub reflection: f64,
+    /// Transmission coefficient in `[0.0, 1.0]`. `0.0` is fully
+    /// opaque (the default for every pre-transparency scene); `1.0`
+    /// is fully see-through. `shade_pixel` blends the surface's own
+    /// opaque shading with the color seen *through* the surface as
+    /// `lerp(opaque, transmitted, transparency)`.
+    ///
+    /// Phase 1 transmission is *non-refractive*: the transmitted ray
+    /// continues in the incoming direction without bending. Refraction
+    /// (Snell's law, per-surface IOR) is deferred to a later phase.
+    /// Note also that Phase 1 shadow rays do not yet honor
+    /// transparency — a transparent object still casts a solid
+    /// shadow; that's Phase 2.
+    pub transparency: f64,
 }
 
 /// A point light source. Carries an emitted color and a scalar intensity
@@ -202,6 +215,21 @@ pub struct Scene {
 
     pub reflect_limit: u32,
 
+    /// Maximum transmission recursion depth for transparent surfaces.
+    /// A primary ray that passes through a transparent surface spawns
+    /// a transmitted ray; that ray can hit another transparent
+    /// surface and spawn another, and so on. `transmit_limit` caps
+    /// that chain — at the cap a transparent surface renders as if
+    /// it were opaque.
+    ///
+    /// This is a *separate* budget from `reflect_limit` (tracked by
+    /// the independent `transmit` counter in `Depth`) because the two
+    /// kinds of recursion have different natural depths: a ray
+    /// passing through N stacked transparent panes legitimately needs
+    /// N transmission levels, whereas mirror bounces rarely need more
+    /// than a handful. The SDL default is 8.
+    pub transmit_limit: u32,
+
     /// Adaptive oversampling parameters. The per-pixel sample loop in
     /// `pixel_color` takes at least `min_samples` samples, then keeps
     /// going batch-by-batch while the per-channel min/max spread
@@ -228,6 +256,27 @@ pub struct Scene {
     /// (better quality, slower); higher → cheaper, more apparent
     /// noise.
     pub variance_threshold: f64,
+}
+
+/// Optional diagnostic heatmap targets that `render()` populates
+/// alongside the main pixel target. Each slot is independent: pass
+/// `None` for the ones you don't want, and the renderer skips the
+/// per-pixel bookkeeping for that metric entirely (no `Instant::now`
+/// calls when `time` is `None`, no sample-count counter writes when
+/// `samples` is `None`). `HeatmapTargets::default()` is "neither" —
+/// equivalent to the old `heatmap: None` parameter, and what call
+/// sites that don't care about diagnostics should use.
+///
+/// Each heatmap is a separate `&dyn HeatmapTarget` so they can be
+/// different storage choices if a caller wants — e.g. an in-memory
+/// PNG buffer for time but a streaming target for sample count, or
+/// the same `PngHeatmapTarget` for both (though sharing a single
+/// target between the two slots would conflate the metrics in one
+/// buffer and isn't usually what you want).
+#[derive(Default, Clone, Copy)]
+pub struct HeatmapTargets<'a> {
+    pub time: Option<&'a dyn HeatmapTarget>,
+    pub samples: Option<&'a dyn HeatmapTarget>,
 }
 
 pub trait Hittable {
@@ -313,7 +362,30 @@ fn light_vector(point: &Point, scene: &Scene, light: &Light) -> Option<Vector> {
     }
 }
 
-fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, reflect_count: u32) -> LinearColor {
+/// Recursion-budget tracker threaded through `ray_color` /
+/// `shade_pixel`. Reflection and transmission carry *independent*
+/// depth counters, checked against `Scene::reflect_limit` and
+/// `Scene::transmit_limit` respectively — see the doc comment on
+/// `Scene::transmit_limit` for why the two budgets are kept separate.
+///
+/// `Copy` (two `u32`s), so it threads through the recursion by value
+/// with no ceremony; `..depth` struct-update syntax bumps one counter
+/// while carrying the other through unchanged.
+#[derive(Copy, Clone, Debug)]
+struct Depth {
+    reflect: u32,
+    transmit: u32,
+}
+
+impl Depth {
+    /// The starting budget for a primary (camera) ray: no reflection
+    /// or transmission bounces spent yet.
+    fn zero() -> Depth {
+        Depth { reflect: 0, transmit: 0 }
+    }
+}
+
+fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, depth: Depth) -> LinearColor {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
     let scolor = if hit.surface.checked {
@@ -328,13 +400,13 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, refl
 
     let ambient: LinearColor = scale_linear_color(&scolor, hit.surface.ambient);
 
-    let reflected: LinearColor = if (hit.surface.reflection > EPSILON) && (reflect_count < scene.reflect_limit) {
+    let reflected: LinearColor = if (hit.surface.reflection > EPSILON) && (depth.reflect < scene.reflect_limit) {
         let rvec = subp(negp(ray.delta), scalep(hit.normal, 2.0 * dotp(negp(ray.delta), hit.normal)));
 
         let rcolor = ray_color(&Vector {
             start: hit.hit_point,
             delta: normalizep(rvec)
-        }, scene, lights, reflect_count + 1);
+        }, scene, lights, Depth { reflect: depth.reflect + 1, ..depth });
 
         scale_linear_color(&rcolor, hit.surface.reflection)
     } else {
@@ -374,12 +446,55 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, refl
         }
     }
 
-    add_linear_color(&reflected, &add_linear_color(&ambient, &light))
+    // The surface's opaque shading: ambient + direct lighting +
+    // mirror reflection. For an opaque surface (transparency == 0)
+    // this is the final color.
+    let opaque = add_linear_color(&reflected, &add_linear_color(&ambient, &light));
+
+    // Transmission. When the surface is at all transparent (and we
+    // haven't hit the recursion cap), cast a *straight-through* ray —
+    // same direction as the incoming ray, originating at the hit
+    // point — and blend its color in by the transparency coefficient.
+    //
+    // Phase 1 is deliberately non-refractive: the transmitted ray
+    // doesn't bend, so a solid transparent sphere shows the geometry
+    // behind it undistorted, plus its own back surface. Refraction is
+    // a later phase.
+    //
+    // No epsilon offset is needed on the transmitted ray's start
+    // point: every primitive's `hit_test` already rejects `t <=
+    // EPSILON`, so the surface we're leaving is discarded and the ray
+    // continues to the next surface — exactly the same self-
+    // intersection guard the reflection ray above relies on.
+    //
+    // At the recursion cap (`depth.transmit >= scene.transmit_limit`)
+    // a transparent surface falls back to rendering fully opaque,
+    // which is a graceful, bounded degradation.
+    if (hit.surface.transparency > EPSILON) && (depth.transmit < scene.transmit_limit) {
+        let transmitted = ray_color(
+            &Vector {
+                start: hit.hit_point,
+                delta: ray.delta,
+            },
+            scene,
+            lights,
+            Depth { transmit: depth.transmit + 1, ..depth },
+        );
+
+        // lerp(opaque, transmitted, transparency)
+        let t = hit.surface.transparency;
+        add_linear_color(
+            &scale_linear_color(&opaque, 1.0 - t),
+            &scale_linear_color(&transmitted, t),
+        )
+    } else {
+        opaque
+    }
 }
 
-fn ray_color(ray: &Vector, scene: &Scene, lights: &[Light], reflect_count: u32) -> LinearColor {
+fn ray_color(ray: &Vector, scene: &Scene, lights: &[Light], depth: Depth) -> LinearColor {
     match scene.root.hit_test(ray) {
-        Some(hit) => shade_pixel(ray, scene, lights, &hit, reflect_count),
+        Some(hit) => shade_pixel(ray, scene, lights, &hit, depth),
         None => scene.background
     }
 }
@@ -391,13 +506,22 @@ fn ray_color(ray: &Vector, scene: &Scene, lights: &[Light], reflect_count: u32) 
 /// of the new loop intuitive ("two samples deep in each axis").
 const SAMPLE_BATCH: u32 = 4;
 
+/// Compute one pixel's color via the adaptive sampling loop, and
+/// return the sample count alongside it.
+///
+/// The sample count is what the Phase 3 sample-count heatmap renders.
+/// We return it always (rather than gating on whether a heatmap is
+/// active) — it's a single `u32` per pixel and the renderer's caller
+/// is free to ignore it. Threading "maybe collect the count" through
+/// here as a flag or builder would be more bookkeeping than just
+/// always returning it.
 fn pixel_color(
     camera: &CameraDetails,
     scene: &Scene,
     lights: &[Light],
     x: u32,
     y: u32,
-) -> LinearColor {
+) -> (LinearColor, u32) {
     // Phase 2 of the adaptive-oversampling plan: sample count per
     // pixel is variable, driven by a per-channel min/max spread
     // check. The loop takes at least `min_samples` samples, then
@@ -473,7 +597,7 @@ fn pixel_color(
                 &camera_ray(&camera.camera, camera.aspect, xt, yt),
                 scene,
                 lights,
-                0,
+                Depth::zero(),
             );
 
             sum = add_linear_color(&sum, &rc);
@@ -507,12 +631,12 @@ fn pixel_color(
         }
     }
 
-    scale_linear_color(&sum, 1.0 / samples as f64)
+    (scale_linear_color(&sum, 1.0 / samples as f64), samples)
 }
 
 fn render_one_row<T: RenderTarget + ?Sized>(
     target: &T,
-    heatmap: Option<&dyn HeatmapTarget>,
+    heatmaps: HeatmapTargets<'_>,
     camera: &CameraDetails,
     scene: &Scene,
     lights: &[Light],
@@ -522,15 +646,37 @@ fn render_one_row<T: RenderTarget + ?Sized>(
     let mut row = vec![[0.0f64; 3]; imgx as usize];
 
     // Branch outside the per-pixel loop so the heatmap-disabled case
-    // compiles to the same machine code as before this feature existed
-    // — no Instant::now calls, no per-pixel allocation, no extra
-    // bookkeeping. The hot path stays hot when the user isn't asking
-    // for a heat map.
-    if let Some(h) = heatmap {
-        let mut timings = vec![0u32; imgx as usize];
-        for x in 0..imgx {
-            let start = Instant::now();
-            let pc = pixel_color(camera, scene, lights, x, y);
+    // compiles to nearly the same machine code as before this feature
+    // existed — no `Instant::now` calls when time isn't requested, no
+    // per-pixel sample-count writes when that heatmap isn't requested,
+    // no allocation for either. The hot path stays hot when the
+    // caller isn't asking for diagnostics.
+    //
+    // Allocating the per-metric buffers conditionally keeps the
+    // common "both heatmaps requested" path one Vec per metric per
+    // row (same cost characteristics as before, when the single
+    // timing buffer was conditional). "Neither heatmap" stays
+    // allocation-free for the metric buffers; just the pixel-color
+    // row remains.
+    let want_time = heatmaps.time.is_some();
+    let want_samples = heatmaps.samples.is_some();
+
+    let mut timings: Vec<u32> = if want_time { vec![0u32; imgx as usize] } else { Vec::new() };
+    let mut sample_counts: Vec<u32> =
+        if want_samples { vec![0u32; imgx as usize] } else { Vec::new() };
+
+    for x in 0..imgx {
+        // Timer is started conditionally: when `want_time` is false,
+        // there's no `Instant::now` call at all, which is what made
+        // the original "heatmap disabled" path compile to the same
+        // code as the pre-feature renderer. We preserve that property
+        // for the time metric.
+        let start_ns = if want_time { Some(Instant::now()) } else { None };
+
+        let (pc, samples) = pixel_color(camera, scene, lights, x, y);
+        row[x as usize] = pc;
+
+        if let Some(start) = start_ns {
             // Saturate at u32::MAX nanoseconds (~4.29 s) rather than
             // wrapping silently. A pixel that takes longer than that
             // shows up as "max-bright" on the heat map, which is
@@ -538,15 +684,18 @@ fn render_one_row<T: RenderTarget + ?Sized>(
             // misreport an outlier as a fast pixel.
             let elapsed_ns = start.elapsed().as_nanos();
             timings[x as usize] = u32::try_from(elapsed_ns).unwrap_or(u32::MAX);
-            row[x as usize] = pc;
         }
-        target.submit_row(0, y, &row);
-        h.submit_timing_row(0, y, &timings);
-    } else {
-        for x in 0..imgx {
-            row[x as usize] = pixel_color(camera, scene, lights, x, y);
+        if want_samples {
+            sample_counts[x as usize] = samples;
         }
-        target.submit_row(0, y, &row);
+    }
+
+    target.submit_row(0, y, &row);
+    if let Some(h) = heatmaps.time {
+        h.submit_metric_row(0, y, &timings);
+    }
+    if let Some(h) = heatmaps.samples {
+        h.submit_metric_row(0, y, &sample_counts);
     }
 }
 
@@ -554,11 +703,15 @@ fn render_one_row<T: RenderTarget + ?Sized>(
 /// into `target`. The renderer no longer allocates an image of its own —
 /// where pixels go and what becomes of them is the target's concern.
 ///
-/// If `heatmap` is `Some(_)`, the renderer additionally measures the wall
-/// time of each `pixel_color` call and submits per-pixel timings as `u32`
-/// nanoseconds to the heatmap target. With `heatmap = None` there is zero
-/// per-pixel overhead — no `Instant::now` calls, no extra allocation, and
-/// no extra branching in the hot loop.
+/// `heatmaps` selects which (if any) diagnostic per-pixel metrics get
+/// collected and submitted alongside the main render. The `time` slot
+/// is per-pixel wall time in nanoseconds; the `samples` slot is the
+/// per-pixel adaptive sample count. `HeatmapTargets::default()` is
+/// the zero-overhead "neither" case — no `Instant::now` calls when
+/// time is `None`, no per-pixel sample-count writes when samples is
+/// `None`, and no allocation for either metric buffer. With both
+/// requested, the cost is one Vec<u32> per metric per row, dwarfed
+/// by ray-tracing cost.
 ///
 /// Under `parallel = true`, rows are computed across Rayon's thread pool;
 /// `target.submit_row` will be called concurrently from multiple threads
@@ -569,7 +722,7 @@ pub fn render<T: RenderTarget + ?Sized>(
     imgx: u32,
     imgy: u32,
     target: &T,
-    heatmap: Option<&dyn HeatmapTarget>,
+    heatmaps: HeatmapTargets<'_>,
     parallel: bool,
 ) {
     let camera = CameraDetails {
@@ -592,19 +745,23 @@ pub fn render<T: RenderTarget + ?Sized>(
 
     if parallel {
         (0..imgy).into_par_iter().for_each(
-            | y | render_one_row(target, heatmap, &camera, scene, lights, imgx, y)
+            | y | render_one_row(target, heatmaps, &camera, scene, lights, imgx, y)
         );
     } else {
         (0..imgy).for_each(
-            | y | render_one_row(target, heatmap, &camera, scene, lights, imgx, y)
+            | y | render_one_row(target, heatmaps, &camera, scene, lights, imgx, y)
         );
     }
 
-    // Signal end-of-render to the target. Default impl is a no-op;
-    // ProgressTarget uses this to emit a final newline, future
-    // streaming targets will use it to send a "done" message, etc.
+    // Signal end-of-render to every active output target. Default
+    // impl on each trait is a no-op; ProgressTarget emits a final
+    // newline, future streaming targets will send a "done" message,
+    // and so on.
     target.finish();
-    if let Some(h) = heatmap {
+    if let Some(h) = heatmaps.time {
+        h.finish();
+    }
+    if let Some(h) = heatmaps.samples {
         h.finish();
     }
 }

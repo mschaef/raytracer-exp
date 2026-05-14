@@ -12,7 +12,8 @@ shading, hard shadows, mirror reflections, hierarchical scene composition with
 affine transforms, and a look-at camera. Rendering is parallelized with Rayon.
 
 The binary takes a single scene file path on the command line and writes
-`render.png` (and `render-heatmap.png`) in the current directory:
+`render.png` (and `render-heatmap.png`, `render-samples.png`) in the
+current directory:
 
 ```
 cargo run --release -- scenes/teapot.lisp
@@ -32,9 +33,11 @@ src/
   main.rs              Entry point. Takes a single SDL file path on
                        the command line, derives the canonical
                        `<stem>-scene` binding from the filename, and
-                       renders the scene to render.png (and a heatmap
-                       to render-heatmap.png). Reads SIZE, PARALLEL,
-                       and RTVIEW_ADDR env vars. Multi-scene
+                       renders the scene to render.png alongside two
+                       diagnostic heatmaps (render-heatmap.png for
+                       per-pixel render time, render-samples.png for
+                       per-pixel adaptive-sample count). Reads SIZE,
+                       PARALLEL, and RTVIEW_ADDR env vars. Multi-scene
                        compositing and animation are expected to move
                        into the SDL — see "Future directions."
 
@@ -62,11 +65,16 @@ src/
                          without any special-casing.
     render/output.rs     The `RenderTarget` trait plus the `PngTarget`,
                          `OffsetTarget`, and `ProgressTarget` impls, AND
-                         the parallel `HeatmapTarget` trait with
-                         `PngHeatmapTarget` and `OffsetHeatmapTarget`. The
-                         renderer pushes finished rows into a target rather
-                         than returning an image, and (optionally) per-pixel
-                         timings into a heatmap target; `image` crate use is
+                         the parallel `HeatmapTarget` trait (one method,
+                         `submit_metric_row(x, y, &[u32])`, where the
+                         metric's meaning — render time, sample count,
+                         anything else — is determined by the renderer
+                         slot it's fed through) with `PngHeatmapTarget`
+                         and `OffsetHeatmapTarget`. The renderer pushes
+                         finished rows into a target rather than returning
+                         an image, and (optionally) per-pixel diagnostic
+                         metrics into one or more heatmap targets via the
+                         `HeatmapTargets` struct; `image` crate use is
                          fully encapsulated here.
 
   sdl/                 The scene definition language. See the
@@ -285,16 +293,32 @@ the future).
 
 ## Surface model
 
-`Surface { color, ambient, specular, light, checked, reflection }`. Lighting is
-Lambertian diffuse + Phong specular (50-power), with ambient as a flat
-multiplier of the surface color and a single bounce of mirror reflection
+`Surface { color, ambient, specular, light, checked, reflection, transparency }`.
+Lighting is Lambertian diffuse + Phong specular (50-power), with ambient as a
+flat multiplier of the surface color and a single bounce of mirror reflection
 (recursion gated by `Scene::reflect_limit`). The `checked` flag enables a
 simple world-space checker pattern keyed off `floor(x+y+z)`.
 
-Surface presets and the `glossy` / `reflective` constructor helpers live
-in `scenes/_common.lisp`. Common ones: `surface-red`, `surface-green`, …,
-`surface-white-c` (the reflective checkered ground used by most scenes).
-Every `scenes/<name>.lisp` file pulls these in via `(load "_common.lisp")`.
+`transparency` (0.0 = opaque, 1.0 = fully see-through) is the Phase 1
+transmission coefficient. `shade_pixel` computes the surface's opaque
+shading (ambient + direct lighting + reflection), then — if the surface
+is at all transparent — casts a *straight-through* transmitted ray
+(same direction as the incoming ray, originating at the hit point) and
+returns `lerp(opaque, transmitted, transparency)`. Phase 1 transmission
+is non-refractive: the transmitted ray does not bend, so geometry behind
+a transparent surface shows up undistorted. Transmission recursion is
+gated by `Scene::transmit_limit` — a separate budget from `reflect_limit`,
+tracked by the independent `transmit` counter in the private `Depth`
+struct that threads through `ray_color` / `shade_pixel`. Phase 1 shadow
+rays do *not* yet honor transparency — a transparent object still casts a
+solid shadow; that's Phase 2 (see "Transparency / transmission:
+implementation plan").
+
+Surface presets and the `glossy` / `reflective` / `glassy` constructor
+helpers live in `scenes/_common.lisp`. Common ones: `surface-red`,
+`surface-green`, …, `surface-white-c` (the reflective checkered ground
+used by most scenes). Every `scenes/<name>.lisp` file pulls these in via
+`(load "_common.lisp")`.
 
 ## Lights
 
@@ -958,6 +982,84 @@ Approximate order of recent commits, oldest first:
     through the same deterministic sampler and now the same
     deterministic batch-of-1 sample-count path.
 
+26. **Adaptive oversampling phase 3: sample-count heatmap.** Second
+    diagnostic output. `main.rs` now writes a `render-samples.png`
+    grayscale heatmap alongside `render-heatmap.png` — black where
+    the adaptive loop terminated at `min_samples` (flat regions),
+    bright where it kept going (geometric edges, high-contrast
+    areas, the silhouette of a complex mesh). The two heatmaps
+    correlate strongly but aren't redundant: time picks up
+    per-sample cost variation (a ray through the teapot's BVH is
+    expensive even at one sample), sample count isolates "where is
+    the sampler actually working harder per sample." Implementation:
+    the `HeatmapTarget` trait was generalized — the lone method got
+    renamed from `submit_timing_row` (with `timings_ns: &[u32]`) to
+    `submit_metric_row` (with `metric: &[u32]`), and `PngHeatmapTarget`'s
+    docstring relaxed from "per-pixel timings" to "u32 per pixel
+    metric, whatever the renderer fed in." The storage and normalization
+    code didn't change at all — both metrics are u32-per-pixel and
+    fit the same 99th-percentile clamp + grayscale-PNG output
+    machinery. `render()` traded its `heatmap: Option<&dyn
+    HeatmapTarget>` parameter for a new `HeatmapTargets<'a>` struct
+    with two slots (`time` and `samples`), each `Option<&'a dyn
+    HeatmapTarget>`; `HeatmapTargets::default()` is the zero-overhead
+    "neither" case. `pixel_color`'s return type became
+    `(LinearColor, u32)` (color + sample count taken); always
+    returning the count is cheaper than threading a "do you want
+    it?" flag through to gate the assignment. `render_one_row` now
+    conditionally allocates timing and sample-count buffers based
+    on which slots are populated, preserving the original "no
+    `Instant::now` calls when time is disabled" property and
+    extending it to samples. `main.rs::main` builds both
+    heatmaps unconditionally and routes them through
+    `HeatmapTargets { time: Some(&t), samples: Some(&s) }`; the
+    sample-count save uses `HeatmapScale::Linear` (the distribution
+    is bounded between `min_samples` and `max_samples`, so the log
+    compression that helps the time heatmap would mislead here).
+    SDL render binding (`builtin_render`) passes
+    `HeatmapTargets::default()` — heatmaps aren't exposed at the
+    SDL surface yet, future work. No test changes: the byte-pinned
+    tests still go through render() unchanged in the no-heatmap
+    case, and the SDL test scripts use the SDL binding which now
+    passes `HeatmapTargets::default()` instead of `None`.
+
+27. **Transparency phase 1: non-refractive transmission.** Surfaces
+    can now be partially see-through. `Surface` gained a
+    `transparency: f64` field (0.0 = opaque, 1.0 = fully
+    transmissive); `Scene` gained `transmit_limit: u32` (the
+    transmission-recursion cap, default 8 at the SDL surface). A
+    new private `Depth { reflect, transmit }` struct replaced the
+    bare `reflect_count: u32` parameter threaded through
+    `ray_color` / `shade_pixel` — reflection and transmission carry
+    independent depth counters checked against `reflect_limit` and
+    `transmit_limit` respectively, because a ray through N stacked
+    transparent surfaces legitimately needs N transmission levels,
+    a different scale of depth than mirror bounces. `shade_pixel`
+    computes the opaque shading exactly as before (now bound to a
+    local `opaque`), then — when `transparency > EPSILON` and the
+    transmit budget isn't spent — casts a *straight-through*
+    transmitted ray (incoming direction unchanged, origin at the
+    hit point; no epsilon offset needed since every primitive's
+    `hit_test` already rejects `t <= EPSILON`, discarding the
+    surface being left) and returns
+    `lerp(opaque, transmitted, transparency)`. At the recursion cap
+    a transparent surface falls back to rendering fully opaque.
+    Phase 1 is deliberately non-refractive — the transmitted ray
+    doesn't bend — and shadow rays still treat any hit as full
+    occlusion, so transparent objects cast solid shadows for now
+    (Phase 2). SDL surface: `(surface ...)` gained an optional
+    `:transparency` key (default 0.0), `(scene ...)` gained an
+    optional `:transmit-limit` key (default 8), and
+    `scenes/_common.lisp` gained a `glassy` helper alongside
+    `glossy` / `reflective`. Since `transparency` defaults to 0.0,
+    every existing scene renders byte-identically — the
+    byte-pinned tests in `tests/sdl_suite.rs` are unaffected. New
+    `scenes/transparency_test.lisp` (a glassy sphere in front of an
+    opaque red one, both on the checker ground) with a
+    `transparency_test_scene_loads` smoke test;
+    `tests/sdl/bindings_surface.lisp` extended to exercise the
+    `:transparency` key and its default.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -1195,17 +1297,15 @@ Done; see "Recent work history."
 
 ### Phase 3 — Diagnostics and polish
 
-Small enough to fold into Phase 2 unless it grows. Candidates:
+Sample-count heatmap landed — see "Recent work history." Remaining
+candidate:
 
-- A "sample count" heatmap mode recording `n_samples` per pixel
-  alongside (or instead of) per-pixel timing. The existing
-  `HeatmapTarget` machinery handles this with a separate target type
-  or a payload variant; the time heatmap already correlates strongly
-  with sample count, so this is a nice-to-have, not a need.
 - A way to disable adaptive sampling for benchmark comparisons —
   either an env var (`ADAPTIVE=0` forces uniform sampling at
   `max_samples`) or a Scene field. Useful for sanity-checking the
-  speed-up and for visual diffing.
+  speed-up and for visual diffing against the pre-adaptive renderer.
+  Hasn't shipped because there's no concrete need yet; landing the
+  sample-count heatmap was the more useful diagnostic.
 
 ### Decisions still open
 
@@ -1242,14 +1342,16 @@ Settled in Phase 2:
 ### Verification
 
 Phase 2 should produce noticeably faster `cargo run --release` timings
-on every existing scene with no visible quality regression. The
-heatmap (still per-pixel time, not sample count yet — that's a Phase 3
-candidate) becomes a sample-count proxy at this point, and is the
-go-to diagnostic for "is adaptive doing what it claims": bright pixels
-on geometric edges, dim pixels in flat regions. End-to-end check is
-rendering `scenes/teapot.lisp` (or another non-trivial scene) before
-and after a change and comparing both the elapsed-time line and the
-rendered PNG. PNG should look equivalent; time should improve.
+on every existing scene with no visible quality regression. The two
+heatmap outputs in `main.rs` give complementary views: `render-heatmap.png`
+shows per-pixel render time (where the renderer spent wall clock),
+`render-samples.png` shows per-pixel adaptive sample count (where the
+sampler kept going past `min_samples`). Bright pixels on geometric edges,
+dim pixels in flat regions — that's adaptive sampling working as
+intended. End-to-end check is rendering `scenes/teapot.lisp` (or another
+non-trivial scene) before and after a change and comparing the
+elapsed-time line and the rendered PNG. PNG should look equivalent;
+time should improve.
 
 ### Relationship to depth of field
 
@@ -1260,6 +1362,89 @@ termination from Phase 2 routes the extra samples that DOF needs (for
 clean bokeh) only to the out-of-focus pixels that actually have
 variance. Doing adaptive first means DOF gets adaptive sample
 distribution for free instead of forcing a global oversample crank.
+
+## Transparency / transmission: implementation plan
+
+Adds see-through surfaces to the renderer. The work splits into two
+phases that ship back-to-back. Phase 1 (transmission for primary and
+reflection rays, non-refractive) is done; Phase 2 (transparent
+shadows) immediately follows. Refraction — Snell's-law bending and
+per-surface IOR — is explicitly *not* part of this plan; it's a
+later, larger piece of work that builds on the transmission
+machinery landed here.
+
+### Phase 1 — Transmission through surfaces
+
+Done; see "Recent work history" entry 27. Summary: `Surface` gained
+`transparency: f64`, `Scene` gained `transmit_limit: u32`, a private
+`Depth { reflect, transmit }` struct replaced the bare
+`reflect_count` parameter, and `shade_pixel` blends
+`lerp(opaque, transmitted, transparency)` using a straight-through
+(non-refractive) transmitted ray. SDL surface: `:transparency` on
+`(surface ...)`, `:transmit-limit` on `(scene ...)`, a `glassy`
+helper in `_common.lisp`.
+
+### Phase 2 — Transparent shadows
+
+The Phase 1 limitation: `light_vector` treats *any* hit on the
+shadow ray as full occlusion, so a transparent object casts a solid
+black shadow — visually wrong for glass. Phase 2 makes shadow rays
+honor transparency.
+
+The change is concentrated in `light_vector` (in `render.rs`). Today
+it returns `Option<Vector>` — `Some` means "light reaches the point,"
+`None` means "fully occluded." That binary needs to become an
+*accumulated transmittance*: walk the shadow ray, and for every
+occluder between the point and the light, multiply in
+`(1 - occluder.transparency)` (or pass transmittance through tinted
+by the occluder color, if we want colored shadows — decide when the
+phase begins). An opaque occluder drives transmittance to 0 and we
+can stop early; a fully transparent one contributes nothing and the
+walk continues. The shading loop in `shade_pixel` then scales each
+light's diffuse + specular contribution by that transmittance
+instead of gating it on a boolean.
+
+Implementation notes / open questions to settle when the phase
+starts:
+
+- **Traversal shape.** `light_vector` currently calls
+  `scene.root.hit_test` once and inspects the single nearest hit.
+  Accumulating transmittance needs *all* occluders along the
+  segment, not just the nearest — so this needs either a repeated
+  "nearest hit, advance past it, repeat" loop or a dedicated
+  traversal that collects every hit in the `[EPSILON,
+  light_distance]` range. The repeated-nearest-hit loop is simplest
+  and reuses existing `hit_test`; it's O(occluders²) in the
+  pathological case but occluder counts on a shadow ray are
+  small in practice.
+- **Interaction with the "any-hit" optimization.** CLAUDE.md's
+  Future Directions notes a shadow-ray `any_hit` early-exit
+  optimization. Phase 2 changes the shape of shadow traversal, so
+  the two should be designed together: the early-exit becomes
+  "stop once transmittance hits 0" (an opaque occluder), which is
+  the same early-out, just expressed against accumulated
+  transmittance rather than a boolean.
+- **Colored shadows.** Whether a colored transparent surface tints
+  the light passing through it (red glass → red-tinted shadow) or
+  just attenuates it greyscale. Tinting is barely more code
+  (multiply by the occluder's color, not just `1 - transparency`)
+  and looks markedly better, but it's a small judgment call worth
+  making explicitly.
+- **Determinism.** The byte-pinned equivalence tests in
+  `tests/sdl_suite.rs` use opaque surfaces only, so Phase 2 leaves
+  them unaffected — an opaque occluder still drives transmittance
+  to exactly 0, reproducing the current boolean behavior bit-for-bit.
+
+### Verification
+
+Phase 1: render `scenes/transparency_test.lisp` and confirm the red
+sphere and checker floor are visible through the glassy sphere,
+blended by the 0.7 coefficient, with the glassy sphere's own shading
+still present. Existing scenes must render byte-identically (they do
+— `transparency` defaults to 0.0), which the byte-pinned tests pin
+down. Phase 2: the same scene's glassy sphere should cast a
+*lightened* shadow on the checker floor rather than a solid one;
+compare before/after renders of `transparency_test.lisp`.
 
 ## Future directions
 
@@ -1318,9 +1503,16 @@ variant gets its own `light_vector` arm; the rest of the pipeline doesn't
 change. Area lights specifically open the door to soft shadows and
 require multiple shadow-ray samples per shading point.
 
-**Refraction / transparency.** Substantially more involved — requires Fresnel
-equations, IOR per surface, and accounting for the medium the ray is
-currently traveling through.
+**Refraction.** Non-refractive transparency has landed (see
+"Transparency / transmission: implementation plan" and "Surface
+model"). Refraction proper is substantially more involved — requires
+Snell's-law bending of the transmitted ray, Fresnel equations, IOR
+per surface, and accounting for the medium the ray is currently
+traveling through — but it builds directly on the Phase 1
+transmission machinery (the transmitted-ray cast in `shade_pixel`,
+the `transmit` recursion budget in `Depth`); refraction is "bend the
+transmitted ray and weight reflection vs. transmission by Fresnel"
+rather than a from-scratch feature.
 
 **Depth of field.** Aperture-based ray jittering at `camera_ray` time,
 with a focus distance on the camera. The Halton sampler in

@@ -390,23 +390,30 @@ impl RenderTarget for ArcProgressTarget {
     }
 }
 
-/// Where per-pixel timing data goes when a heat-map render is requested.
+/// Where per-pixel diagnostic data goes when a heat-map render is requested.
 ///
 /// Parallel to `RenderTarget` but separate: the renderer can run with no
-/// heatmap (zero overhead), with one, or — eventually — with multiple
-/// kinds of diagnostic targets without the pixel target needing to know.
+/// heatmap (zero overhead), with one, or with multiple kinds of diagnostic
+/// targets without the pixel target needing to know.
 ///
-/// Times are passed as `u32` nanoseconds. A pixel that takes longer than
-/// `u32::MAX` ns (~4.29 s) saturates at `u32::MAX` rather than wrapping;
-/// the renderer uses `try_from` for the cast so a runaway pixel still
-/// shows up as the brightest possible value rather than silently aliasing
-/// to a small one.
+/// The carried value is `u32` per pixel — what it *means* is whatever the
+/// renderer chose to feed in. Today the renderer can feed two metrics:
+/// per-pixel render time in nanoseconds, and per-pixel adaptive-sample
+/// count. The target itself doesn't care which: it just stores u32 values
+/// and normalizes them at save time. A pixel value that exceeds `u32::MAX`
+/// (e.g. a runaway timing) saturates at the cap rather than wrapping —
+/// the renderer uses `try_from` for the cast so an outlier still appears
+/// as the brightest possible value rather than silently aliasing to a
+/// small one.
 pub trait HeatmapTarget: Send + Sync {
-    /// Hand a finished row of per-pixel timings to the target. Coordinates
-    /// follow the same convention as `RenderTarget::submit_row`.
-    fn submit_timing_row(&self, x: u32, y: u32, timings_ns: &[u32]);
+    /// Hand a finished row of per-pixel metric values to the target.
+    /// Coordinates follow the same convention as `RenderTarget::submit_row`.
+    /// The values' semantics (ns of render time, samples taken, etc.)
+    /// are determined by which `HeatmapTargets` slot the renderer fed
+    /// them through, not by the target itself.
+    fn submit_metric_row(&self, x: u32, y: u32, metric: &[u32]);
 
-    /// Called once by `render()` after every timing row has been submitted.
+    /// Called once by `render()` after every metric row has been submitted.
     /// Default no-op; PNG-on-disk heatmap targets ignore it because saving
     /// is an explicit user action.
     fn finish(&self) {}
@@ -433,16 +440,18 @@ pub enum HeatmapScale {
     Log,
 }
 
-/// Heatmap target backed by an in-memory buffer of per-pixel timings.
-/// Stores `u32` nanoseconds per pixel — 4 bytes per pixel, so a 2048²
-/// render uses 16 MB of timing data, comparable to one channel of a
-/// rendered PNG.
+/// Heatmap target backed by an in-memory buffer of per-pixel `u32`
+/// metric values. 4 bytes per pixel, so a 2048² render uses 16 MB of
+/// metric data, comparable to one channel of a rendered PNG. The
+/// metric's *meaning* is whatever the renderer fed in — per-pixel
+/// timing in nanoseconds, adaptive sample count, etc. — but the
+/// storage and the save-time normalization don't depend on it.
 ///
 /// `save(path, scale)` normalizes against the 99th percentile of
-/// timings (not the absolute max) and writes a single-channel grayscale
-/// PNG where black = fastest pixel and white = at-or-above the 99th
-/// percentile. The percentile clamp keeps a handful of pathologically
-/// slow pixels from dominating the dynamic range; the `scale` parameter
+/// values (not the absolute max) and writes a single-channel grayscale
+/// PNG where black = lowest-value pixel and white = at-or-above the
+/// 99th percentile. The percentile clamp keeps a handful of outlier
+/// pixels from dominating the dynamic range; the `scale` parameter
 /// chooses how the rest of the distribution gets mapped to grayscale.
 /// See `HeatmapScale` for the two options.
 pub struct PngHeatmapTarget {
@@ -476,7 +485,12 @@ impl PngHeatmapTarget {
         //
         // The `.max(1)` guards against a degenerate all-zero render —
         // without it we'd divide by zero. Black-everywhere is the
-        // right output in that case.
+        // right output in that case. The same guard also covers the
+        // tight-distribution case some metrics produce — e.g. a
+        // sample-count heatmap where the 99th percentile equals
+        // `min_samples`, which is a small positive integer — but
+        // there the percentile is already a positive `u32`, so the
+        // `.max(1)` is purely belt-and-braces.
         let cutoff = if buffer.is_empty() {
             1
         } else {
@@ -526,12 +540,12 @@ impl PngHeatmapTarget {
 }
 
 impl HeatmapTarget for PngHeatmapTarget {
-    fn submit_timing_row(&self, x: u32, y: u32, timings_ns: &[u32]) {
+    fn submit_metric_row(&self, x: u32, y: u32, metric: &[u32]) {
         let mut buf = self.buffer.lock().unwrap();
         let row_start = (y as usize) * (self.width as usize) + (x as usize);
         // Single slice copy per row — same cost characteristics as
         // PngTarget's row write, just to a different backing buffer.
-        buf[row_start..row_start + timings_ns.len()].copy_from_slice(timings_ns);
+        buf[row_start..row_start + metric.len()].copy_from_slice(metric);
     }
 }
 
@@ -552,8 +566,8 @@ impl<'a, H: HeatmapTarget + ?Sized + 'a> OffsetHeatmapTarget<'a, H> {
 }
 
 impl<'a, H: HeatmapTarget + ?Sized + 'a> HeatmapTarget for OffsetHeatmapTarget<'a, H> {
-    fn submit_timing_row(&self, x: u32, y: u32, timings_ns: &[u32]) {
-        self.inner.submit_timing_row(x + self.dx, y + self.dy, timings_ns);
+    fn submit_metric_row(&self, x: u32, y: u32, metric: &[u32]) {
+        self.inner.submit_metric_row(x + self.dx, y + self.dy, metric);
     }
     // finish() intentionally not propagated — see struct doc.
 }

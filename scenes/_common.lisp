@@ -49,6 +49,24 @@
               :checked    false
               :reflection 0.2})))
 
+;; `glassy` builds a see-through surface: same matte body + specular
+;; highlight as `glossy`, plus a transmission coefficient. Phase 1
+;; transmission is non-refractive (the transmitted ray continues
+;; straight through), so a `glassy` sphere shows the geometry behind
+;; it undistorted, blended in by `transparency`. Takes the
+;; transparency as a parameter since variable transparency is the
+;; whole point.
+
+(def glassy
+  (fn [color transparency]
+    (surface {:color        color
+              :ambient      ambient
+              :specular     specular
+              :light        light
+              :checked      false
+              :reflection   0.0
+              :transparency transparency})))
+
 ;; --------------------------------------------------------------------
 ;; Surface presets — match SURFACE_* constants in scenes.rs
 ;; --------------------------------------------------------------------
