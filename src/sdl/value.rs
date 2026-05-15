@@ -269,6 +269,7 @@ impl fmt::Display for Value {
                 Shape::Cuboid(_)    => f.write_str("#<shape cuboid>"),
                 Shape::Triangle(_)  => f.write_str("#<shape triangle>"),
                 Shape::Cylinder(_)  => f.write_str("#<shape cylinder>"),
+                Shape::Cone(_)      => f.write_str("#<shape cone>"),
                 Shape::Group(_)     => f.write_str("#<shape group>"),
                 Shape::Transform(_) => f.write_str("#<shape transform>"),
                 Shape::Bounded(_)   => f.write_str("#<shape bounded>"),

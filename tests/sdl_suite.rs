@@ -410,6 +410,16 @@ fn ball_on_plane_scene_loads() {
 }
 
 #[test]
+fn cone_test_scene_loads() {
+    assert_scene_loads("cone_test.lisp", "cone-test-scene");
+}
+
+#[test]
+fn cornell_box_scene_loads() {
+    assert_scene_loads("cornell_box.lisp", "cornell-box-scene");
+}
+
+#[test]
 fn cuboid_test_scene_loads() {
     assert_scene_loads("cuboid_test.lisp", "cuboid-test-scene");
 }

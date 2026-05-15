@@ -87,6 +87,32 @@ pub struct Cylinder {
     pub surface: Surface,
 }
 
+/// A finite, closed, solid cone, parameterized the same way as `Cylinder` —
+/// two end centers and a radius — but with one end collapsed to a point.
+/// `p0` is the **base** center: the flat circular cap of radius `r`. `p1`
+/// is the **apex**: a single point, no cap. The axis is the segment from
+/// `p0` to `p1`; the curved lateral surface is the set of points whose
+/// angle off the axis (measured from the apex) equals the cone's
+/// half-angle `atan(r / |p1 - p0|)`. Rays are tested against the lateral
+/// surface and the single base cap; the nearer qualifying hit wins.
+///
+/// Unlike `Cylinder`, the two ends are **not** interchangeable — `p0`
+/// carries the radius, `p1` is the point. Swapping them turns the cone
+/// inside out.
+///
+/// The same transform caveat as `Cylinder` applies: a uniformly-scaled
+/// cone is still a cone, but a non-uniformly-scaled cone is an elliptical
+/// cone this primitive can't represent. Wrap cones in `Transform`
+/// (rotate, translate, uniform scale); don't bake a non-uniform scale
+/// into `r` or `(p1 - p0)`.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Cone {
+    pub p0: Point,
+    pub p1: Point,
+    pub r: f64,
+    pub surface: Surface,
+}
+
 /// Axis-aligned bounding box. Used as the acceleration primitive for the
 /// `Bounded` variant: a ray that misses the AABB doesn't need to recurse
 /// into the wrapped subtree at all.
@@ -237,6 +263,7 @@ pub enum Shape {
     Cuboid(Cuboid),
     Triangle(Triangle),
     Cylinder(Cylinder),
+    Cone(Cone),
     Group(Vec<Shape>),
     Transform(Box<Transformed>),
     Bounded(Box<Bounded>),
@@ -295,6 +322,10 @@ impl From<Cylinder> for Shape {
     fn from(c: Cylinder) -> Self { Shape::Cylinder(c) }
 }
 
+impl From<Cone> for Shape {
+    fn from(c: Cone) -> Self { Shape::Cone(c) }
+}
+
 impl From<Light> for Shape {
     fn from(l: Light) -> Self { Shape::Light(l) }
 }
@@ -307,6 +338,7 @@ impl Hittable for Shape {
             Shape::Cuboid(c)        => c.hit_test(ray),
             Shape::Triangle(t)      => t.hit_test(ray),
             Shape::Cylinder(c)      => c.hit_test(ray),
+            Shape::Cone(c)          => c.hit_test(ray),
             Shape::Group(children)  => nearest_hit(ray, children),
             Shape::Transform(t)     => t.hit_test(ray),
             Shape::Bounded(b)       => b.hit_test(ray),
@@ -415,6 +447,49 @@ impl Shape {
                             c.p0[0].max(c.p1[0]) + radial[0],
                             c.p0[1].max(c.p1[1]) + radial[1],
                             c.p0[2].max(c.p1[2]) + radial[2],
+                        ],
+                    ))
+                }
+            }
+            Shape::Cone(c) => {
+                // The cone is enclosed by the union of its base disk
+                // (radius r, centered at p0) and its apex point p1. The
+                // base disk's per-axis extent uses the same
+                // r * sqrt(1 - axis_unit[i]²) trick as the cylinder; the
+                // apex contributes no radial extent at all. The clamp to
+                // 0 absorbs floating-point noise when axis_unit isn't
+                // quite unit length.
+                let axis = subp(c.p1, c.p0);
+                let axis_len = lenp(axis);
+                if axis_len < EPSILON {
+                    // Degenerate cone (p0 == p1). Construction should
+                    // reject this, but bounds() must remain total — fall
+                    // back to a sphere-of-radius-r bound at p0.
+                    Some(AABB::new(
+                        [c.p0[0] - c.r, c.p0[1] - c.r, c.p0[2] - c.r],
+                        [c.p0[0] + c.r, c.p0[1] + c.r, c.p0[2] + c.r],
+                    ))
+                } else {
+                    let axis_unit = [
+                        axis[0] / axis_len,
+                        axis[1] / axis_len,
+                        axis[2] / axis_len,
+                    ];
+                    let radial = [
+                        c.r * (1.0 - axis_unit[0] * axis_unit[0]).max(0.0).sqrt(),
+                        c.r * (1.0 - axis_unit[1] * axis_unit[1]).max(0.0).sqrt(),
+                        c.r * (1.0 - axis_unit[2] * axis_unit[2]).max(0.0).sqrt(),
+                    ];
+                    Some(AABB::new(
+                        [
+                            (c.p0[0] - radial[0]).min(c.p1[0]),
+                            (c.p0[1] - radial[1]).min(c.p1[1]),
+                            (c.p0[2] - radial[2]).min(c.p1[2]),
+                        ],
+                        [
+                            (c.p0[0] + radial[0]).max(c.p1[0]),
+                            (c.p0[1] + radial[1]).max(c.p1[1]),
+                            (c.p0[2] + radial[2]).max(c.p1[2]),
                         ],
                     ))
                 }
@@ -533,7 +608,8 @@ impl Shape {
             | Shape::Plane(_)
             | Shape::Cuboid(_)
             | Shape::Triangle(_)
-            | Shape::Cylinder(_) => {}
+            | Shape::Cylinder(_)
+            | Shape::Cone(_) => {}
         }
     }
 }
@@ -1031,6 +1107,149 @@ impl Hittable for Cylinder {
             // actual distance.
             if dotp(radial, radial) <= r_sq {
                 best = Some((t, cap_normal));
+            }
+        }
+
+        best.map(|(t, normal)| RayHit {
+            distance: t,
+            hit_point: ray_location(ray, t),
+            normal,
+            surface: self.surface,
+        })
+    }
+}
+
+impl Hittable for Cone {
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        // Closed-cone ray intersection. Two surfaces — the curved lateral
+        // surface and the single flat base cap at `p0` — are tested, and
+        // the nearer qualifying hit wins. (The apex end has no cap; it's
+        // a point.)
+        //
+        // Lateral surface: the cone is the locus where the angle between
+        // `(P - apex)` and the axis equals the half-angle θ, i.e.
+        // `((P - apex)·axis_unit)² = cos²θ · |P - apex|²`. Substituting the
+        // ray gives a quadratic in t. Two checks trim spurious roots:
+        // `s = (P - apex)·axis_unit` must lie in `[0, axis_len]` — the
+        // upper bound clips at the base plane, and the *lower* bound
+        // (s ≥ 0) is load-bearing: it discards the infinite double cone's
+        // second nappe behind the apex, which the cos²θ equation also
+        // admits.
+        //
+        // Base cap: a flat disk — ray-plane intersection at `p0` followed
+        // by a radial-distance check, tested against the running best-t.
+
+        // axis_unit points apex → base.
+        let axis = subp(self.p0, self.p1);
+        let axis_len = lenp(axis);
+        // Defensive: a degenerate cone (zero-length axis, or a radius
+        // collapsed to a line) is a construction error, but the renderer
+        // shouldn't divide-by-zero if one slips through.
+        if axis_len < EPSILON || self.r < EPSILON {
+            return None;
+        }
+        let axis_unit = scalep(axis, 1.0 / axis_len);
+        let apex = self.p1;
+
+        // cos²θ where θ is the half-angle: tan θ = r / axis_len, so
+        // cos²θ = axis_len² / (axis_len² + r²).
+        let axis_len_sq = axis_len * axis_len;
+        let cos2 = axis_len_sq / (axis_len_sq + self.r * self.r);
+
+        let co = subp(ray.start, apex);
+        let dv = dotp(ray.delta, axis_unit);
+        let cv = dotp(co, axis_unit);
+        let dd = dotp(ray.delta, ray.delta);
+        let dc = dotp(ray.delta, co);
+        let cc = dotp(co, co);
+
+        let a = dv * dv - cos2 * dd;
+        let b = 2.0 * (dv * cv - cos2 * dc);
+        let c = cv * cv - cos2 * cc;
+
+        // Best hit so far: (t, normal). Hit point recovered from t at the
+        // end via `ray_location`.
+        let mut best: Option<(f64, Point)> = None;
+
+        // --- Lateral surface -------------------------------------------
+        // Collect the candidate roots of `a t² + b t + c = 0`. `a` can be
+        // positive, negative, or ~0 (the ray running parallel to a cone
+        // generator line), so we don't assume a root ordering — we gather
+        // every real root and let the s-range check and the min-t pick
+        // sort them out.
+        let mut roots: [Option<f64>; 2] = [None, None];
+        if a.abs() < EPSILON {
+            // Degenerate quadratic — the ray is parallel to a generator
+            // line of the cone. Falls back to the linear equation
+            // `b t + c = 0`.
+            if b.abs() >= EPSILON {
+                roots[0] = Some(-c / b);
+            }
+        } else {
+            let disc = b * b - 4.0 * a * c;
+            if disc >= 0.0 {
+                let sqrt_disc = disc.sqrt();
+                roots[0] = Some((-b - sqrt_disc) / (2.0 * a));
+                roots[1] = Some((-b + sqrt_disc) / (2.0 * a));
+            }
+        }
+
+        for root in roots {
+            let t = match root {
+                Some(t) => t,
+                None => continue,
+            };
+            if t <= EPSILON {
+                continue;
+            }
+            // s = (P - apex)·axis_unit, computed without forming P.
+            let s = cv + t * dv;
+            if s < 0.0 || s > axis_len {
+                continue;
+            }
+            // Closer than what we already have?
+            if let Some((t_best, _)) = best {
+                if t >= t_best {
+                    continue;
+                }
+            }
+            let hit_point = ray_location(ray, t);
+            let apex_to_p = subp(hit_point, apex);
+            let perp = subp(apex_to_p, scalep(axis_unit, s));
+            let perp_len = lenp(perp);
+            if perp_len < EPSILON {
+                // Hit landed on the apex tip — the normal is ill-defined
+                // there. Vanishingly rare; skip rather than emit a
+                // garbage normal.
+                continue;
+            }
+            let perp_unit = scalep(perp, 1.0 / perp_len);
+            // The lateral normal points outward radially *and* tilts
+            // toward the apex by the half-angle: slope = r / axis_len,
+            // and `-slope * axis_unit` points base → apex.
+            let slope = self.r / axis_len;
+            let normal = normalizep(subp(perp_unit, scalep(axis_unit, slope)));
+            best = Some((t, normal));
+        }
+
+        // --- Base cap --------------------------------------------------
+        // A flat disk at `p0` with outward normal `+axis_unit` (axis_unit
+        // points apex → base, so it points out of the cone at the base).
+        let cap_normal = axis_unit;
+        let denom = dotp(cap_normal, ray.delta);
+        if denom.abs() >= EPSILON {
+            let t = dotp(subp(self.p0, ray.start), cap_normal) / denom;
+            let closer = match best {
+                Some((t_best, _)) => t > EPSILON && t < t_best,
+                None => t > EPSILON,
+            };
+            if closer {
+                let hit_point = ray_location(ray, t);
+                let radial = subp(hit_point, self.p0);
+                // Squared-distance comparison — saves a sqrt.
+                if dotp(radial, radial) <= self.r * self.r {
+                    best = Some((t, cap_normal));
+                }
             }
         }
 

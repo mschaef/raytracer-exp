@@ -42,8 +42,8 @@ use crate::render::mesh::load_obj;
 use crate::render::render;
 use crate::render::shapes::{
     bounded, bounded_with, group, rotate_axis, rotate_x, rotate_y, rotate_z,
-    scale, transform, translate, AABB, Cuboid, Cylinder, Plane, Shape, Sphere,
-    Triangle,
+    scale, transform, translate, AABB, Cone, Cuboid, Cylinder, Plane, Shape,
+    Sphere, Triangle,
 };
 use crate::render::transform::Affine;
 use crate::render::{Camera, HeatmapTargets, Light, Scene, Surface};
@@ -81,6 +81,7 @@ pub fn install(env: &EnvRef) {
     define_native(env, "cuboid", builtin_cuboid);
     define_native(env, "triangle", builtin_triangle);
     define_native(env, "cylinder", builtin_cylinder);
+    define_native(env, "cone", builtin_cone);
 
     // Mesh loading (Phase 7).
     define_native(env, "load-obj", builtin_load_obj);
@@ -703,6 +704,19 @@ fn builtin_cylinder(args: &[Value], pos: &Position) -> Value {
     let r = require_key_number(&map, "r", "cylinder", pos);
     let surface = require_key_surface(&map, "surface", "cylinder", pos);
     Value::Shape(Rc::new(Shape::Cylinder(Cylinder { p0, p1, r, surface })))
+}
+
+/// `(cone {:p0 [..] :p1 [..] :r n :surface S})` — a closed solid cone.
+/// `:p0` is the base center (radius `:r`), `:p1` is the apex point. The
+/// two ends are not interchangeable; see `render::shapes::Cone`.
+fn builtin_cone(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 1, "cone", pos);
+    let map = require_map(&args[0], "cone", pos);
+    let p0 = require_key_point(&map, "p0", "cone", pos);
+    let p1 = require_key_point(&map, "p1", "cone", pos);
+    let r = require_key_number(&map, "r", "cone", pos);
+    let surface = require_key_surface(&map, "surface", "cone", pos);
+    Value::Shape(Rc::new(Shape::Cone(Cone { p0, p1, r, surface })))
 }
 
 /// `(load-obj <path-string> <surface>)` — load a Wavefront OBJ file

@@ -121,6 +121,7 @@ pub enum Shape {
     Cuboid(Cuboid),                    // axis-aligned box, slab method
     Triangle(Triangle),                // Möller–Trumbore, smooth normals
     Cylinder(Cylinder),                // closed cylinder, body + caps
+    Cone(Cone),                        // closed cone, lateral surface + base cap
     Group(Vec<Shape>),                 // hierarchical container
     Transform(Box<Transformed>),       // affine-transformed subtree
     Bounded(Box<Bounded>),             // AABB-accelerated subtree
@@ -133,9 +134,16 @@ pub enum Shape {
 tests. `Triangle` uses Möller–Trumbore and interpolates per-vertex normals
 via the barycentric coordinates returned by the test (smooth shading falls
 out for free; flat shading is the same algorithm with all three vertex
-normals equal). `Group::hit_test` is `nearest_hit(ray, &children)` — same
-fold the top-level scene traversal uses, so flat scenes and arbitrarily-nested
-groups share the exact same hit-testing path.
+normals equal). `Cylinder` and `Cone` are analytic closed solids:
+`Cylinder` tests the curved side plus two end-cap disks; `Cone` tests
+the curved lateral surface (a quadratic in the `cos²θ` cone equation,
+with an `s ≥ 0` check that rejects the infinite double cone's second
+nappe) plus a single base-cap disk — `Cone`'s `p0` is the base center
+of radius `r` and `p1` is the apex point, and unlike `Cylinder` the two
+ends are not interchangeable. `Group::hit_test` is
+`nearest_hit(ray, &children)` — same fold the top-level scene traversal
+uses, so flat scenes and arbitrarily-nested groups share the exact same
+hit-testing path.
 
 `Light::hit_test` returns `None`: lights are invisible to every kind of
 ray (primary, shadow, reflection). They occupy a position in the scene
@@ -1228,6 +1236,44 @@ Approximate order of recent commits, oldest first:
     wrinkle that reflection happens inside the non-sample-indexed
     `ray_color` recursion) and Fresnel are deferred follow-ons.
 
+31. **Cone primitive.** New `Cone` shape — a closed solid cone
+    parameterized exactly like `Cylinder` (`p0`, `p1`, `r`, `surface`)
+    but with `p0` as the base center (radius `r`) and `p1` as the apex
+    point. The two ends are *not* interchangeable, which is the one
+    semantic difference from `Cylinder` worth keeping in mind. Same
+    transform caveat as `Cylinder`: uniform scale stays a cone,
+    non-uniform scale would need an elliptical cone the primitive can't
+    represent — wrap in `Transform`. `Hittable for Cone` tests two
+    surfaces: the curved lateral surface and a single flat base cap at
+    `p0` (the apex end has no cap). The lateral test substitutes the ray
+    into the `((P-apex)·axis_unit)² = cos²θ·|P-apex|²` cone equation and
+    solves the resulting quadratic; `a` can be positive, negative, or
+    ~0 (ray parallel to a generator line — handled as a linear
+    fallback), so both roots are gathered without assuming an ordering.
+    Each root is trimmed by `s = (P-apex)·axis_unit ∈ [0, axis_len]` —
+    the `s ≥ 0` half is load-bearing, it discards the infinite double
+    cone's second nappe behind the apex, which the `cos²θ` form also
+    admits. The lateral normal is `normalize(perp_unit - slope·axis_unit)`
+    (`slope = r/axis_len`): radially outward *and* tilted toward the
+    apex by the half-angle — the "lit faces dark" suspect if the sign
+    is wrong. Apex-tip hits (degenerate `perp`) are skipped rather than
+    emitting a garbage normal. The base cap reuses `Cylinder`'s cap
+    test verbatim (ray-plane + squared-radius check), normal
+    `+axis_unit`. `Shape::bounds()` returns the union of the base
+    disk's AABB (the same `r·√(1-axis_unit[i]²)` per-axis trick
+    `Cylinder` uses, applied only at `p0`) with `p1` as a degenerate
+    point — tight, not just conservative. Touch points were the usual
+    closed-enum set: the `Shape::Cone` variant, `From<Cone>`, the
+    `hit_test`/`bounds`/`collect_lights` match arms, the SDL
+    `value.rs` Display arm, and a map-keyed `(cone {:p0 :p1 :r
+    :surface})` constructor in `bindings.rs`. New `scenes/cone_test.lisp`
+    (three cones — vertical, apex-on at the camera, diagonal reflective —
+    mirroring `cylinder_test.lisp`'s layout) with a
+    `cone_test_scene_loads` smoke test; `tests/sdl/bindings_shapes.lisp`
+    extended with cone construction, structural-equality, and
+    end-not-interchangeable checks. No existing scene or byte-pinned
+    test is affected — `Cone` is purely additive.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -1696,9 +1742,11 @@ currently fold). Work item lives here in the plan rather than in
 "Phases" because it's a self-contained optimization, not a sequenced
 SDL milestone.
 
-**More primitives.** Cylinder, cone, torus. Triangle is already in.
-Each new primitive is a struct + `Hittable` impl + a new `Shape` variant
-+ `From` impl + match arm.
+**More primitives.** Torus is the obvious remaining one; sphere, plane,
+cuboid, triangle, cylinder, and cone are all in. Each new primitive is a
+struct + `Hittable` impl + a new `Shape` variant + `From` impl + match
+arms (`hit_test` dispatch, `bounds()`, `collect_lights` leaf-noop, and
+the SDL `value.rs` Display arm + a `bindings.rs` constructor).
 
 **More mesh formats.** PLY would be a clean addition (fits academic
 test models like the Stanford bunny); the loader interface is already
