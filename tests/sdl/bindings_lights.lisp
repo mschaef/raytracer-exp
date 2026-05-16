@@ -65,6 +65,37 @@
 ; structurally equal — the `kind` field differs.
 (assert (not= ls (light-white [0 0 5])))
 
+; light-area: disk area light. Phase 4 of the light-types plan.
+; Positional args are (location axis radius color intensity).
+(def la (light-area [0 0 5] [0 0 -1] 1.0 [1 1 1] 2.0))
+(assert (light? la))
+
+; Structural equality: two area lights built the same way are equal.
+(def la2 (light-area [0 0 5] [0 0 -1] 1.0 [1 1 1] 2.0))
+(assert= la la2)
+
+; The binding normalizes a non-unit axis at the boundary, so two
+; area lights built with parallel axis vectors of different
+; magnitudes are structurally equal.
+(def la-non-unit (light-area [0 0 5] [0 0 -2] 1.0 [1 1 1] 2.0))
+(assert= la la-non-unit)
+
+; Field-level inequality: cover axis, radius, intensity separately
+; so a regression in any one of them fails this test distinctly.
+(def la-diff-axis (light-area [0 0 5] [1 0 0] 1.0 [1 1 1] 2.0))
+(assert (not= la la-diff-axis))
+
+(def la-diff-radius (light-area [0 0 5] [0 0 -1] 0.5 [1 1 1] 2.0))
+(assert (not= la la-diff-radius))
+
+(def la-diff-intensity (light-area [0 0 5] [0 0 -1] 1.0 [1 1 1] 1.0))
+(assert (not= la la-diff-intensity))
+
+; Area lights are not equal to point or spotlights at the same
+; location — the `kind` field differs across variants.
+(assert (not= la (light-white [0 0 5])))
+(assert (not= la (light-spot [0 0 5] [0 0 -1] [1 1 1] 2.0 (/ pi 8) (/ pi 5))))
+
 ; Negative checks.
 (assert (not (light? nil)))
 (assert (not (light? [1 2 3])))

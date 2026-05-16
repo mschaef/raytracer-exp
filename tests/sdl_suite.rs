@@ -400,6 +400,11 @@ fn assert_scene_loads(script_relpath: &str, binding: &str) {
 // phase deliverables.
 
 #[test]
+fn area_light_test_scene_loads() {
+    assert_scene_loads("area_light_test.lisp", "area-light-test-scene");
+}
+
+#[test]
 fn axis_spheres_scene_loads() {
     assert_scene_loads("axis_spheres.lisp", "axis-spheres-scene");
 }

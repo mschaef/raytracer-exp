@@ -380,24 +380,27 @@ checkered ground used by most scenes), and the `surface-gold` /
 emitted color; `intensity` is a scalar multiplier. The two are
 conceptually distinct knobs even though their numerical effect overlaps
 — color is hue, intensity is brightness. `kind` carries variant-specific
-data: as of Phase 2 of the "Light types: spotlights and area lights"
-plan, `LightKind` is `Point` (omni-directional, the original behavior)
-or `Spot { direction, inner_angle, outer_angle }` (directed cone with
-smooth falloff). Phase 4 will add `Area { axis, radius }`. The shared
-fields stay on the struct (rather than turning `Light` itself into an
-enum) because `shade_pixel` and `collect_lights` read `location` /
-`color` / `intensity` directly — a pure enum would force accessor
-methods or per-call-site `match` arms for fields every variant has.
+data: as of Phase 4 of the "Light types: spotlights and area lights"
+plan, `LightKind` is `Point` (omni-directional, the original behavior),
+`Spot { direction, inner_angle, outer_angle }` (directed cone with
+smooth falloff), or `Area { axis, radius }` (disk emitter, hard
+shadows in Phase 4, soft shadows in Phase 5). The shared fields stay
+on the struct (rather than turning `Light` itself into an enum)
+because `shade_pixel` and `collect_lights` read `location` / `color` /
+`intensity` directly — a pure enum would force accessor methods or
+per-call-site `match` arms for fields every variant has.
 
 Convenience constructors: `Light::white(location)` for full-intensity
 white (matches the legacy implicit defaults), `Light::point(location,
-color, intensity)` for the general case, and `Light::spot(location,
+color, intensity)` for the general case, `Light::spot(location,
 direction, color, intensity, inner_angle, outer_angle)` for a
-spotlight. All three are `const fn`. The Rust constructors assume the
-caller-supplied direction is unit-length and `inner_angle ≤
-outer_angle`; the SDL `(light-spot ...)` binding normalizes the
-direction and rejects reversed angles at the script boundary, so
-script-built spotlights satisfy both invariants by construction.
+spotlight, and `Light::area(location, axis, radius, color, intensity)`
+for a disk emitter. All four are `const fn`. The Rust constructors
+assume caller-supplied direction/axis vectors are unit-length,
+`inner_angle ≤ outer_angle`, and `radius > 0`; the SDL bindings
+(`light-spot` / `light-area`) normalize the unit vectors and validate
+the scalar constraints at the script boundary, so script-built lights
+satisfy every invariant by construction.
 
 Variant dispatch on `kind` lives in two places. `light_vector`
 delegates to a per-kind helper that returns the `(Vector,
@@ -411,22 +414,37 @@ transmittance)` pair `shade_pixel` consumes:
   light→point ray — *before* the walk, so a shaded point outside
   the outer cone returns `None` immediately without hit-testing.
   Inside the cone, it delegates to the point-light walk and folds
-  the cone factor into the returned transmittance. The transparency
-  behavior of intervening occluders is therefore identical for both
-  light kinds (a glass pane attenuates a spotlight the same way it
-  attenuates a point light).
+  the cone factor into the returned transmittance.
+- `light_vector_area` (Phase 4) computes a Lambertian cosine factor
+  `max(0, dot(axis, normalize(point - light.location)))` against the
+  disk's normal. Shaded points in the back hemisphere of the disk
+  (`cos_theta ≤ 0`) return `None` immediately — the disk only
+  illuminates the half-space its front face points into. Inside the
+  lit half-space, the helper delegates to the point-light walk and
+  folds the cosine factor into the returned transmittance. Phase 4
+  is the *hard-shadow* baseline: the shadow ray comes from the disk
+  center exactly (`light.location`). Phase 5 of the plan replaces
+  the center-only sampling with a per-pixel-sample jittered point on
+  the disk for soft shadows; the cosine attenuation and the `axis`
+  transform stay unchanged.
 
-`shade_pixel` stays light-type-agnostic: it just multiplies its
-Lambert + Phong contribution by whatever scalar the helper returned.
+The transparency behavior of intervening occluders is therefore
+identical for all three light kinds (a glass pane attenuates a
+spotlight or an area light the same way it attenuates a point
+light), and `shade_pixel` stays light-type-agnostic: it just
+multiplies its Lambert + Phong contribution by whatever scalar the
+helper returned.
 
 `Shape::collect_lights` walks the scene graph extracting world-space
 lights. The variant arm transforms the per-variant geometric fields
-under the accumulated affine: a spotlight's `direction` is transformed
-by the linear part of the affine and renormalized (translations don't
-apply to vectors, and non-uniform scale can change a unit vector's
-magnitude). `inner_angle` / `outer_angle` are unaffected — they're
-half-angles, not vectors. Phase 4 will add an `Area { axis, .. }` arm
-here that transforms `axis` the same way.
+under the accumulated affine: a spotlight's `direction` and an area
+light's `axis` are both transformed by the linear part of the affine
+and renormalized (translations don't apply to vectors, and non-
+uniform scale can change a unit vector's magnitude). The spotlight's
+`inner_angle` / `outer_angle` and the area light's `radius` are
+unaffected — they're scalars, not vectors. (Uniform-scale-aware
+radius scaling for area lights would be a Phase 6 ergonomics item,
+same posture as Cylinder/Cone radii.)
 
 Lights live inside `Scene::root` as `Shape::Light` nodes alongside
 geometry. The renderer reaches them via `Shape::collect_lights`,
@@ -1424,6 +1442,65 @@ Approximate order of recent commits, oldest first:
     takes. Phase 3 (spotlight ergonomics: aim-at-target
     constructor, possible distance attenuation) remains deferred.
 
+34. **Light types phase 4: area lights (`Area` variant, hard-shadow
+    baseline).** Phase 4 of the "Light types: spotlights and area
+    lights" plan. `LightKind` gained `Area { axis: Point, radius:
+    f64 }` — a disk emitter centered at the light's `location` with
+    normal `axis` (unit vector pointing the way the light shines)
+    and `radius` (world units). Disk over quad was the planned
+    Phase-4 shape: one axis vector vs. two basis vectors is simpler
+    to construct, simpler to transform (no orthogonality constraint
+    to preserve), and the `concentric_disk` sample map already in
+    `render::sampler` (DOF Phase 1) is the canonical map for
+    sampling a uniform point on the disk in Phase 5. New
+    `Light::area` `const fn` constructor. Renderer: `light_vector`
+    matched the new arm to a fresh helper `light_vector_area`,
+    which (1) computes a Lambertian cosine attenuation `cosine =
+    dot(axis, normalize(point - light.location))` against the
+    disk's normal, (2) returns `None` immediately for points in the
+    back hemisphere (`cosine ≤ EPSILON`) — same early-out shape as
+    the spotlight cone falloff — and (3) inside the lit half-space
+    delegates to `light_vector_point` for the transmittance walk
+    and folds the cosine factor into the returned scalar.
+    Transparent occluders attenuate area lights the same way they
+    attenuate point and spot lights. Phase 4 deliberately samples
+    the disk *center* only — `light.location` — so shadows are
+    hard, looking like a directional point light with cosine
+    falloff against `axis`. Phase 5 will replace the center-only
+    sampling with per-pixel-sample jittered points on the disk for
+    soft shadows; the helper's signature already threads `_radius`
+    through (unused in Phase 4) so the Phase-5 diff is the body,
+    not the signature. `Shape::collect_lights`'s `Area` arm
+    transforms `axis` by the linear part of the accumulated affine
+    and renormalizes (same pattern as `Spot::direction`); `radius`
+    is left alone, matching the existing Cylinder/Cone-radius
+    posture (uniform-scale-aware radius scaling is a Phase 6
+    nicety). SDL: positional `(light-area location axis radius
+    color intensity)` (5-arg, distinct from `light-spot`'s 6-arg
+    shape). The binding validates `lenp(axis) >= EPSILON` and
+    `radius >= EPSILON` with explicit `sdl_panic!` messages naming
+    the bad value, then normalizes the axis. Radius validation is
+    *forward-looking* — Phase 4 doesn't consult `radius`, but a
+    non-positive radius is meaningless to Phase 5's disk sampler,
+    so we reject at construction rather than wait for Phase 5.
+    New `scenes/area_light_test.lisp` (disk light at `[0 0 4]`
+    aimed down with radius 1.0, three spheres along ±x at
+    progressively larger angular offsets to show the cosine
+    falloff, on the reflective checker floor) and an
+    `area_light_test_scene_loads` smoke test in
+    `tests/sdl_suite.rs`. `tests/sdl/bindings_lights.lisp`
+    extended with area-light construction, structural equality
+    (each of `axis` / `radius` / `intensity` exercised separately),
+    the boundary normalization check (non-unit axis input produces
+    a structurally equal area light), and Area-vs-Point /
+    Area-vs-Spot inequality. Existing byte-pinned tests are
+    unaffected: point and spot lights still flow through their
+    respective `LightKind` arms unchanged; Phase 4 added code paths
+    but didn't modify any of the existing ones. The next chunk —
+    Phase 5 (soft shadows via per-pixel-sample jittered shadow
+    rays threaded through the existing Halton sampler) — is the
+    one real architectural change in the light-types plan.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -1981,46 +2058,26 @@ exists as a placeholder so the work has a clear deferred bucket.
 
 ### Phase 4 — Area light: type + geometry (hard-shadow baseline)
 
-Add `LightKind::Area { axis: Point, radius: f64 }` — a disk
-emitter. `axis` is the disk's normal (also serves as the
-"forward" direction the disk emits along, in the negative-normal
-sense), `radius` is the disk radius. The disk is centered at the
-light's `location` and lies in the plane perpendicular to `axis`.
-
-Disk over quad as the first area-light shape: a single scalar
-radius vs. two basis vectors is simpler to construct, simpler to
-transform (one axis vector, no orthogonality constraint to
-preserve), and the concentric-disk sample map (`concentric_disk`
-in `render::sampler`) is already in tree — DOF Phase 1 added it.
-Quad emitters can land in Phase 6 if needed.
-
-`collect_lights` for an `Area`-kinded light transforms `axis` as
-a vector (linear part of the accumulated affine, renormalized).
-`radius` is left alone — uniform-scale-aware radius scaling is a
-nicety not worth Phase 4 complexity; users can adjust the radius
-directly. (The same caveat applies to the cylinder and cone
-primitives' radii — wrap in `Transform` for uniform-scale, use
-the constructor for non-uniform.)
-
-Phase 4 deliberately renders the area light as a *hard-shadowed*
-light: the shadow-ray helper samples the disk center exactly.
-The result looks like a point light at `location` plus a
-spotlight-style cosine attenuation against `axis` (so the disk
-only illuminates the half-space its front face points into).
-This lands the type, the SDL constructor, the transform handling,
-the test scene, and the smoke test as a self-contained
-checkpoint; the per-pixel sampler isn't touched yet.
-
-SDL: `(light-area location axis radius color intensity)`. New
-`scenes/area_light_test.lisp` (a disk light above a scene of
-simple geometry) and an `area_light_test_scene_loads` smoke test.
-Byte-pinned tests unaffected.
-
-The shadow-ray helper for `Area` reuses the existing
-transmittance walk; the only addition is the half-space check
-("is the shaded point on the lit side of the disk?") and the
-cosine-against-axis falloff factor folded into the returned
-scalar.
+Done; see "Recent work history." Summary: `LightKind` gained a
+`Area { axis, radius }` arm; `Light::area` is the `const fn`
+constructor. The shadow-ray helper `light_vector_area` computes a
+Lambertian cosine attenuation `dot(axis, normalize(point -
+light.location))` against the disk's normal — returns `None` for
+points in the back hemisphere (skip the light entirely) and
+otherwise delegates to `light_vector_point` for the transmittance
+walk, folding the cosine factor into the returned scalar. Phase 4
+samples the disk *center* only, so shadows are hard; Phase 5 will
+replace the center-only sampling with per-pixel-sample jittered
+points on the disk for soft shadows. `Shape::collect_lights`
+transforms `axis` by the linear part of the accumulated affine and
+renormalizes; `radius` is left alone (Phase 6 polish). SDL:
+positional `(light-area location axis radius color intensity)`;
+the binding normalizes the axis and rejects zero-length axis and
+non-positive radius at the boundary. New
+`scenes/area_light_test.lisp` + smoke test, plus area-light cases
+added to `tests/sdl/bindings_lights.lisp`. Point and spot lights
+flow through their respective `LightKind` arms unchanged, so
+existing byte-pinned tests pass without modification.
 
 ### Phase 5 — Area light: soft shadows
 

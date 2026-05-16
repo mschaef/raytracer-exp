@@ -70,6 +70,7 @@ pub fn install(env: &EnvRef) {
     define_native(env, "light-white", builtin_light_white);
     define_native(env, "light-point", builtin_light_point);
     define_native(env, "light-spot", builtin_light_spot);
+    define_native(env, "light-area", builtin_light_area);
 
     // Cameras.
     define_native(env, "camera-looking-at", builtin_camera_looking_at);
@@ -605,6 +606,51 @@ fn builtin_light_spot(args: &[Value], pos: &Position) -> Value {
         intensity,
         inner_angle,
         outer_angle,
+    )))
+}
+
+/// `(light-area [x y z] [ax ay az] radius [r g b] intensity)`.
+///
+/// Disk area light centered at `location` with normal `axis` and the
+/// given `radius`. `axis` is normalized at the binding boundary so
+/// callers can supply any non-zero vector; the renderer assumes a
+/// unit-length axis in the cosine attenuation. `radius` must be
+/// strictly positive — Phase 4 doesn't actually consult `radius`
+/// (the shadow ray samples the disk center only), but Phase 5's
+/// disk sampler does and a non-positive radius is meaningless to it,
+/// so we reject at construction rather than wait for Phase 5.
+fn builtin_light_area(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 5, "light-area", pos);
+    let location = require_point(&args[0], "light-area location", pos);
+    let axis = require_point(&args[1], "light-area axis", pos);
+    let radius = require_number(&args[2], "light-area radius", pos);
+    let color = require_point(&args[3], "light-area color", pos);
+    let intensity = require_number(&args[4], "light-area intensity", pos);
+
+    if lenp(axis) < EPSILON {
+        sdl_panic!(
+            pos,
+            "light-area: axis must be a non-zero vector (got [{} {} {}])",
+            axis[0],
+            axis[1],
+            axis[2],
+        );
+    }
+    if radius < EPSILON {
+        sdl_panic!(
+            pos,
+            "light-area: radius must be positive (got {})",
+            radius,
+        );
+    }
+
+    let axis_unit = normalizep(axis);
+    Value::Light(Rc::new(Light::area(
+        location,
+        axis_unit,
+        radius,
+        color,
+        intensity,
     )))
 }
 

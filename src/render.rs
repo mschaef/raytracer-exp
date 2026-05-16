@@ -126,6 +126,32 @@ pub enum LightKind {
         inner_angle: f64,
         outer_angle: f64,
     },
+    /// Disk-shaped area emitter centered at the light's `location`.
+    /// `axis` is the disk's normal (unit vector) and the direction
+    /// the light emits along (i.e. the front face of the disk is the
+    /// `+axis` side). `radius` is the disk's radius in world units.
+    ///
+    /// Phase 4 of the "Light types: spotlights and area lights" plan
+    /// renders this as a *hard-shadowed* light: the shadow ray is
+    /// cast from the disk center exactly, and the light's
+    /// contribution is scaled by a Lambertian cosine factor
+    /// `max(0, dot(axis, light→point))`. The half-space behind the
+    /// disk (where the dot product is non-positive) receives no
+    /// direct light from this source — same physics as a real disk
+    /// emitter only being visible from its front side. Phase 5 will
+    /// replace the center-only sampling with per-pixel-sample
+    /// jittered shadow rays across the disk for soft shadows; the
+    /// cosine attenuation and `axis` transform stay unchanged.
+    ///
+    /// `radius` is the only field unused by Phase 4 itself — it's
+    /// stored for Phase 5's sampler to pick a point on the disk.
+    /// Threading it through the renderer as `_radius` in the
+    /// Phase-4 helper keeps the function signature stable across
+    /// phases.
+    Area {
+        axis: Point,
+        radius: f64,
+    },
 }
 
 /// A light source. Common fields (`location`, `color`, `intensity`) sit
@@ -189,6 +215,33 @@ impl Light {
             color,
             intensity,
             kind: LightKind::Spot { direction, inner_angle, outer_angle },
+        }
+    }
+
+    /// Disk area light centered at `location` with normal `axis` and
+    /// `radius`. `axis` is the caller's responsibility to supply
+    /// unit-length and is the direction the disk emits (light shines
+    /// in `+axis`; the back side is dark). `radius > 0` is the
+    /// caller's responsibility too.
+    ///
+    /// The SDL `(light-area ...)` binding normalizes `axis` and
+    /// validates `radius > 0` at the script boundary; direct Rust
+    /// callers either match that contract or accept the
+    /// consequences (a non-unit `axis` makes the cosine attenuation
+    /// non-physical; a zero or negative radius is meaningless to
+    /// Phase 5's disk sampler).
+    pub const fn area(
+        location: Point,
+        axis: Point,
+        radius: f64,
+        color: LinearColor,
+        intensity: f64,
+    ) -> Light {
+        Light {
+            location,
+            color,
+            intensity,
+            kind: LightKind::Area { axis, radius },
         }
     }
 }
@@ -580,6 +633,9 @@ fn light_vector(point: &Point, scene: &Scene, light: &Light) -> Option<(Vector, 
         LightKind::Spot { direction, inner_angle, outer_angle } => {
             light_vector_spot(point, scene, light, direction, inner_angle, outer_angle)
         }
+        LightKind::Area { axis, radius } => {
+            light_vector_area(point, scene, light, axis, radius)
+        }
     }
 }
 
@@ -730,6 +786,73 @@ fn light_vector_spot(
     // spotlight the same way it attenuates a point light).
     let (ray, transmittance) = light_vector_point(point, scene, light)?;
     Some((ray, transmittance * cone_falloff))
+}
+
+/// Shadow-ray test for a disk area light: half-space check +
+/// Lambertian cosine attenuation on top of the transmittance walk.
+///
+/// Phase 4 of the "Light types: spotlights and area lights" plan
+/// renders this as a hard-shadowed light: the shadow ray is cast
+/// from `light.location` (the disk center) exactly. The light's
+/// contribution is scaled by the Lambertian factor
+/// `max(0, cos_theta)` where `cos_theta = dot(axis, normalize(point
+/// - light.location))` — physically, this is how much radiance a
+/// disk emitter with normal `axis` directs toward a shaded point at
+/// angle `theta` off-axis. The shaded point is on the *back* of the
+/// disk exactly when `cos_theta ≤ 0`, in which case the light
+/// contributes nothing and we return `None` to skip its shading
+/// entirely. (Same early-out shape as the spotlight cone falloff
+/// and the opaque-occluder transmittance walk.)
+///
+/// Phase 5 will replace the center-only sampling with per-pixel-
+/// sample jittered shadow rays to points across the disk for soft
+/// shadows. The cosine attenuation and the `axis` transform in
+/// `collect_lights` stay unchanged across phases; only the sampling
+/// of the shadow ray's target on the disk changes. `_radius` is
+/// threaded through the signature now so Phase 5's diff is the body
+/// change rather than a signature change.
+fn light_vector_area(
+    point: &Point,
+    scene: &Scene,
+    light: &Light,
+    axis: Point,
+    _radius: f64,
+) -> Option<(Vector, f64)> {
+    let light_to_point = subp(*point, light.location);
+    let dist = lenp(light_to_point);
+    if dist < EPSILON {
+        // Shaded point coincident with the disk center: the cosine
+        // test doesn't apply (the light→point direction is
+        // undefined). Fall through to the point-light path, which
+        // handles dist-near-zero gracefully. Same degenerate-case
+        // handling as `light_vector_spot`.
+        return light_vector_point(point, scene, light);
+    }
+    let light_to_point_unit = [
+        light_to_point[0] / dist,
+        light_to_point[1] / dist,
+        light_to_point[2] / dist,
+    ];
+
+    // Lambertian cosine attenuation. A disk emitter facing `axis`
+    // sends radiance proportional to `cos(theta)` toward a point at
+    // angle `theta` off the normal. The back hemisphere
+    // (`cos_theta ≤ 0`) is fully dark from this light: no
+    // contribution, return `None` so `shade_pixel` skips it
+    // entirely.
+    let cosine = dotp(axis, light_to_point_unit);
+    if cosine <= EPSILON {
+        return None;
+    }
+
+    // Lit half-space: run the same shadow-ray transmittance walk
+    // as the point-light path (Phase 4 samples the disk center, so
+    // this is literally one shadow ray from `light.location`), then
+    // fold the cosine factor into the returned scalar. Transparent
+    // occluders attenuate area lights the same way they attenuate
+    // point and spot lights.
+    let (ray, transmittance) = light_vector_point(point, scene, light)?;
+    Some((ray, transmittance * cosine))
 }
 
 /// Recursion-budget tracker threaded through `ray_color` /

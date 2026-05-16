@@ -602,6 +602,18 @@ impl Shape {
                             outer_angle,
                         }
                     }
+                    LightKind::Area { axis, radius } => {
+                        // `axis` is a vector and transforms by the
+                        // linear part only; renormalize because
+                        // non-uniform scale can change its magnitude.
+                        // `radius` stays as authored — uniform-scale-
+                        // aware radius scaling is a Phase 6 nicety
+                        // (same posture as Cylinder/Cone radii).
+                        LightKind::Area {
+                            axis: normalizep(world_from_local.transform_vector(axis)),
+                            radius,
+                        }
+                    }
                 };
                 out.push(Light {
                     location: world_from_local.transform_point(l.location),
