@@ -376,13 +376,30 @@ checkered ground used by most scenes), and the `surface-gold` /
 
 ## Lights
 
-`Light { location, color, intensity }`. Point lights only (no directional /
-spotlight / area light variants yet). `color` is the emitted color; `intensity`
-is a scalar multiplier. The two are conceptually distinct knobs even though
-their numerical effect overlaps — color is hue, intensity is brightness.
-Convenience constructors: `Light::white(location)` for full-intensity white
-(matches the legacy implicit defaults), `Light::point(location, color,
-intensity)` for the general case.
+`Light { location, color, intensity, kind: LightKind }`. `color` is the
+emitted color; `intensity` is a scalar multiplier. The two are
+conceptually distinct knobs even though their numerical effect overlaps
+— color is hue, intensity is brightness. `kind` carries variant-specific
+data — Phase 1 of the "Light types: spotlights and area lights" plan
+landed the enum scaffolding with a single `LightKind::Point` arm; Phase 2
+will add `Spot { direction, inner_angle, outer_angle }`, Phase 4 will add
+`Area { axis, radius }`. The shared fields stay on the struct (rather
+than turning `Light` itself into an enum) because `shade_pixel` and
+`collect_lights` read `location` / `color` / `intensity` directly — a
+pure enum would force accessor methods or per-call-site `match` arms for
+fields every variant has.
+
+Convenience constructors: `Light::white(location)` for full-intensity
+white (matches the legacy implicit defaults), `Light::point(location,
+color, intensity)` for the general case. Both set `kind:
+LightKind::Point`. Variant dispatch on `kind` lives in two places: the
+shadow-ray helper `light_vector`, which delegates to a per-kind helper
+(`light_vector_point` today; `light_vector_spot` etc. land in later
+phases) that returns the `(Vector, transmittance)` pair `shade_pixel`
+consumes — `shade_pixel` itself stays light-type-agnostic; and
+`Shape::collect_lights`, which transforms the per-variant geometric
+fields under the accumulated affine when extracting world-space lights
+at render entry.
 
 Lights live inside `Scene::root` as `Shape::Light` nodes alongside
 geometry. The renderer reaches them via `Shape::collect_lights`,
@@ -1274,6 +1291,45 @@ Approximate order of recent commits, oldest first:
     end-not-interchangeable checks. No existing scene or byte-pinned
     test is affected — `Cone` is purely additive.
 
+32. **Light types phase 1: `LightKind` refactor.** Phase 1 of the
+    "Light types: spotlights and area lights" plan: introduces the
+    enum scaffolding for variant-dispatched lights with no behavior
+    change. `Light` gained a `kind: LightKind` field; `LightKind` is a
+    one-arm `#[derive(Copy, Clone, PartialEq, Debug)]` enum with only
+    `Point` for now (Phase 2 adds `Spot { direction, inner_angle,
+    outer_angle }`; Phase 4 adds `Area { axis, radius }`). Constructors
+    `Light::white` / `Light::point` set `kind: LightKind::Point`.
+    `light_vector` is now a thin dispatcher that matches on
+    `light.kind` and delegates to a per-kind helper; the existing
+    transmittance walk moved into `light_vector_point` unchanged, so
+    Phase 2's `light_vector_spot` slots in as a sibling. `shade_pixel`
+    stays light-type-agnostic — it just consumes the `(Vector, f64)`
+    pair the helper returns. `Shape::collect_lights`'s
+    `Shape::Light(l)` arm propagates `l.kind` through to the
+    world-space `Light` it constructs; later phases extend this arm to
+    transform per-variant geometric fields (a spotlight's direction,
+    an area light's axis) under the accumulated affine. SDL surface
+    unchanged — `(light-white ...)` / `(light-point ...)` still
+    produce `Value::Light` wrapping a `Light` that just happens to
+    carry the new `kind` field; `light?` predicate, `require_shape_value`
+    auto-wrap, scene-graph integration all untouched. The hybrid
+    struct + `LightKind` shape was a deliberate departure from the
+    plan's original "turn `Light` into an enum like `Shape`" framing:
+    `location` / `color` / `intensity` are genuinely shared and read
+    directly across the shading code, so a pure enum would force
+    accessor methods or per-site `match` arms for fields every variant
+    has. Variant dispatch lives where it actually matters —
+    `collect_lights` and `light_vector` — and the plan section's
+    "Decisions still open" flagged this choice for review at
+    implementation time; landing it gives the next phase the smallest
+    possible delta. Determinism: every existing scene renders
+    byte-identically (only `kind: LightKind::Point` exists; the
+    dispatch match has exactly one arm and the helper body is the
+    pre-Phase-1 `light_vector` verbatim), which the byte-pinned tests
+    in `tests/sdl_suite.rs` pin down without changes. No new scenes,
+    no SDL surface area, no test changes — Phase 1 is purely an
+    infrastructure checkpoint shaped for Phases 2 and 4.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -1777,23 +1833,16 @@ it.
 
 ### Phase 1 — `LightKind` refactor (no behavior change)
 
-Introduce the enum scaffolding with only the existing point-light
-variant. `Light` gains `kind: LightKind`, `LightKind` is a one-arm
-enum (`Point`), and every constructor (`Light::white`,
-`Light::point`) sets `kind: LightKind::Point`. `collect_lights`,
-`light_vector`, and `shade_pixel` are updated mechanically — the
-variant arm dispatches to today's behavior. SDL `(light-white ...)`
-and `(light-point ...)` are unchanged in shape (they still produce
-`Value::Light(Rc<Light>)`); the `Light` they wrap just carries
-the new `kind` field. Goal: every existing scene renders
-byte-identically (the byte-pinned tests in `tests/sdl_suite.rs`
-are the regression net), the codebase is shaped for the next two
-phases, and the variant-dispatch pattern is in place without yet
-exposing it. Reuses the existing `light?` predicate.
-
-This is a deliberate refactor-only checkpoint matching the same
-"infrastructure first, no behavior change" pattern the metallic,
-transparency, and depth-of-field features all used.
+Done; see "Recent work history." Summary: `Light` gained a
+`kind: LightKind` field, `LightKind` is a one-arm enum (`Point`),
+constructors set `kind: LightKind::Point`. `light_vector` is now a
+thin dispatcher matching on `light.kind` that delegates to
+`light_vector_point` (the pre-Phase-1 body, unchanged); Phase 2's
+`light_vector_spot` slots in as a sibling. `Shape::collect_lights`
+propagates `kind` through to the world-space `Light` it builds.
+`shade_pixel` is unchanged — it stays light-type-agnostic.
+Every existing scene renders byte-identically; the byte-pinned
+tests in `tests/sdl_suite.rs` pass without modification.
 
 ### Phase 2 — Spotlight (`Spot` variant)
 

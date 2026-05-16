@@ -580,10 +580,19 @@ impl Shape {
     pub fn collect_lights(&self, world_from_local: Affine, out: &mut Vec<Light>) {
         match self {
             Shape::Light(l) => {
+                // Common fields (color, intensity, kind) carry through
+                // unchanged because affines don't carry photometric
+                // meaning. Only `location` — and, in future variants,
+                // per-`LightKind` fields like a spotlight's `direction`
+                // or an area light's `axis` — gets transformed. The
+                // `kind` field copies across as-is in Phase 1; later
+                // phases match on `l.kind` here to transform the
+                // variant-specific geometry under `world_from_local`.
                 out.push(Light {
                     location: world_from_local.transform_point(l.location),
                     color: l.color,
                     intensity: l.intensity,
+                    kind: l.kind,
                 });
             }
             Shape::Group(children) => {

@@ -84,16 +84,44 @@ pub struct Surface {
     pub metallic: bool,
 }
 
-/// A point light source. Carries an emitted color and a scalar intensity
-/// so that scenes can use multiple visually distinct lights for testing
-/// and artistic control. The current shading model is white-implicit
-/// when `color = [1.0, 1.0, 1.0]` and `intensity = 1.0`, so existing
-/// scenes can be ported by wrapping their location in `Light::white`.
+/// Per-variant data for a light source. Phase 1 of the "Light types:
+/// spotlights and area lights" plan introduces this as a one-arm enum
+/// carrying no variant-specific data; subsequent phases extend it with
+/// `Spot { direction, inner_angle, outer_angle }` (Phase 2) and
+/// `Area { axis, radius }` (Phase 4).
+///
+/// The split is a separate field on `Light` rather than turning `Light`
+/// itself into an enum: `location`, `color`, and `intensity` are
+/// genuinely shared across every light type and are read directly in
+/// `shade_pixel` (`l.color`, `l.intensity`) and `collect_lights`
+/// (`l.location`). Variant dispatch lives where it actually matters —
+/// `collect_lights`, which transforms per-variant fields under the
+/// accumulated affine, and the shadow-ray helper `light_vector`, which
+/// applies per-variant attenuation on top of the transmittance walk.
+/// `shade_pixel` stays light-type-agnostic: it just consumes the
+/// `(Vector, f64)` returned by `light_vector` and does Lambert + Phong
+/// against the direction.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum LightKind {
+    /// Omni-directional point light. Phase-1 default; the only variant
+    /// that existed before this work.
+    Point,
+}
+
+/// A light source. Common fields (`location`, `color`, `intensity`) sit
+/// on the struct because every light kind needs them and the shading
+/// code reads them directly; the `kind` field carries variant-specific
+/// data. See `LightKind` for the design rationale.
+///
+/// The current shading model is white-implicit when
+/// `color = [1.0, 1.0, 1.0]` and `intensity = 1.0`, so existing scenes
+/// can be ported by wrapping their location in `Light::white`.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Light {
     pub location: Point,
     pub color: LinearColor,
     pub intensity: f64,
+    pub kind: LightKind,
 }
 
 impl Light {
@@ -104,12 +132,13 @@ impl Light {
             location,
             color: [1.0, 1.0, 1.0],
             intensity: 1.0,
+            kind: LightKind::Point,
         }
     }
 
     /// Point light with an explicit color and intensity.
     pub const fn point(location: Point, color: LinearColor, intensity: f64) -> Light {
-        Light { location, color, intensity }
+        Light { location, color, intensity, kind: LightKind::Point }
     }
 }
 
@@ -463,35 +492,51 @@ impl PartialEq for RayHit {
 }
 
 /// Shadow-ray test from `light` to `point`, returning the light's
-/// direction-of-travel ray together with the *transmittance* along
-/// it — the fraction of the light that survives the trip.
+/// direction-of-travel ray together with the *transmittance* along it
+/// — the fraction of the light that survives the trip — for the
+/// caller (`shade_pixel`) to scale this light's contribution by.
 ///
-/// Phase 2 of the transparency plan: instead of a binary
-/// reaches / fully-occluded answer, the shadow ray is walked from the
-/// light toward the shaded point with a repeated-nearest-hit loop,
-/// and every occluder strictly between the light and the point
-/// multiplies the running transmittance by its surface `transparency`
-/// (0.0 = opaque, 1.0 = fully clear). An opaque occluder drives
-/// transmittance to 0 and the walk stops early; transparent occluders
-/// attenuate and the walk continues to the next hit.
+/// Phase 1 of the "Light types: spotlights and area lights" plan
+/// makes this a dispatch function on `light.kind`. The shared
+/// transmittance walk (from Phase 2 of the transparency plan) lives
+/// in `light_vector_point`; Phase 2 of the light-types plan will add
+/// `light_vector_spot` next to it, which will reuse the same
+/// transmittance walk and fold a smoothstep cone-falloff factor into
+/// the returned scalar. `shade_pixel` stays light-type-agnostic — it
+/// just multiplies its Lambert + Phong contribution by whatever
+/// scalar comes back here.
 ///
 /// Returns:
-/// - `None` when transmittance reaches 0 — fully shadowed, and the
-///   caller can skip this light's shading entirely.
+/// - `None` when the light contributes nothing (e.g. transmittance
+///   reached 0 — fully shadowed). The caller can skip this light's
+///   shading entirely.
 /// - `Some((ray, transmittance))` otherwise, with `transmittance` in
-///   `(0.0, 1.0]`. `1.0` means nothing transparent was in the way
-///   (the pre-Phase-2 "unoccluded" case); the caller scales this
-///   light's full contribution by the returned factor.
+///   `(0.0, 1.0]`. `1.0` means nothing transparent was in the way;
+///   the caller scales this light's full contribution by the
+///   returned factor.
 ///
 /// Transmittance is a scalar, not a per-channel color: the light is
 /// attenuated greyscale, not tinted by the occluder's body color.
-/// This keeps Phase 2 consistent with Phase 1's primary-ray
-/// transmission, which is likewise untinted (`lerp(opaque,
-/// transmitted, transparency)` in `shade_pixel`). Colored shadows —
-/// red glass casting a red-tinted shadow — are deferred to land
-/// alongside colored transmission, most naturally with the
-/// refraction work.
+/// This keeps Phase 2 of the transparency plan consistent with
+/// Phase 1's primary-ray transmission, which is likewise untinted
+/// (`lerp(opaque, transmitted, transparency)` in `shade_pixel`).
+/// Colored shadows — red glass casting a red-tinted shadow — are
+/// deferred to land alongside colored transmission, most naturally
+/// with the refraction work.
 fn light_vector(point: &Point, scene: &Scene, light: &Light) -> Option<(Vector, f64)> {
+    match light.kind {
+        LightKind::Point => light_vector_point(point, scene, light),
+    }
+}
+
+/// Shadow-ray test for a point light: the transmittance walk from the
+/// light's `location` toward `point`, with every occluder strictly
+/// between them multiplying the running transmittance by its surface
+/// `transparency` (0.0 = opaque, 1.0 = fully clear). An opaque
+/// occluder drives transmittance to 0 and the walk stops early;
+/// transparent occluders attenuate and the walk continues to the next
+/// hit.
+fn light_vector_point(point: &Point, scene: &Scene, light: &Light) -> Option<(Vector, f64)> {
     let light_direction = subp(*point, light.location);
 
     let light_distance = lenp(light_direction);
