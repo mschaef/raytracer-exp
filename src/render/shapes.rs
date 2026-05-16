@@ -10,6 +10,7 @@
 
 use crate::render::{
     Light,
+    LightKind,
     Point,
     Surface,
     Hittable,
@@ -580,19 +581,33 @@ impl Shape {
     pub fn collect_lights(&self, world_from_local: Affine, out: &mut Vec<Light>) {
         match self {
             Shape::Light(l) => {
-                // Common fields (color, intensity, kind) carry through
+                // Photometric fields (color, intensity) carry through
                 // unchanged because affines don't carry photometric
-                // meaning. Only `location` — and, in future variants,
-                // per-`LightKind` fields like a spotlight's `direction`
-                // or an area light's `axis` — gets transformed. The
-                // `kind` field copies across as-is in Phase 1; later
-                // phases match on `l.kind` here to transform the
-                // variant-specific geometry under `world_from_local`.
+                // meaning. `location` always transforms as a point.
+                // Variant-specific geometric fields transform per
+                // `LightKind` arm: a spotlight's `direction` is a
+                // vector (linear part only — translations don't apply),
+                // renormalized because non-uniform scale can change
+                // its magnitude even when the source was unit-length.
+                // Phase 4 will add an `Area { axis, .. }` arm here
+                // that transforms `axis` the same way.
+                let kind = match l.kind {
+                    LightKind::Point => LightKind::Point,
+                    LightKind::Spot { direction, inner_angle, outer_angle } => {
+                        LightKind::Spot {
+                            direction: normalizep(
+                                world_from_local.transform_vector(direction),
+                            ),
+                            inner_angle,
+                            outer_angle,
+                        }
+                    }
+                };
                 out.push(Light {
                     location: world_from_local.transform_point(l.location),
                     color: l.color,
                     intensity: l.intensity,
-                    kind: l.kind,
+                    kind,
                 });
             }
             Shape::Group(children) => {

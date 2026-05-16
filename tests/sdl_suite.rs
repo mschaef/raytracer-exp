@@ -470,6 +470,11 @@ fn sphere_surface_test_scene_loads() {
 }
 
 #[test]
+fn spotlight_test_scene_loads() {
+    assert_scene_loads("spotlight_test.lisp", "spotlight-test-scene");
+}
+
+#[test]
 fn transparency_test_scene_loads() {
     assert_scene_loads("transparency_test.lisp", "transparency-test-scene");
 }

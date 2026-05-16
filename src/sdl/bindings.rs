@@ -37,7 +37,7 @@ use std::path::Path;
 use std::rc::Rc;
 
 use crate::render::color::LinearColor;
-use crate::render::geometry::Point;
+use crate::render::geometry::{Point, lenp, normalizep, EPSILON};
 use crate::render::mesh::load_obj;
 use crate::render::render;
 use crate::render::shapes::{
@@ -69,6 +69,7 @@ pub fn install(env: &EnvRef) {
     // Lights.
     define_native(env, "light-white", builtin_light_white);
     define_native(env, "light-point", builtin_light_point);
+    define_native(env, "light-spot", builtin_light_spot);
 
     // Cameras.
     define_native(env, "camera-looking-at", builtin_camera_looking_at);
@@ -557,6 +558,54 @@ fn builtin_light_point(args: &[Value], pos: &Position) -> Value {
     let color = require_point(&args[1], "light-point color", pos);
     let intensity = require_number(&args[2], "light-point intensity", pos);
     Value::Light(Rc::new(Light::point(location, color, intensity)))
+}
+
+/// `(light-spot [x y z] [dx dy dz] [r g b] intensity inner-angle outer-angle)`.
+///
+/// `direction` is normalized at the binding boundary so callers can
+/// supply any non-zero vector; the renderer assumes a unit-length
+/// direction in the cone-falloff math. `inner-angle` and
+/// `outer-angle` are half-angles in radians measured from the axis
+/// (`(/ pi 6)` ≈ 30° is a typical narrow spotlight; `(/ pi 4)` ≈ 45°
+/// is wide). The constraint is `inner-angle ≤ outer-angle`; reversing
+/// them collapses the smoothstep band and is rejected here rather
+/// than letting the renderer silently produce a hard-edged cone.
+fn builtin_light_spot(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 6, "light-spot", pos);
+    let location = require_point(&args[0], "light-spot location", pos);
+    let direction = require_point(&args[1], "light-spot direction", pos);
+    let color = require_point(&args[2], "light-spot color", pos);
+    let intensity = require_number(&args[3], "light-spot intensity", pos);
+    let inner_angle = require_number(&args[4], "light-spot inner-angle", pos);
+    let outer_angle = require_number(&args[5], "light-spot outer-angle", pos);
+
+    if lenp(direction) < EPSILON {
+        sdl_panic!(
+            pos,
+            "light-spot: direction must be a non-zero vector (got [{} {} {}])",
+            direction[0],
+            direction[1],
+            direction[2],
+        );
+    }
+    if inner_angle > outer_angle {
+        sdl_panic!(
+            pos,
+            "light-spot: inner-angle ({}) must be ≤ outer-angle ({})",
+            inner_angle,
+            outer_angle,
+        );
+    }
+
+    let dir_unit = normalizep(direction);
+    Value::Light(Rc::new(Light::spot(
+        location,
+        dir_unit,
+        color,
+        intensity,
+        inner_angle,
+        outer_angle,
+    )))
 }
 
 // ---------------------------------------------------------------------------

@@ -380,26 +380,53 @@ checkered ground used by most scenes), and the `surface-gold` /
 emitted color; `intensity` is a scalar multiplier. The two are
 conceptually distinct knobs even though their numerical effect overlaps
 — color is hue, intensity is brightness. `kind` carries variant-specific
-data — Phase 1 of the "Light types: spotlights and area lights" plan
-landed the enum scaffolding with a single `LightKind::Point` arm; Phase 2
-will add `Spot { direction, inner_angle, outer_angle }`, Phase 4 will add
-`Area { axis, radius }`. The shared fields stay on the struct (rather
-than turning `Light` itself into an enum) because `shade_pixel` and
-`collect_lights` read `location` / `color` / `intensity` directly — a
-pure enum would force accessor methods or per-call-site `match` arms for
-fields every variant has.
+data: as of Phase 2 of the "Light types: spotlights and area lights"
+plan, `LightKind` is `Point` (omni-directional, the original behavior)
+or `Spot { direction, inner_angle, outer_angle }` (directed cone with
+smooth falloff). Phase 4 will add `Area { axis, radius }`. The shared
+fields stay on the struct (rather than turning `Light` itself into an
+enum) because `shade_pixel` and `collect_lights` read `location` /
+`color` / `intensity` directly — a pure enum would force accessor
+methods or per-call-site `match` arms for fields every variant has.
 
 Convenience constructors: `Light::white(location)` for full-intensity
 white (matches the legacy implicit defaults), `Light::point(location,
-color, intensity)` for the general case. Both set `kind:
-LightKind::Point`. Variant dispatch on `kind` lives in two places: the
-shadow-ray helper `light_vector`, which delegates to a per-kind helper
-(`light_vector_point` today; `light_vector_spot` etc. land in later
-phases) that returns the `(Vector, transmittance)` pair `shade_pixel`
-consumes — `shade_pixel` itself stays light-type-agnostic; and
-`Shape::collect_lights`, which transforms the per-variant geometric
-fields under the accumulated affine when extracting world-space lights
-at render entry.
+color, intensity)` for the general case, and `Light::spot(location,
+direction, color, intensity, inner_angle, outer_angle)` for a
+spotlight. All three are `const fn`. The Rust constructors assume the
+caller-supplied direction is unit-length and `inner_angle ≤
+outer_angle`; the SDL `(light-spot ...)` binding normalizes the
+direction and rejects reversed angles at the script boundary, so
+script-built spotlights satisfy both invariants by construction.
+
+Variant dispatch on `kind` lives in two places. `light_vector`
+delegates to a per-kind helper that returns the `(Vector,
+transmittance)` pair `shade_pixel` consumes:
+
+- `light_vector_point` does the transmittance walk (Phase 2 of the
+  transparency plan).
+- `light_vector_spot` computes a cone falloff factor — `smoothstep(
+  cos(outer_angle), cos(inner_angle), cos_theta)` where `cos_theta`
+  is the dot product of the spotlight's `direction` with the unit
+  light→point ray — *before* the walk, so a shaded point outside
+  the outer cone returns `None` immediately without hit-testing.
+  Inside the cone, it delegates to the point-light walk and folds
+  the cone factor into the returned transmittance. The transparency
+  behavior of intervening occluders is therefore identical for both
+  light kinds (a glass pane attenuates a spotlight the same way it
+  attenuates a point light).
+
+`shade_pixel` stays light-type-agnostic: it just multiplies its
+Lambert + Phong contribution by whatever scalar the helper returned.
+
+`Shape::collect_lights` walks the scene graph extracting world-space
+lights. The variant arm transforms the per-variant geometric fields
+under the accumulated affine: a spotlight's `direction` is transformed
+by the linear part of the affine and renormalized (translations don't
+apply to vectors, and non-uniform scale can change a unit vector's
+magnitude). `inner_angle` / `outer_angle` are unaffected — they're
+half-angles, not vectors. Phase 4 will add an `Area { axis, .. }` arm
+here that transforms `axis` the same way.
 
 Lights live inside `Scene::root` as `Shape::Light` nodes alongside
 geometry. The renderer reaches them via `Shape::collect_lights`,
@@ -1330,6 +1357,73 @@ Approximate order of recent commits, oldest first:
     no SDL surface area, no test changes — Phase 1 is purely an
     infrastructure checkpoint shaped for Phases 2 and 4.
 
+33. **Light types phase 2: spotlights (`Spot` variant).** Phase 2 of
+    the "Light types: spotlights and area lights" plan. `LightKind`
+    gained `Spot { direction: Point, inner_angle: f64, outer_angle:
+    f64 }`: `direction` is the cone axis (unit vector pointing the
+    way the light shines), `inner_angle` and `outer_angle` are
+    half-angles in radians measured from the axis. Angles stored
+    rather than cosines for debuggability — cosines are derived at
+    the comparison site. New `Light::spot` `const fn` constructor.
+    Cone falloff is `smoothstep(cos(outer), cos(inner), cos_theta)`
+    where `cos_theta = dot(direction, normalize(point - location))`.
+    Comparison is done in cosine space because `cos` is monotonically
+    decreasing on `[0, π]`. Implemented as explicit clamp-at-edge
+    branches (outside outer → 0, inside inner → 1, transition band
+    → Hermite cubic), which both reads cleaner than a clamp-and-cube
+    and dodges a 0/0 when `inner_angle == outer_angle` (a
+    hard-edged cone — both edges coincide, every input matches one
+    of the clamp arms before hitting the band's division).
+    Renderer: `light_vector` matched the new arm to a fresh helper
+    `light_vector_spot`, which computes the cone factor *first* and
+    returns `None` for points outside the outer cone before doing
+    any hit-testing — the early-out keeps spotlight scenes from
+    paying transmittance-walk cost for pixels the spotlight can't
+    reach. Inside the cone, it delegates to `light_vector_point`
+    for the existing transmittance walk and folds the cone factor
+    into the returned scalar, so transparent occluders attenuate
+    spotlights the same way they attenuate point lights (a glass
+    pane in a spotlight beam behaves consistently with the same
+    pane in front of a point light). `Shape::collect_lights`'s
+    `Spot` arm transforms `direction` by the linear part of the
+    accumulated affine (`Affine::transform_vector`) and
+    renormalizes — non-uniform scale can change a unit vector's
+    magnitude even when the source was unit-length, so the
+    renormalize is load-bearing. Angles aren't vectors and don't
+    transform. SDL: `(light-spot location direction color intensity
+    inner-angle outer-angle)` positional binding installed
+    alongside `light-white` and `light-point`. Validates
+    `lenp(direction) >= EPSILON` (rejects zero vectors) and
+    `inner-angle <= outer-angle` (rejects reversed angles, which
+    would produce a hard rather than soft inner edge — bounded but
+    surprising) with explicit `sdl_panic!` messages naming the
+    bad value, then normalizes the direction so direct Rust
+    callers using the `Light::spot` constructor and script callers
+    coming through the binding both end up with the same
+    unit-direction invariant. Required two new imports in
+    `src/sdl/bindings.rs` (`lenp`, `normalizep`, `EPSILON` from
+    `crate::render::geometry`) and a new use of `LightKind` in
+    `src/render/shapes.rs` for the `collect_lights` match.
+    New `scenes/spotlight_test.lisp` (a spotlight pointed straight
+    down at the checker floor with three spheres along +x at
+    progressively larger angular offsets — red inside the inner
+    cone, green in the transition band, blue outside the outer
+    cone) and a `spotlight_test_scene_loads` smoke test in
+    `tests/sdl_suite.rs`. `tests/sdl/bindings_lights.lisp`
+    extended with spotlight construction, structural equality
+    (covering each of `direction` / `inner-angle` / `outer-angle`
+    / `intensity` separately so a regression in any one shows up
+    distinctly), the boundary normalization check (two spotlights
+    built from parallel direction vectors of different magnitudes
+    compare equal because the binding normalizes both at
+    construction), and a Spot-vs-Point inequality. Existing
+    byte-pinned tests in `tests/sdl_suite.rs` are unaffected:
+    point lights still flow through the `LightKind::Point` arm,
+    and `light_vector_point`'s body is unchanged — Phase 2 added
+    code but didn't modify any path the point-light renderer
+    takes. Phase 3 (spotlight ergonomics: aim-at-target
+    constructor, possible distance attenuation) remains deferred.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -1846,50 +1940,22 @@ tests in `tests/sdl_suite.rs` pass without modification.
 
 ### Phase 2 — Spotlight (`Spot` variant)
 
-Add `LightKind::Spot { direction: Point, inner_angle: f64,
-outer_angle: f64 }`: a directed cone with a smooth falloff
-between `inner_angle` (full intensity) and `outer_angle` (zero).
-`direction` is the cone axis as a unit vector pointing away from
-the light's position; `inner_angle` and `outer_angle` are
-half-angles in radians measured from the axis. Stored as angles
-rather than cosines for debuggability; the cosines are derived
-once at the falloff site (or, if profiling shows it matters,
-precomputed by the constructor).
-
-`collect_lights` for a `Spot`-kinded light transforms the
-direction by the linear part of the accumulated affine
-(`transform_vector` then renormalize), in addition to transforming
-the location. This is the only place per-variant transform
-handling lives — `Shape::Transform`'s cached forward affine
-already exposes both pieces; we just call the matching helper for
-each.
-
-The shadow-ray helper applies cone falloff *after* the
-transmittance walk: compute `cos_theta = dot(normalize(light → point),
-direction)`; map through `smoothstep(cos(outer), cos(inner),
-cos_theta)`; multiply into the returned scalar. A point outside
-the outer cone returns `None` (skip the light entirely, same
-escape hatch as a fully opaque occluder, so `shade_pixel`
-contributes nothing from this light without further branching).
-
-SDL: new positional constructor `(light-spot location direction
-color intensity inner-angle outer-angle)`. The `direction`
-argument is a point/vector — same convention as everywhere else
-in the SDL. The auto-wrap from `Value::Light` to `Shape::Light`
-is unchanged because spotlights *are* lights; nothing new at the
-shape-layer surface. Existing `light?` predicate still matches.
-A `(spotlight ...)` helper in `scenes/_common.lisp` is a possible
-ergonomics layer (likely settles to two of them: one taking
-direction, one taking an aim-at-target — see Phase 3).
-
-New `scenes/spotlight_test.lisp` (a spotlight pointed at the
-checker floor, a couple of objects intersecting its cone for
-visible cone-edge falloff) with a `spotlight_test_scene_loads`
-smoke test. `tests/sdl/bindings_lights.lisp` (or whatever the
-current per-topic test file is called) is extended to exercise
-`(light-spot ...)`. Byte-pinned tests are unaffected: point
-lights still flow through the `Point` arm with exactly the
-current behavior, and no existing scene uses spotlights.
+Done; see "Recent work history." Summary: `LightKind` gained a
+`Spot { direction, inner_angle, outer_angle }` arm; `Light::spot`
+is the `const fn` constructor. The shadow-ray helper
+`light_vector_spot` applies an early `smoothstep(cos(outer),
+cos(inner), cos_theta)` cone-falloff check before delegating to
+`light_vector_point` for the transmittance walk, so shaded points
+outside the outer cone skip the walk entirely.
+`Shape::collect_lights` transforms `direction` by the linear part
+of the accumulated affine and renormalizes when collecting a
+`Spot`-kinded light. SDL: positional `(light-spot location
+direction color intensity inner-angle outer-angle)`; the binding
+normalizes the direction and rejects `inner > outer` at the
+boundary. New `scenes/spotlight_test.lisp` + smoke test, plus
+spotlight cases added to `tests/sdl/bindings_lights.lisp`. Point
+lights flow through the `Point` arm unchanged, so existing
+byte-pinned tests pass without modification.
 
 ### Phase 3 — Spotlight ergonomics (optional, deferred)
 

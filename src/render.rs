@@ -106,6 +106,26 @@ pub enum LightKind {
     /// Omni-directional point light. Phase-1 default; the only variant
     /// that existed before this work.
     Point,
+    /// Directed spotlight. `direction` is the cone axis as a unit
+    /// vector pointing *away* from the light's `location` (i.e. the
+    /// direction the light shines). `inner_angle` and `outer_angle`
+    /// are half-angles in radians measured from `direction`:
+    ///
+    /// - Inside the inner cone (angle ≤ `inner_angle`): full intensity.
+    /// - Outside the outer cone (angle ≥ `outer_angle`): zero (the
+    ///   light contributes nothing to that point).
+    /// - In the transition band: a smoothstep falloff between the two.
+    ///
+    /// Stored as angles rather than cosines for debuggability — the
+    /// cone-falloff helper derives `cos(inner_angle)` / `cos(outer_angle)`
+    /// at the dot-product comparison site. `inner_angle ≤ outer_angle`
+    /// is a precondition the SDL binding enforces; constructed lights
+    /// pass that constraint through without re-checking.
+    Spot {
+        direction: Point,
+        inner_angle: f64,
+        outer_angle: f64,
+    },
 }
 
 /// A light source. Common fields (`location`, `color`, `intensity`) sit
@@ -139,6 +159,37 @@ impl Light {
     /// Point light with an explicit color and intensity.
     pub const fn point(location: Point, color: LinearColor, intensity: f64) -> Light {
         Light { location, color, intensity, kind: LightKind::Point }
+    }
+
+    /// Spotlight at `location` aimed along `direction`, with cone
+    /// half-angles `inner_angle` (full intensity) and `outer_angle`
+    /// (cutoff) in radians measured from the axis.
+    ///
+    /// `direction` is the caller's responsibility to supply
+    /// unit-length — the cone-falloff helper assumes it. Likewise the
+    /// caller is responsible for `inner_angle ≤ outer_angle`. The SDL
+    /// `(light-spot ...)` binding normalizes the direction and
+    /// validates the angle ordering at the script boundary, which is
+    /// the intended construction path; direct Rust callers either
+    /// match that contract or accept the consequences (a non-unit
+    /// `direction` makes the cone falloff non-physical; reversed
+    /// angles collapse the smoothstep band to zero width, which is
+    /// mathematically defined — both edges return 0 — but means the
+    /// inner cone has a hard rather than soft edge).
+    pub const fn spot(
+        location: Point,
+        direction: Point,
+        color: LinearColor,
+        intensity: f64,
+        inner_angle: f64,
+        outer_angle: f64,
+    ) -> Light {
+        Light {
+            location,
+            color,
+            intensity,
+            kind: LightKind::Spot { direction, inner_angle, outer_angle },
+        }
     }
 }
 
@@ -526,6 +577,9 @@ impl PartialEq for RayHit {
 fn light_vector(point: &Point, scene: &Scene, light: &Light) -> Option<(Vector, f64)> {
     match light.kind {
         LightKind::Point => light_vector_point(point, scene, light),
+        LightKind::Spot { direction, inner_angle, outer_angle } => {
+            light_vector_spot(point, scene, light, direction, inner_angle, outer_angle)
+        }
     }
 }
 
@@ -598,6 +652,84 @@ fn light_vector_point(point: &Point, scene: &Scene, light: &Light) -> Option<(Ve
     } else {
         Some((ray, transmittance))
     }
+}
+
+/// Shadow-ray test for a spotlight: cone falloff on top of the
+/// transmittance walk.
+///
+/// The falloff factor is computed *before* the transmittance walk so
+/// that a shaded point outside the outer cone (where the spotlight
+/// contributes nothing regardless of occlusion) skips the walk
+/// entirely — an early-out analogous to the opaque-occluder early-out
+/// in `light_vector_point`. Inside the cone, the walk runs identically
+/// to the point-light path and the cone factor is folded into the
+/// returned transmittance.
+///
+/// Cone falloff:
+/// `smoothstep(cos(outer_angle), cos(inner_angle), cos_theta)` where
+/// `cos_theta = dot(normalize(point - light.location), direction)`.
+/// Comparison is done in cosine space because `cos` is monotonically
+/// decreasing on `[0, π]`: a larger angle means a smaller cosine, so
+/// "angle ≤ inner_angle" becomes "cos_theta ≥ cos(inner_angle)". The
+/// edges-clamped branches handle the degenerate `inner_angle ==
+/// outer_angle` case (hard-edged cone) without dividing by zero.
+fn light_vector_spot(
+    point: &Point,
+    scene: &Scene,
+    light: &Light,
+    direction: Point,
+    inner_angle: f64,
+    outer_angle: f64,
+) -> Option<(Vector, f64)> {
+    let light_to_point = subp(*point, light.location);
+    let dist = lenp(light_to_point);
+    if dist < EPSILON {
+        // Shaded point coincident with the light's location: the
+        // light→point direction is undefined and the cone test
+        // doesn't apply. Fall through to the point-light path,
+        // which handles dist-near-zero gracefully and produces
+        // whatever shading the point light would. This is a
+        // degenerate case mostly relevant to authoring mistakes —
+        // a light placed exactly on a surface — rather than a real
+        // rendering scenario.
+        return light_vector_point(point, scene, light);
+    }
+    let light_to_point_unit = [
+        light_to_point[0] / dist,
+        light_to_point[1] / dist,
+        light_to_point[2] / dist,
+    ];
+    let cos_theta = dotp(light_to_point_unit, direction);
+
+    let cos_inner = inner_angle.cos();
+    let cos_outer = outer_angle.cos();
+
+    // Hermite-cubic smoothstep with explicit clamping at both edges.
+    // The first arm handles "outside the outer cone"; the second
+    // handles "inside the inner cone"; the third is the transition
+    // band. Splitting it this way also avoids a 0/0 when
+    // `inner_angle == outer_angle` (the denominator vanishes but
+    // every input has already matched one of the clamp arms).
+    let cone_falloff = if cos_theta <= cos_outer {
+        0.0
+    } else if cos_theta >= cos_inner {
+        1.0
+    } else {
+        let t = (cos_theta - cos_outer) / (cos_inner - cos_outer);
+        t * t * (3.0 - 2.0 * t)
+    };
+
+    if cone_falloff <= EPSILON {
+        return None;
+    }
+
+    // Inside the cone: run the same shadow-ray transmittance walk
+    // as the point-light path. Reusing the helper keeps the
+    // transparent-shadow behavior identical for both kinds (an
+    // important property — a glass pane should attenuate a
+    // spotlight the same way it attenuates a point light).
+    let (ray, transmittance) = light_vector_point(point, scene, light)?;
+    Some((ray, transmittance * cone_falloff))
 }
 
 /// Recursion-budget tracker threaded through `ray_color` /
