@@ -1709,6 +1709,380 @@ functions have unit tests in `src/render/sampler.rs` (concentric map
 stays in the unit disk, landmarks map correctly, lens CP rotation is
 decorrelated from the sub-pixel rotation).
 
+## Light types: spotlights and area lights — implementation plan
+
+Adds non-point light types to the renderer. Spotlights first
+(directional cone with smooth falloff), then area lights (extended
+emitters that produce soft shadows). The work splits into six
+phases, three for spotlights and three for area lights, with the
+last in each group an optional polish step that can be picked up
+later. Each non-polish phase is sized to land in one session and
+leave the codebase shippable.
+
+### Design
+
+**Light shape.** The Future-directions bullet anticipated turning
+`Light` into an enum "following the same pattern as `Shape`." The
+recommended concrete shape is a *hybrid*: keep `Light` as a struct
+with the fields every light has in common (`location`, `color`,
+`intensity`) and add a `kind: LightKind` field that carries the
+variant-specific data. Reasons: those three fields are genuinely
+shared (read directly in `shade_pixel` as `l.color`, `l.intensity`,
+and in `collect_lights` as `l.location`), so a pure enum would
+force either accessor methods or `match` arms at every field
+read. The hybrid keeps mechanical churn low while still getting
+variant dispatch where it actually matters — `collect_lights`
+(different fields to transform per variant) and the shadow-ray
+helper (different sampling and falloff per variant). This decision
+is flagged below.
+
+**Where variant dispatch lives.** Two places: `collect_lights`
+already walks the scene graph extracting world-space lights — it
+needs to transform extra per-variant fields (a spotlight's
+direction, an area light's extent axes) under the accumulated
+affine. And the shadow-ray helper currently named `light_vector`
+needs to apply per-variant attenuation (spotlight cone falloff,
+area light sample-point selection) on top of the transmittance
+walk it already does. `shade_pixel` stays light-type-agnostic — it
+already just consumes `(Vector, f64)` and does Lambert + Phong
+with the returned direction; we route all the type-specific work
+through the scalar.
+
+**Sampling strategy for area lights.** Area lights produce soft
+shadows by taking *multiple* shadow rays to different points on
+the emitter's surface and averaging. There are two ways to
+distribute those rays:
+
+- Fixed N shadow samples per area light per shaded point.
+  Predictable, but multiplies shadow-ray cost by N for every
+  pixel regardless of whether that pixel is in penumbra or not.
+- One shadow sample per *pixel sample*, jittered using the
+  existing Halton + Cranley-Patterson sampler in
+  `render::sampler` with a dedicated base pair (e.g. bases
+  11, 13 — distinct from sub-pixel 2,3 and lens 5,7). The
+  adaptive oversampler then drives extra samples into penumbra
+  pixels naturally, because that's where per-pixel variance is
+  high. Fully shadowed and fully lit pixels terminate at
+  `min_samples` and pay almost nothing.
+
+The second is the codebase-aligned choice. Both the adaptive
+oversampling plan and the DOF plan explicitly anticipate it
+("area lights get adaptive sample distribution for free" is the
+same observation as "DOF gets adaptive sample distribution for
+free"). The cost is one structural change: thread a per-sample
+2D light coordinate down from `pixel_color` through `ray_color` /
+`shade_pixel` to the light-sampling helper. Point lights and
+spotlights ignore the coordinate; only the area variant consumes
+it.
+
+### Phase 1 — `LightKind` refactor (no behavior change)
+
+Introduce the enum scaffolding with only the existing point-light
+variant. `Light` gains `kind: LightKind`, `LightKind` is a one-arm
+enum (`Point`), and every constructor (`Light::white`,
+`Light::point`) sets `kind: LightKind::Point`. `collect_lights`,
+`light_vector`, and `shade_pixel` are updated mechanically — the
+variant arm dispatches to today's behavior. SDL `(light-white ...)`
+and `(light-point ...)` are unchanged in shape (they still produce
+`Value::Light(Rc<Light>)`); the `Light` they wrap just carries
+the new `kind` field. Goal: every existing scene renders
+byte-identically (the byte-pinned tests in `tests/sdl_suite.rs`
+are the regression net), the codebase is shaped for the next two
+phases, and the variant-dispatch pattern is in place without yet
+exposing it. Reuses the existing `light?` predicate.
+
+This is a deliberate refactor-only checkpoint matching the same
+"infrastructure first, no behavior change" pattern the metallic,
+transparency, and depth-of-field features all used.
+
+### Phase 2 — Spotlight (`Spot` variant)
+
+Add `LightKind::Spot { direction: Point, inner_angle: f64,
+outer_angle: f64 }`: a directed cone with a smooth falloff
+between `inner_angle` (full intensity) and `outer_angle` (zero).
+`direction` is the cone axis as a unit vector pointing away from
+the light's position; `inner_angle` and `outer_angle` are
+half-angles in radians measured from the axis. Stored as angles
+rather than cosines for debuggability; the cosines are derived
+once at the falloff site (or, if profiling shows it matters,
+precomputed by the constructor).
+
+`collect_lights` for a `Spot`-kinded light transforms the
+direction by the linear part of the accumulated affine
+(`transform_vector` then renormalize), in addition to transforming
+the location. This is the only place per-variant transform
+handling lives — `Shape::Transform`'s cached forward affine
+already exposes both pieces; we just call the matching helper for
+each.
+
+The shadow-ray helper applies cone falloff *after* the
+transmittance walk: compute `cos_theta = dot(normalize(light → point),
+direction)`; map through `smoothstep(cos(outer), cos(inner),
+cos_theta)`; multiply into the returned scalar. A point outside
+the outer cone returns `None` (skip the light entirely, same
+escape hatch as a fully opaque occluder, so `shade_pixel`
+contributes nothing from this light without further branching).
+
+SDL: new positional constructor `(light-spot location direction
+color intensity inner-angle outer-angle)`. The `direction`
+argument is a point/vector — same convention as everywhere else
+in the SDL. The auto-wrap from `Value::Light` to `Shape::Light`
+is unchanged because spotlights *are* lights; nothing new at the
+shape-layer surface. Existing `light?` predicate still matches.
+A `(spotlight ...)` helper in `scenes/_common.lisp` is a possible
+ergonomics layer (likely settles to two of them: one taking
+direction, one taking an aim-at-target — see Phase 3).
+
+New `scenes/spotlight_test.lisp` (a spotlight pointed at the
+checker floor, a couple of objects intersecting its cone for
+visible cone-edge falloff) with a `spotlight_test_scene_loads`
+smoke test. `tests/sdl/bindings_lights.lisp` (or whatever the
+current per-topic test file is called) is extended to exercise
+`(light-spot ...)`. Byte-pinned tests are unaffected: point
+lights still flow through the `Point` arm with exactly the
+current behavior, and no existing scene uses spotlights.
+
+### Phase 3 — Spotlight ergonomics (optional, deferred)
+
+Polish items that can be picked up if and when they earn their
+keep:
+
+- An aim-at-target constructor: `(light-spot-aimed location
+  target color intensity inner-angle outer-angle)` computes
+  `direction = normalize(target - location)`. Usually more
+  natural than supplying a direction vector directly. Likely
+  shipped as the *primary* constructor in `_common.lisp` with
+  the raw-direction form available for explicit cases.
+- Distance attenuation. No light currently has distance falloff,
+  and adding it for spotlights only would be inconsistent. If
+  it lands, it lands on the base `Light` struct (controlled by
+  an explicit field rather than tied to a variant). Out of
+  scope for Phase 2 either way.
+- A diagnostic visualization mode that draws cone outlines for
+  spotlights — useful while authoring scenes.
+
+None of these are required for the feature to function. Phase 3
+exists as a placeholder so the work has a clear deferred bucket.
+
+### Phase 4 — Area light: type + geometry (hard-shadow baseline)
+
+Add `LightKind::Area { axis: Point, radius: f64 }` — a disk
+emitter. `axis` is the disk's normal (also serves as the
+"forward" direction the disk emits along, in the negative-normal
+sense), `radius` is the disk radius. The disk is centered at the
+light's `location` and lies in the plane perpendicular to `axis`.
+
+Disk over quad as the first area-light shape: a single scalar
+radius vs. two basis vectors is simpler to construct, simpler to
+transform (one axis vector, no orthogonality constraint to
+preserve), and the concentric-disk sample map (`concentric_disk`
+in `render::sampler`) is already in tree — DOF Phase 1 added it.
+Quad emitters can land in Phase 6 if needed.
+
+`collect_lights` for an `Area`-kinded light transforms `axis` as
+a vector (linear part of the accumulated affine, renormalized).
+`radius` is left alone — uniform-scale-aware radius scaling is a
+nicety not worth Phase 4 complexity; users can adjust the radius
+directly. (The same caveat applies to the cylinder and cone
+primitives' radii — wrap in `Transform` for uniform-scale, use
+the constructor for non-uniform.)
+
+Phase 4 deliberately renders the area light as a *hard-shadowed*
+light: the shadow-ray helper samples the disk center exactly.
+The result looks like a point light at `location` plus a
+spotlight-style cosine attenuation against `axis` (so the disk
+only illuminates the half-space its front face points into).
+This lands the type, the SDL constructor, the transform handling,
+the test scene, and the smoke test as a self-contained
+checkpoint; the per-pixel sampler isn't touched yet.
+
+SDL: `(light-area location axis radius color intensity)`. New
+`scenes/area_light_test.lisp` (a disk light above a scene of
+simple geometry) and an `area_light_test_scene_loads` smoke test.
+Byte-pinned tests unaffected.
+
+The shadow-ray helper for `Area` reuses the existing
+transmittance walk; the only addition is the half-space check
+("is the shaded point on the lit side of the disk?") and the
+cosine-against-axis falloff factor folded into the returned
+scalar.
+
+### Phase 5 — Area light: soft shadows
+
+The payoff phase. Thread a 2D light-sample coordinate down from
+`pixel_color` through `ray_color` and `shade_pixel` to the
+shadow-ray helper. The coordinate is generated per pixel sample
+in `pixel_color` using a dedicated Halton base pair (recommended:
+11, 13 — distinct from sub-pixel 2,3 and lens 5,7) plus a
+dedicated Cranley-Patterson rotation seed for per-pixel
+decorrelation, mirroring exactly how lens sampling for DOF was
+wired in. The new sampler functions
+(`halton_area` / `cranley_patterson_area_offset`) live in
+`render::sampler` alongside the existing ones; they have unit
+tests pinning the radical-inverse landmarks and verifying the CP
+rotation decorrelates from sub-pixel and lens rotations.
+
+For `Point` and `Spot` lights the coordinate is ignored — the
+shadow-ray target is still `light.location`. For `Area`, the
+coordinate maps through `concentric_disk` to a unit-disk point;
+that point gets scaled by `radius` and oriented to the disk's
+plane (basis vectors derived from `axis`); the result is the
+*sample point on the disk*, which replaces `light.location` as
+the shadow ray's destination. The transmittance walk and the
+cosine-against-axis falloff are unchanged from Phase 4. A pixel
+that takes one pixel sample takes one shadow ray to one point on
+the disk; a pixel that takes 32 pixel samples takes 32 shadow
+rays to 32 well-distributed disk points. Penumbra pixels — where
+some samples reach the light and some don't — have high variance
+and the adaptive oversampler keeps sampling them until they
+stabilize. Fully shadowed and fully lit pixels terminate at
+`min_samples`.
+
+For recursive rays (reflection or transmission of a
+soft-shadowed surface), reuse the pixel sample's same light
+coordinate rather than re-deriving one per bounce. Bounces are
+rare enough that the bias is invisible, and per-bounce sample
+state would mean threading sampler state through recursion
+proper. This is the same "good enough" judgment call DOF made
+(reflection rays don't get fresh aperture jitter either).
+
+Threading the light coordinate alongside `Depth` through
+`ray_color` / `shade_pixel` is the one real architectural
+change in this plan. The `Depth` struct is the precedent — a
+small `Copy` blob threaded by value. The recommendation is to
+keep them separate (depth and light-sample coord are
+conceptually distinct and the call sites that change one
+rarely change the other), but a combined `RayContext` is a
+reasonable alternative.
+
+New `scenes/soft_shadow_test.lisp` (a disk area light with a
+visible radius casting a soft shadow from a single sphere onto
+the checker floor) with the corresponding smoke test. The
+`render-samples.png` heatmap should light up in the penumbra
+region — that's the "adaptive sampler doing the work"
+verification the CLAUDE.md anticipates.
+
+Byte-pinned tests: point lights still ignore the new
+coordinate, so they're byte-identical; the spotlight scene from
+Phase 2 likewise ignores it, byte-identical to itself across
+phases. The new `area_light_test` scene from Phase 4 *will*
+shift: it transitions from "hard shadow at disk center" to
+"soft shadow sampled across the disk." That's the intended
+behavior change, and the smoke test only verifies the scene
+loads, so nothing in the test suite breaks.
+
+### Phase 6 — Area light polish (optional, deferred)
+
+Polish items, sized like Phase 3:
+
+- Quad area lights. Add `LightKind::Area { shape: AreaShape,
+  axis, ... }` (or a separate variant) carrying the second
+  basis vector for a parallelogram emitter. Sample map is the
+  trivial unit-square map rather than `concentric_disk`. Most
+  of the renderer work is reusable from the disk case.
+- Sphere area lights — bulb-shaped emitters. The sampling
+  geometry is different enough to be a real chunk of work
+  (uniform spherical-cap sampling); worth its own phase if it
+  lands.
+- Importance sampling of the area light (sample weighted by
+  the solid angle the light subtends from the shaded point
+  rather than uniformly over the emitter's surface). Reduces
+  variance in penumbra at no per-sample cost. Worth measuring
+  against the unbiased uniform sample before committing.
+- Light-visible-as-geometry: make the area light's disk show
+  up in primary rays as a glowing surface rather than being
+  invisible like other lights. Currently `Shape::Light` is
+  `None` for all ray types; an area light is the first kind
+  where visibility makes physical sense (you can *see* the
+  bulb of a desk lamp). The cleanest path is probably an
+  optional emissive surface on the disk, not a Light variant
+  change.
+- Guidance for `min_samples` when an area light is in the
+  scene. The default `min_samples = 4` may under-resolve
+  penumbra under some authoring choices; a per-scene
+  recommendation or auto-bump may earn its keep.
+
+### Decisions still open
+
+- **Hybrid struct + `LightKind` vs. pure enum.** The
+  Future-directions bullet's "enum like `Shape`" framing was
+  written before the field-access patterns were fully
+  internalized. The hybrid is recommended above; flag this for
+  review since it is a deliberate departure from the original
+  framing.
+- **Spotlight inner/outer angles vs. cosines.** Store as
+  angles (radians) for debuggability; cosines are a
+  micro-optimization worth measuring before committing to. If
+  the constructor precomputes and caches the cosines, the
+  per-shade cost is the same either way.
+- **Spotlight aim-at-target shape.** Whether the primary
+  constructor is direction-based (Phase 2 default) or
+  target-based (Phase 3 polish). Either order is workable;
+  the recommendation is direction-based first for symmetry
+  with how `(camera-looking-at ...)` exposes both a location
+  and a target.
+- **Area-light geometry: disk-first vs. quad-first.** Disk
+  recommended for the reasons listed under Phase 4. Easy to
+  reverse if a use case shows up that wants a rectangular
+  emitter (a softbox, a glowing window) before the disk
+  feels limiting.
+- **Light-sample coordinate threading: alongside `Depth` vs.
+  combined into a `RayContext` blob.** Recommend separate;
+  flagged for revisit if a third per-ray piece of state
+  shows up.
+- **What to name the shadow-ray helper.** It currently lives
+  as `light_vector` and returns a `(Vector, f64)`. With area
+  lights it becomes a *sample* (the f64 may fold in cone
+  falloff and disk-cosine attenuation, not just transmittance).
+  A rename to `light_sample` would communicate the broader
+  responsibility; left to taste.
+
+### Verification
+
+Phase 1: every byte-pinned test in `tests/sdl_suite.rs` passes
+unchanged. The whole point of Phase 1 is "no behavior change,
+shape only" — anything else means the refactor isn't right.
+
+Phase 2: render `scenes/spotlight_test.lisp` and confirm a cone
+of light hits the floor with a visibly smooth edge between
+inner and outer angles, geometry outside the cone is unlit by
+the spotlight (but still receives ambient + any other lights),
+and rotating the scene under a `(rotate-y ...)` rotates the
+spotlight's cone direction with the geometry (because
+`collect_lights` transforms `direction`). Point-light scenes
+unaffected.
+
+Phase 4: render `scenes/area_light_test.lisp` and confirm the
+disk light illuminates the half-space its front face points
+into and is dark on the back side. Shadows are *hard* at this
+phase — a marker that Phase 5 still has work to do.
+
+Phase 5: re-render `scenes/area_light_test.lisp` and confirm
+shadows are now visibly soft (a penumbra band around the hard
+core). Render `scenes/soft_shadow_test.lisp` and confirm the
+characteristic gradient. Most diagnostically, render the
+`render-samples.png` heatmap: the penumbra region should be
+distinctly brighter than the fully-lit and fully-shadowed
+regions around it, confirming the adaptive sampler is driving
+extra samples exactly where soft-shadow variance is highest.
+Point-light and spotlight scenes from earlier phases are
+byte-identical: those variants ignore the new sample coordinate.
+
+### Out of scope
+
+- Directional lights (the sun: parallel rays from infinity).
+  Mentioned in the original Future-directions bullet. A
+  natural `LightKind::Directional { direction }` variant
+  would land in roughly the same shape as `Spot` minus the
+  cone math; deferred because spot + area covers the
+  artistic surface area that motivated this work.
+- Volumetric / participating-media lighting (god rays through
+  fog). Substantially more invasive — different rendering
+  equation, different integrator. Out of scope.
+- Light-temperature / blackbody-based color authoring. The
+  existing per-light `color` channel already exposes any tint;
+  a `kelvin` constructor would be ergonomics, no new variant.
+
 ## Future directions
 
 The README's own "Potential Futures" list overlaps these but is now somewhat
@@ -1769,13 +2143,13 @@ with many lights or many objects. The early-exit is already
 "transmittance hit 0"; this is about making each step cheaper, not
 changing the loop shape. Cleanly self-contained.
 
-**Light types beyond point.** `Light` is currently a single struct. To
-add directional lights (parallel rays from infinity, like the sun),
-spotlights (cones), or area lights (sampled emitters for soft shadows),
-turn `Light` into an enum following the same pattern as `Shape`. Each
-variant gets its own `light_vector` arm; the rest of the pipeline doesn't
-change. Area lights specifically open the door to soft shadows and
-require multiple shadow-ray samples per shading point.
+**Light types beyond point.** Spotlights and area lights are the
+next planned chunk of work — see the dedicated "Light types:
+spotlights and area lights — implementation plan" section above
+for the design and phasing. Directional lights (the sun: parallel
+rays from infinity) are explicitly out of scope of that plan but
+would land in roughly the same shape as the spotlight variant
+minus the cone math.
 
 **Refraction.** Non-refractive transparency has landed (see
 "Transparency / transmission: implementation plan" and "Surface
