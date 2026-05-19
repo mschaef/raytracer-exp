@@ -572,7 +572,15 @@ pub struct RayHit {
     pub distance: f64,
     pub hit_point: Point,
     pub normal: Point,
-    pub surface: Surface,
+    /// `Option<Surface>` rather than `Surface` so a leaf primitive
+    /// can return `None` to indicate "no explicit surface" — the
+    /// deepest enclosing `Shape::Surfaced` wrapper then fills it in
+    /// on the way back out. By the time a `RayHit` reaches
+    /// `shade_pixel` it should always be `Some(_)` in a well-formed
+    /// scene (`Shape::validate_surfaces` enforces that at scene
+    /// construction); `shade_pixel` carries a defensive hot-pink
+    /// fallback for malformed input as a safety net.
+    pub surface: Option<Surface>,
 }
 
 impl PartialOrd for RayHit {
@@ -710,7 +718,19 @@ fn shadow_ray_walk(origin: Point, target: &Point, scene: &Scene) -> Option<(Vect
                 // target. Attenuate by its transparency. An opaque
                 // surface (transparency 0.0) zeroes transmittance and
                 // we can stop immediately.
-                transmittance *= hit.surface.transparency;
+                //
+                // A `None` surface here would mean a leaf bypassed
+                // `Shape::validate_surfaces` (direct Rust construction
+                // outside the SDL). Treat it as opaque so it still
+                // occludes — failing closed is safer than failing
+                // open (a "leaked" None as transparent would let a
+                // shadow ray skip a real geometric occluder).
+                let occluder_transparency = hit
+                    .surface
+                    .as_ref()
+                    .map(|s| s.transparency)
+                    .unwrap_or(0.0);
+                transmittance *= occluder_transparency;
                 if transmittance <= EPSILON {
                     return None;
                 }
@@ -965,6 +985,26 @@ impl Depth {
     }
 }
 
+/// Defensive fallback used by `shade_pixel` when a `RayHit` arrives
+/// with `surface: None`. In a well-formed scene this never happens —
+/// `Shape::validate_surfaces` rejects unsurfaced leaves at scene
+/// construction — but the renderer treats it as a recoverable bug
+/// rather than a panic: the offending geometry shades as a flat,
+/// opaque, fully-saturated magenta, which is loud enough to spot in
+/// a render and impossible to confuse with any of the existing
+/// surface presets. This is the "safety net," not the primary
+/// check.
+const MISSING_SURFACE: Surface = Surface {
+    color: [1.0, 0.0, 1.0],
+    ambient: 1.0,
+    specular: 0.0,
+    light: 0.0,
+    checked: false,
+    reflection: 0.0,
+    transparency: 0.0,
+    metallic: false,
+};
+
 fn shade_pixel(
     ray: &Vector,
     scene: &Scene,
@@ -975,19 +1015,25 @@ fn shade_pixel(
 ) -> LinearColor {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
-    let scolor = if hit.surface.checked {
+    // Unwrap the leaf's surface once at the top, falling back to
+    // the magenta missing-surface sentinel if a `None` somehow made
+    // it past validation. Every subsequent reference to surface
+    // fields goes through this local rather than `hit.surface`.
+    let surface = hit.surface.unwrap_or(MISSING_SURFACE);
+
+    let scolor = if surface.checked {
         let checkidx = (((hit.hit_point[0] + EPSILON).floor() +
                          (hit.hit_point[1] + EPSILON).floor() +
                          (hit.hit_point[2] + EPSILON).floor()) as i64 % 2).abs();
 
-        scale_linear_color(&hit.surface.color, if checkidx == 0 { 1.0 } else { 0.5 })
+        scale_linear_color(&surface.color, if checkidx == 0 { 1.0 } else { 0.5 })
     } else {
-        hit.surface.color
+        surface.color
     };
 
-    let ambient: LinearColor = scale_linear_color(&scolor, hit.surface.ambient);
+    let ambient: LinearColor = scale_linear_color(&scolor, surface.ambient);
 
-    let reflected: LinearColor = if (hit.surface.reflection > EPSILON) && (depth.reflect < scene.reflect_limit) {
+    let reflected: LinearColor = if (surface.reflection > EPSILON) && (depth.reflect < scene.reflect_limit) {
         let rvec = subp(negp(ray.delta), scalep(hit.normal, 2.0 * dotp(negp(ray.delta), hit.normal)));
 
         // Reuse the same `light_coord` for recursive rays rather than
@@ -1001,14 +1047,14 @@ fn shade_pixel(
             delta: normalizep(rvec)
         }, scene, lights, Depth { reflect: depth.reflect + 1, ..depth }, light_coord);
 
-        let scaled = scale_linear_color(&rcolor, hit.surface.reflection);
+        let scaled = scale_linear_color(&rcolor, surface.reflection);
 
         // A metal tints what it reflects by its own color (gold
         // reflects gold-ish); a dielectric reflects untinted, like
         // chrome. The tint uses `scolor` so a checked metal's
         // reflection picks up the checker pattern, consistent with
         // the ambient and diffuse terms below.
-        if hit.surface.metallic {
+        if surface.metallic {
             multiply_linear_color(&scaled, &scolor)
         } else {
             scaled
@@ -1041,8 +1087,8 @@ fn shade_pixel(
             // highlight by its own color — a gold surface has gold
             // highlights regardless of the light.
             let spec_term = {
-                let s = scale_linear_color(&light_tint, kspecular * hit.surface.specular);
-                if hit.surface.metallic {
+                let s = scale_linear_color(&light_tint, kspecular * surface.specular);
+                if surface.metallic {
                     multiply_linear_color(&s, &scolor)
                 } else {
                     s
@@ -1056,12 +1102,12 @@ fn shade_pixel(
             // comes from the tinted reflection and specular terms —
             // so the diffuse contribution is suppressed entirely for
             // a metallic surface.
-            let diff_term = if hit.surface.metallic {
+            let diff_term = if surface.metallic {
                 [0.0, 0.0, 0.0]
             } else {
                 scale_linear_color(
                     &multiply_linear_color(&scolor, &light_tint),
-                    hit.surface.light * lambert,
+                    surface.light * lambert,
                 )
             };
 
@@ -1108,7 +1154,7 @@ fn shade_pixel(
     // A metallic surface is always opaque: `transparency` is ignored
     // when `metallic` is set, so the `!metallic` guard short-circuits
     // the transmitted ray entirely and `opaque` is returned as-is.
-    if (hit.surface.transparency > EPSILON) && !hit.surface.metallic && (depth.transmit < scene.transmit_limit) {
+    if (surface.transparency > EPSILON) && !surface.metallic && (depth.transmit < scene.transmit_limit) {
         let transmitted = ray_color(
             &Vector {
                 start: hit.hit_point,
@@ -1121,7 +1167,7 @@ fn shade_pixel(
         );
 
         // lerp(opaque, transmitted, transparency)
-        let t = hit.surface.transparency;
+        let t = surface.transparency;
         add_linear_color(
             &scale_linear_color(&opaque, 1.0 - t),
             &scale_linear_color(&transmitted, t),

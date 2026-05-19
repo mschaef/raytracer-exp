@@ -709,8 +709,13 @@ fn builtin_sphere(args: &[Value], pos: &Position) -> Value {
     let map = require_map(&args[0], "sphere", pos);
     let center = require_key_point(&map, "center", "sphere", pos);
     let r = require_key_number(&map, "r", "sphere", pos);
+    // Phase 1 of the surface-decoupling work moved
+    // `Sphere::surface` to `Option<Surface>`; the SDL `:surface` key
+    // stays required for now, and the wrap is mechanical. Phase 2
+    // will make the SDL key optional and add a `(with-surface ...)`
+    // form for default-supply.
     let surface = require_key_surface(&map, "surface", "sphere", pos);
-    Value::Shape(Rc::new(Shape::Sphere(Sphere { center, r, surface })))
+    Value::Shape(Rc::new(Shape::Sphere(Sphere { center, r, surface: Some(surface) })))
 }
 
 fn builtin_plane(args: &[Value], pos: &Position) -> Value {
@@ -719,7 +724,7 @@ fn builtin_plane(args: &[Value], pos: &Position) -> Value {
     let normal = require_key_point(&map, "normal", "plane", pos);
     let p0 = require_key_point(&map, "p0", "plane", pos);
     let surface = require_key_surface(&map, "surface", "plane", pos);
-    Value::Shape(Rc::new(Shape::Plane(Plane { normal, p0, surface })))
+    Value::Shape(Rc::new(Shape::Plane(Plane { normal, p0, surface: Some(surface) })))
 }
 
 fn builtin_cuboid(args: &[Value], pos: &Position) -> Value {
@@ -728,7 +733,7 @@ fn builtin_cuboid(args: &[Value], pos: &Position) -> Value {
     let center = require_key_point(&map, "center", "cuboid", pos);
     let size = require_key_point(&map, "size", "cuboid", pos);
     let surface = require_key_surface(&map, "surface", "cuboid", pos);
-    Value::Shape(Rc::new(Shape::Cuboid(Cuboid { center, size, surface })))
+    Value::Shape(Rc::new(Shape::Cuboid(Cuboid { center, size, surface: Some(surface) })))
 }
 
 /// `(triangle {:vertices [[..] [..] [..]] :normals [[..] [..] [..]] :surface S})`.
@@ -787,7 +792,7 @@ fn builtin_triangle(args: &[Value], pos: &Position) -> Value {
     Value::Shape(Rc::new(Shape::Triangle(Triangle {
         vertices: [v0, v1, v2],
         normals,
-        surface,
+        surface: Some(surface),
     })))
 }
 
@@ -798,7 +803,7 @@ fn builtin_cylinder(args: &[Value], pos: &Position) -> Value {
     let p1 = require_key_point(&map, "p1", "cylinder", pos);
     let r = require_key_number(&map, "r", "cylinder", pos);
     let surface = require_key_surface(&map, "surface", "cylinder", pos);
-    Value::Shape(Rc::new(Shape::Cylinder(Cylinder { p0, p1, r, surface })))
+    Value::Shape(Rc::new(Shape::Cylinder(Cylinder { p0, p1, r, surface: Some(surface) })))
 }
 
 /// `(cone {:p0 [..] :p1 [..] :r n :surface S})` — a closed solid cone.
@@ -811,7 +816,7 @@ fn builtin_cone(args: &[Value], pos: &Position) -> Value {
     let p1 = require_key_point(&map, "p1", "cone", pos);
     let r = require_key_number(&map, "r", "cone", pos);
     let surface = require_key_surface(&map, "surface", "cone", pos);
-    Value::Shape(Rc::new(Shape::Cone(Cone { p0, p1, r, surface })))
+    Value::Shape(Rc::new(Shape::Cone(Cone { p0, p1, r, surface: Some(surface) })))
 }
 
 /// `(load-obj <path-string> <surface>)` — load a Wavefront OBJ file
@@ -1125,6 +1130,15 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         .unwrap_or(32) as u32;
     let variance_threshold = maybe_key_number(&map, "variance-threshold", "scene", pos)
         .unwrap_or(0.005);
+
+    // Validate that every leaf in the scene graph has a surface,
+    // either explicitly or via an enclosing `Shape::Surfaced`
+    // ancestor. This is the authoritative construction-time check
+    // for the surface-decoupling work; `shade_pixel`'s hot-pink
+    // fallback is purely a safety net behind it.
+    if let Err(msg) = root.validate_surfaces(false) {
+        sdl_panic!(pos.clone(), "scene: {}", msg);
+    }
 
     Value::Scene(Rc::new(Scene {
         name,

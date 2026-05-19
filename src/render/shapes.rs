@@ -35,25 +35,33 @@ use crate::render::transform::{
     mat3_transpose,
 };
 
+/// A primitive's `surface` is `Option<Surface>` rather than `Surface`
+/// directly: a leaf can be constructed without a surface, in which case
+/// the deepest enclosing `Shape::Surfaced` wrapper supplies one at
+/// hit-time. An explicit `Some(_)` on the leaf wins over any enclosing
+/// wrapper ("innermost wins"). A leaf with `None` and *no* enclosing
+/// wrapper is a scene-construction error caught by
+/// `Shape::validate_surfaces` — render-time fallback in `shade_pixel`
+/// is a defensive safety net, not the primary check.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Sphere {
     pub center: Point,
     pub r: f64,
-    pub surface: Surface,
+    pub surface: Option<Surface>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Plane {
     pub normal: Point,
     pub p0: Point,
-    pub surface: Surface,
+    pub surface: Option<Surface>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Cuboid {
     pub center: Point,
     pub size: Point,
-    pub surface: Surface,
+    pub surface: Option<Surface>,
 }
 
 /// One triangle of a mesh. Carries three vertices and three per-vertex
@@ -65,7 +73,7 @@ pub struct Cuboid {
 pub struct Triangle {
     pub vertices: [Point; 3],
     pub normals: [Point; 3],
-    pub surface: Surface,
+    pub surface: Option<Surface>,
 }
 
 /// A finite, closed, solid cylinder, parameterized by the centers of its two
@@ -85,7 +93,7 @@ pub struct Cylinder {
     pub p0: Point,
     pub p1: Point,
     pub r: f64,
-    pub surface: Surface,
+    pub surface: Option<Surface>,
 }
 
 /// A finite, closed, solid cone, parameterized the same way as `Cylinder` —
@@ -111,7 +119,7 @@ pub struct Cone {
     pub p0: Point,
     pub p1: Point,
     pub r: f64,
-    pub surface: Surface,
+    pub surface: Option<Surface>,
 }
 
 /// Axis-aligned bounding box. Used as the acceleration primitive for the
@@ -216,7 +224,7 @@ impl AABB {
             self.max[1] - self.min[1],
             self.max[2] - self.min[2],
         ];
-        Cuboid { center, size, surface }
+        Cuboid { center, size, surface: Some(surface) }
     }
 }
 
@@ -257,6 +265,20 @@ impl AABB {
 /// extracts them up-front via `Shape::collect_lights` so the shading
 /// path iterates a flat world-space list per pixel — no tree walk in
 /// the shading hot path.
+///
+/// `Surfaced` decorates a subtree with a *default surface*. Every
+/// leaf primitive carries `surface: Option<Surface>`, and a leaf with
+/// `None` inherits its surface from the deepest enclosing `Surfaced`
+/// wrapper. Concretely: `Surfaced::hit_test` calls its child's
+/// `hit_test`, and if the returned `RayHit` has `surface: None` it
+/// fills in `Some(self.surface)` before returning; a `Some(_)` from
+/// the child passes through untouched. That's "innermost wins" — a
+/// child that explicitly set its surface beats any enclosing default,
+/// and the *innermost* enclosing `Surfaced` is the first to see a
+/// `None` (and the first to fill it). Construction-time validation
+/// (`Shape::validate_surfaces`) rejects scenes containing a leaf
+/// with neither an explicit surface nor an enclosing `Surfaced`, so
+/// the renderer can assume a `Some(surface)` reaches `shade_pixel`.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Shape {
     Sphere(Sphere),
@@ -268,6 +290,7 @@ pub enum Shape {
     Group(Vec<Shape>),
     Transform(Box<Transformed>),
     Bounded(Box<Bounded>),
+    Surfaced(Box<SurfacedShape>),
     Light(Light),
 }
 
@@ -300,6 +323,16 @@ pub struct Transformed {
     pub forward: Affine,
     pub inverse: Affine,
     pub normal_xform: Mat3,
+    pub child: Shape,
+}
+
+/// Storage for a `Shape::Surfaced` node. Holds the default surface this
+/// wrapper supplies and the child subtree it decorates. See the
+/// `Shape::Surfaced` doc comment for the inheritance semantics; the
+/// implementation is in `SurfacedShape::hit_test` below.
+#[derive(Clone, PartialEq, Debug)]
+pub struct SurfacedShape {
+    pub surface: Surface,
     pub child: Shape,
 }
 
@@ -343,6 +376,7 @@ impl Hittable for Shape {
             Shape::Group(children)  => nearest_hit(ray, children),
             Shape::Transform(t)     => t.hit_test(ray),
             Shape::Bounded(b)       => b.hit_test(ray),
+            Shape::Surfaced(s)      => s.hit_test(ray),
             // Lights are invisible to every ray (primary, shadow,
             // reflection). The renderer reaches them through
             // `Shape::collect_lights` at render entry, not through
@@ -364,6 +398,28 @@ impl Bounded {
         } else {
             self.child.hit_test(ray)
         }
+    }
+}
+
+impl SurfacedShape {
+    /// Fill in the child's surface if the leaf didn't carry one.
+    /// "Innermost wins": a `Some(_)` from the child means either an
+    /// explicit leaf surface or a deeper `Surfaced` wrapper has
+    /// already supplied one, and we leave it alone; a `None` means
+    /// the leaf is asking for a default, and we provide ours. The
+    /// rest of the `RayHit` (distance, hit point, normal) is
+    /// untouched — `Surfaced` affects shading only.
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        self.child.hit_test(ray).map(|hit| {
+            if hit.surface.is_some() {
+                hit
+            } else {
+                RayHit {
+                    surface: Some(self.surface),
+                    ..hit
+                }
+            }
+        })
     }
 }
 
@@ -545,6 +601,7 @@ impl Shape {
                 Some(AABB::new(min, max))
             }
             Shape::Bounded(b) => Some(b.bounds),
+            Shape::Surfaced(s) => s.child.bounds(),
             Shape::Light(l) => {
                 // A point light has zero extent — its bound is the
                 // degenerate AABB containing only its location. We
@@ -639,6 +696,15 @@ impl Shape {
             Shape::Bounded(b) => {
                 b.child.collect_lights(world_from_local, out);
             }
+            Shape::Surfaced(s) => {
+                // Surface decoration doesn't affect light geometry,
+                // so just descend into the child. Any lights inside
+                // a `Surfaced` wrapper are collected as if the
+                // wrapper weren't there — which is the right thing,
+                // since lights are invisible to hit-testing and so
+                // can't pick up the wrapper's surface anyway.
+                s.child.collect_lights(world_from_local, out);
+            }
             // Leaf geometry contains no lights.
             Shape::Sphere(_)
             | Shape::Plane(_)
@@ -647,6 +713,66 @@ impl Shape {
             | Shape::Cylinder(_)
             | Shape::Cone(_) => {}
         }
+    }
+
+    /// Walk the scene tree and verify that every leaf primitive
+    /// either carries an explicit surface (`surface: Some(_)`) or
+    /// sits under an enclosing `Shape::Surfaced` ancestor. Returns
+    /// `Err(message)` describing the first violation; returns `Ok(())`
+    /// if the whole tree is well-formed.
+    ///
+    /// `has_surfaced_ancestor` is the recursion-threaded "is there a
+    /// `Shape::Surfaced` ancestor above me?" flag. Top-level callers
+    /// pass `false`. Descending into a `Surfaced` arm sets it to
+    /// `true` for the subtree; every other variant passes it through
+    /// unchanged.
+    ///
+    /// The renderer's `shade_pixel` carries a defensive hot-pink
+    /// fallback for the case where this check is bypassed (direct
+    /// Rust scene construction that skips Scene-level validation),
+    /// but the construction-time check is the authoritative gate —
+    /// a `None` surface that survives until `shade_pixel` is a bug,
+    /// not an authoring choice.
+    pub fn validate_surfaces(&self, has_surfaced_ancestor: bool) -> Result<(), String> {
+        match self {
+            Shape::Sphere(s) => check_leaf_surface(&s.surface, has_surfaced_ancestor, "sphere"),
+            Shape::Plane(p) => check_leaf_surface(&p.surface, has_surfaced_ancestor, "plane"),
+            Shape::Cuboid(c) => check_leaf_surface(&c.surface, has_surfaced_ancestor, "cuboid"),
+            Shape::Triangle(t) => check_leaf_surface(&t.surface, has_surfaced_ancestor, "triangle"),
+            Shape::Cylinder(c) => check_leaf_surface(&c.surface, has_surfaced_ancestor, "cylinder"),
+            Shape::Cone(c) => check_leaf_surface(&c.surface, has_surfaced_ancestor, "cone"),
+            Shape::Group(children) => {
+                for child in children {
+                    child.validate_surfaces(has_surfaced_ancestor)?;
+                }
+                Ok(())
+            }
+            Shape::Transform(t) => t.child.validate_surfaces(has_surfaced_ancestor),
+            Shape::Bounded(b) => b.child.validate_surfaces(has_surfaced_ancestor),
+            Shape::Surfaced(s) => s.child.validate_surfaces(true),
+            // Lights don't have surfaces (and aren't hit-tested), so
+            // they're trivially valid regardless of ancestry.
+            Shape::Light(_) => Ok(()),
+        }
+    }
+}
+
+/// Validate one leaf primitive's surface field against the
+/// surrounding context. A leaf with an explicit surface is always
+/// fine; a leaf with `None` is fine if and only if an enclosing
+/// `Shape::Surfaced` will supply one at hit time.
+fn check_leaf_surface(
+    surface: &Option<Surface>,
+    has_surfaced_ancestor: bool,
+    kind: &str,
+) -> Result<(), String> {
+    if surface.is_some() || has_surfaced_ancestor {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} leaf has no surface and is not inside a Surfaced wrapper",
+            kind,
+        ))
     }
 }
 
@@ -808,6 +934,23 @@ pub fn bounded(child: impl Into<Shape>) -> Shape {
 /// performance and is otherwise harmless.
 pub fn bounded_with(bounds: AABB, child: impl Into<Shape>) -> Shape {
     Shape::Bounded(Box::new(Bounded { bounds, child: child.into() }))
+}
+
+/// Wrap a child in a `Shape::Surfaced` node carrying a default
+/// `surface`. Every leaf in `child` whose own `surface` is `None`
+/// will be shaded with this default; leaves that carry an explicit
+/// `Some(_)` keep their own surface. Inheritance is "innermost wins" —
+/// a nested `surfaced(inner, ...)` inside `surfaced(outer, ...)`
+/// shades unsurfaced leaves with `inner`, because the inner wrapper
+/// is the first to see (and fill) a `None`.
+///
+/// Leaves with `None` and no enclosing `Surfaced` ancestor are a
+/// scene-construction error caught by `Shape::validate_surfaces` at
+/// scene-build time; the renderer itself has a defensive hot-pink
+/// fallback in `shade_pixel`, but that is the safety net, not the
+/// primary check.
+pub fn surfaced(surface: Surface, child: impl Into<Shape>) -> Shape {
+    Shape::Surfaced(Box::new(SurfacedShape { surface, child: child.into() }))
 }
 
 /// Wrap a child in a `Shape::Transform` node carrying an arbitrary affine.

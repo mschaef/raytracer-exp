@@ -273,6 +273,7 @@ impl fmt::Display for Value {
                 Shape::Group(_)     => f.write_str("#<shape group>"),
                 Shape::Transform(_) => f.write_str("#<shape transform>"),
                 Shape::Bounded(_)   => f.write_str("#<shape bounded>"),
+                Shape::Surfaced(_)  => f.write_str("#<shape surfaced>"),
                 Shape::Light(_)     => f.write_str("#<shape light>"),
             },
             Value::Scene(s) => write!(f, "#<scene {:?}>", s.name),

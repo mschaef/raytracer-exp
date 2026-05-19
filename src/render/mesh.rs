@@ -102,7 +102,14 @@ pub fn load_obj(path: impl AsRef<Path>, surface: Surface) -> Shape {
             triangles.push(Shape::Triangle(Triangle {
                 vertices: [v0, v1, v2],
                 normals: [n0, n1, n2],
-                surface,
+                // Wrap in `Some` for the new
+                // `Triangle::surface: Option<Surface>` field. The
+                // loader still takes a required `Surface` argument
+                // for now — making it optional (so a script can
+                // `load-obj` and then wrap the result in
+                // `with-surface`) is a Phase 2 SDL ergonomics
+                // change, not a Phase 1 (renderer-internal) one.
+                surface: Some(surface),
             }));
         }
     }
