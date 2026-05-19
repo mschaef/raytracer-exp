@@ -36,12 +36,20 @@
 //!   worse distribution than (2, 3), but 5 and 7 are still fine for
 //!   the modest per-pixel sample counts here.
 //!
+//! * `halton_area(i)` — same idea again on bases 11 and 13, used for
+//!   the area-light disk sample in Phase 5 of the "Light types"
+//!   plan. A third distinct pair of bases keeps the area-light
+//!   coordinate independent of both the sub-pixel and lens
+//!   coordinates of the same sample index.
+//!
 //! * `concentric_disk(u, v)` — maps a `[0, 1)²` point (e.g. a
-//!   rotated `halton_lens` value) onto the unit disk via the
-//!   Shirley–Chiu concentric mapping. Used to turn the lens Halton
-//!   sample into an aperture offset. Concentric mapping preserves
-//!   area and adjacency far better than the naive
-//!   `r = √u, θ = 2πv` polar map, which matters for clean bokeh.
+//!   rotated `halton_lens` value or `halton_area` value) onto the
+//!   unit disk via the Shirley–Chiu concentric mapping. Used to turn
+//!   the lens Halton sample into an aperture offset and the area
+//!   Halton sample into a point on a disk emitter. Concentric
+//!   mapping preserves area and adjacency far better than the naive
+//!   `r = √u, θ = 2πv` polar map, which matters for clean bokeh and
+//!   well-distributed soft-shadow samples.
 //!
 //! * `cranley_patterson_offset(x, y)` — a per-pixel `(ox, oy)`
 //!   rotation in `[0, 1)²` derived from the pixel coordinates. The
@@ -55,9 +63,13 @@
 //!
 //! * `cranley_patterson_lens_offset(x, y)` — the same rotation for
 //!   the lens sample, with a distinct hash seed so the lens
-//!   rotation is decorrelated from the sub-pixel rotation. Both go
-//!   through the same `cp_hash` helper; the seed is the only
-//!   difference.
+//!   rotation is decorrelated from the sub-pixel rotation.
+//!
+//! * `cranley_patterson_area_offset(x, y)` — the rotation for the
+//!   area-light disk sample, with its own seed so the area
+//!   coordinate is decorrelated from both the sub-pixel and lens
+//!   coordinates. All three go through the same `cp_hash` helper;
+//!   the seed is the only difference between them.
 
 /// Radical inverse in `base`, evaluated at index `i`. Returns a value
 /// in `[0, 1)`. For `i = 0` returns `0.0`. Standard low-discrepancy
@@ -101,6 +113,23 @@ pub fn halton_pair(i: u32) -> (f64, f64) {
 /// `i >= 1`.
 pub fn halton_lens(i: u32) -> (f64, f64) {
     (radical_inverse(5, i), radical_inverse(7, i))
+}
+
+/// The pair `(H_11(i), H_13(i))` — point `i` of the 2D Halton
+/// sequence with bases 11 and 13, used for the area-light disk
+/// sample. Returned values are in `[0, 1)²`.
+///
+/// Distinct bases from `halton_pair` (2, 3) and `halton_lens`
+/// (5, 7) so the area coordinate is independent of both the
+/// sub-pixel and lens coordinates of the same sample index — the
+/// three sampled dimensions march independently. Bases 11 and 13
+/// give slightly worse 2D distribution than the lower pairs, but
+/// they're more than adequate for the per-pixel sample counts
+/// here and the alternative (sharing a base, accepting
+/// correlation) is worse. As with the other Halton helpers,
+/// `i = 0` returns `(0, 0)`; callers pass `i >= 1`.
+pub fn halton_area(i: u32) -> (f64, f64) {
+    (radical_inverse(11, i), radical_inverse(13, i))
 }
 
 /// Shirley–Chiu concentric mapping from the unit square to the unit
@@ -211,6 +240,19 @@ pub fn cranley_patterson_offset(x: u32, y: u32) -> (f64, f64) {
 /// are keyed off the same `(x, y)`.
 pub fn cranley_patterson_lens_offset(x: u32, y: u32) -> (f64, f64) {
     cp_hash(x, y, 1)
+}
+
+/// The Cranley-Patterson rotation for the area-light disk sample:
+/// a per-pixel `(ox, oy)` offset in `[0, 1)²` applied to a
+/// `halton_area` point before it's mapped onto the emitter disk.
+///
+/// Uses a distinct hash seed (`2`) from both
+/// `cranley_patterson_offset` (`0`) and
+/// `cranley_patterson_lens_offset` (`1`), so a pixel's area
+/// rotation is uncorrelated with both its sub-pixel and lens
+/// rotations — the three sampled dimensions stay independent.
+pub fn cranley_patterson_area_offset(x: u32, y: u32) -> (f64, f64) {
+    cp_hash(x, y, 2)
 }
 
 #[cfg(test)]
@@ -392,6 +434,61 @@ mod tests {
                     cranley_patterson_lens_offset(x, y),
                     cranley_patterson_offset(x, y),
                     "lens and pixel CP offsets collided at ({}, {})",
+                    x, y
+                );
+            }
+        }
+    }
+
+    /// First few base-11 / base-13 radical inverses, the bases
+    /// `halton_area` uses. H_11(1) = 1/11; H_13(1) = 1/13;
+    /// H_11(2) = 2/11.
+    #[test]
+    fn halton_area_known_values() {
+        let (x1, y1) = halton_area(1);
+        assert!((x1 - 1.0 / 11.0).abs() < 1e-15, "H_11(1) = {}", x1);
+        assert!((y1 - 1.0 / 13.0).abs() < 1e-15, "H_13(1) = {}", y1);
+        let (x2, _) = halton_area(2);
+        assert!((x2 - 2.0 / 11.0).abs() < 1e-15, "H_11(2) = {}", x2);
+    }
+
+    /// `halton_area` stays in `[0, 1)²` across a modest index range —
+    /// same contract as `halton_pair` / `halton_lens`, since the
+    /// area sample feeds the same Cranley-Patterson + concentric-
+    /// disk pipeline before reaching the emitter.
+    #[test]
+    fn halton_area_in_unit_square() {
+        for i in 0..1024 {
+            let (a, b) = halton_area(i);
+            assert!(a >= 0.0 && a < 1.0, "area x out of range at i={}: {}", i, a);
+            assert!(b >= 0.0 && b < 1.0, "area y out of range at i={}: {}", i, b);
+        }
+    }
+
+    /// The area-light Cranley-Patterson rotation is in range and is
+    /// decorrelated from *both* the sub-pixel rotation and the lens
+    /// rotation: for the same pixel, the area offset (seed=2) must
+    /// differ from the pixel offset (seed=0) and the lens offset
+    /// (seed=1). If any of these collided, two sampled dimensions
+    /// would lock together and the soft-shadow / DOF / anti-
+    /// aliasing samples would correlate when they shouldn't.
+    #[test]
+    fn area_cp_offset_distinct_from_pixel_and_lens() {
+        for x in 0..64 {
+            for y in 0..64 {
+                let (a, b) = cranley_patterson_area_offset(x, y);
+                assert!(a >= 0.0 && a < 1.0, "area CP x out of range: {}", a);
+                assert!(b >= 0.0 && b < 1.0, "area CP y out of range: {}", b);
+                assert_ne!(
+                    cranley_patterson_area_offset(x, y),
+                    cranley_patterson_offset(x, y),
+                    "area and pixel CP offsets collided at ({}, {})",
+                    x, y
+                );
+                assert_ne!(
+                    cranley_patterson_area_offset(x, y),
+                    cranley_patterson_lens_offset(x, y),
+                    "area and lens CP offsets collided at ({}, {})",
                     x, y
                 );
             }

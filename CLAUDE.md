@@ -415,18 +415,25 @@ transmittance)` pair `shade_pixel` consumes:
   the outer cone returns `None` immediately without hit-testing.
   Inside the cone, it delegates to the point-light walk and folds
   the cone factor into the returned transmittance.
-- `light_vector_area` (Phase 4) computes a Lambertian cosine factor
+- `light_vector_area` computes a Lambertian cosine factor
   `max(0, dot(axis, normalize(point - light.location)))` against the
   disk's normal. Shaded points in the back hemisphere of the disk
   (`cos_theta ≤ 0`) return `None` immediately — the disk only
   illuminates the half-space its front face points into. Inside the
-  lit half-space, the helper delegates to the point-light walk and
-  folds the cosine factor into the returned transmittance. Phase 4
-  is the *hard-shadow* baseline: the shadow ray comes from the disk
-  center exactly (`light.location`). Phase 5 of the plan replaces
-  the center-only sampling with a per-pixel-sample jittered point on
-  the disk for soft shadows; the cosine attenuation and the `axis`
-  transform stay unchanged.
+  lit half-space, the helper picks a per-pixel-sample point on the
+  emitter disk (Phase 5), runs the shadow-ray walk from *that*
+  point (not the disk center) toward the shaded point, and folds
+  the cosine factor into the returned transmittance. Penumbra
+  pixels — where some pixel samples reach the light and some don't
+  — see high variance and the adaptive oversampler keeps sampling
+  them until they stabilize; fully shadowed and fully lit pixels
+  terminate at `min_samples`. The disk point is sampled via Halton
+  bases (11, 13) plus a dedicated Cranley-Patterson rotation,
+  decorrelated from the sub-pixel (bases 2, 3) and lens (5, 7)
+  coordinates of the same sample index; the `concentric_disk` map
+  in `render::sampler` turns the `[0, 1)²` value into a uniform
+  unit-disk point, which is then scaled by `radius` and oriented
+  into the disk's world-space plane by `disk_basis(axis)`.
 
 The transparency behavior of intervening occluders is therefore
 identical for all three light kinds (a glass pane attenuates a
@@ -1501,6 +1508,98 @@ Approximate order of recent commits, oldest first:
     rays threaded through the existing Halton sampler) — is the
     one real architectural change in the light-types plan.
 
+35. **Light types phase 5: area-light soft shadows.** The payoff
+    phase of the "Light types: spotlights and area lights" plan
+    and the one real architectural change in it. Per-pixel-sample
+    jittered shadow rays across an area light's disk produce soft
+    shadows that the adaptive oversampler resolves automatically:
+    penumbra pixels see high variance and keep sampling until they
+    stabilize; fully-shadowed and fully-lit pixels terminate at
+    `min_samples` and pay almost nothing for the feature.
+    Implementation breakdown:
+      * **Sampler additions** (`src/render/sampler.rs`).
+        `halton_area(i)` on bases 11 and 13 — a third distinct
+        pair so the area-light coord is uncorrelated with both
+        the sub-pixel (2, 3) and lens (5, 7) coords of the same
+        sample index. `cranley_patterson_area_offset(x, y)` uses
+        the existing `cp_hash` helper with seed `2`, distinct
+        from pixel's `0` and lens's `1`. New unit tests pin the
+        first-index radical inverses, the in-range invariant, and
+        decorrelation from both other CP rotations.
+      * **`shadow_ray_walk` extraction** (`src/render.rs`). The
+        transmittance-walk loop that lived in `light_vector_point`
+        moved into a generic `shadow_ray_walk(origin, target,
+        scene)` helper. `light_vector_point` is now a one-line
+        wrapper passing `light.location` as `origin`; the math
+        is the same Rust operations on the same f64 inputs, so
+        point-light output is bit-identical to the pre-refactor
+        code — what the byte-pinned tests in `tests/sdl_suite.rs`
+        rely on. Area lights now share the same walk through the
+        helper, just with a per-sample disk point as the origin.
+      * **`disk_basis(axis)` helper.** Returns an orthonormal
+        basis `(u, v)` perpendicular to a unit `axis`. Uses the
+        "pick the world axis least aligned with `axis` as the
+        hint" trick to avoid a degenerate cross product when the
+        axis lines up with a world axis (the common case for
+        ceiling/floor disk lights with `axis = [0, 0, ±1]`).
+      * **`light_vector_area` Phase-5 body.** `light_coord` is
+        unpacked as a `[0, 1)²` value, mapped through
+        `concentric_disk` to a uniform unit-disk point, scaled by
+        `radius`, and oriented into world space by
+        `disk_basis(axis)` to produce the shadow-ray origin —
+        replacing `light.location` from Phase 4. The cosine
+        attenuation against `axis` (computed against the disk
+        center, not the per-sample point — matches the Phase 4
+        behavior and is consistent across all samples for a given
+        pixel) is unchanged. The walk delegates to
+        `shadow_ray_walk(origin, point, scene)`.
+      * **Coordinate threading.** `light_vector`, `shade_pixel`,
+        and `ray_color` gained a `light_coord: (f64, f64)`
+        parameter, kept separate from the `Depth` blob (the plan
+        recommended hybrid combine-into-one-blob would have made
+        the architectural delta wider for no real win — depth and
+        light coord rarely change at the same call site). Point
+        and spot lights ignore the coordinate; only
+        `light_vector_area` consumes it. Recursive `ray_color`
+        calls in `shade_pixel` (reflection, transmission) reuse
+        the *same* pixel-sample `light_coord` rather than
+        re-deriving one per bounce — same "good enough" judgment
+        call DOF made for reflection rays not getting fresh
+        aperture jitter, and per-bounce sample state would mean
+        threading sampler state through recursion proper.
+      * **`pixel_color` integration.** Computes `has_area_light`
+        once per pixel (`lights.iter().any(matches!
+        LightKind::Area)`), hoisted outside the sample loop the
+        same way `dof` is. When false, the area CP offset stays
+        `(0.0, 0.0)` and per-sample `halton_area`/CP work is
+        skipped entirely — point/spot-only scenes pay nothing for
+        the feature. When true, each pixel sample gets a fresh
+        `light_coord = (halton_area(i + 1) + (aox, aoy)) mod 1`,
+        threaded into `ray_color`.
+    New `scenes/soft_shadow_test.lisp` (a disk light radius 1.5 at
+    `[0 0 4]` aimed down at a single sphere at `[0 0 1.5]` over
+    the checker floor) with a `soft_shadow_test_scene_loads`
+    smoke test. The existing `scenes/area_light_test.lisp` from
+    Phase 4 transitions in this commit from a hard shadow at the
+    disk center to a soft shadow sampled across the disk — that's
+    the intended behavior change, and the smoke test only
+    verifies that the scene still loads, so nothing in the test
+    suite breaks. Determinism: point and spot lights ignore the
+    new coordinate and still go through their respective
+    `LightKind` arms with the same shadow-ray geometry as before;
+    `light_vector_point` calls `shadow_ray_walk(light.location,
+    ...)` which is the same math as the pre-refactor body. The
+    byte-pinned tests in `tests/sdl_suite.rs` (which use only
+    point lights) are bit-for-bit unaffected. Visual check:
+    re-render `scenes/area_light_test.lisp` and confirm shadows
+    are now visibly soft instead of hard; render
+    `scenes/soft_shadow_test.lisp` and the
+    `render-samples.png` heatmap; the penumbra region around the
+    shadow should be distinctly brighter than the fully-lit and
+    fully-shadowed regions, which is the "adaptive sampler doing
+    the soft-shadow work" verification the CLAUDE.md anticipated
+    when DOF Phase 1 introduced the sampler abstraction.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -2081,67 +2180,36 @@ existing byte-pinned tests pass without modification.
 
 ### Phase 5 — Area light: soft shadows
 
-The payoff phase. Thread a 2D light-sample coordinate down from
-`pixel_color` through `ray_color` and `shade_pixel` to the
-shadow-ray helper. The coordinate is generated per pixel sample
-in `pixel_color` using a dedicated Halton base pair (recommended:
-11, 13 — distinct from sub-pixel 2,3 and lens 5,7) plus a
-dedicated Cranley-Patterson rotation seed for per-pixel
-decorrelation, mirroring exactly how lens sampling for DOF was
-wired in. The new sampler functions
-(`halton_area` / `cranley_patterson_area_offset`) live in
-`render::sampler` alongside the existing ones; they have unit
-tests pinning the radical-inverse landmarks and verifying the CP
-rotation decorrelates from sub-pixel and lens rotations.
-
-For `Point` and `Spot` lights the coordinate is ignored — the
-shadow-ray target is still `light.location`. For `Area`, the
-coordinate maps through `concentric_disk` to a unit-disk point;
-that point gets scaled by `radius` and oriented to the disk's
-plane (basis vectors derived from `axis`); the result is the
-*sample point on the disk*, which replaces `light.location` as
-the shadow ray's destination. The transmittance walk and the
-cosine-against-axis falloff are unchanged from Phase 4. A pixel
-that takes one pixel sample takes one shadow ray to one point on
-the disk; a pixel that takes 32 pixel samples takes 32 shadow
-rays to 32 well-distributed disk points. Penumbra pixels — where
-some samples reach the light and some don't — have high variance
-and the adaptive oversampler keeps sampling them until they
-stabilize. Fully shadowed and fully lit pixels terminate at
-`min_samples`.
-
-For recursive rays (reflection or transmission of a
-soft-shadowed surface), reuse the pixel sample's same light
-coordinate rather than re-deriving one per bounce. Bounces are
-rare enough that the bias is invisible, and per-bounce sample
-state would mean threading sampler state through recursion
-proper. This is the same "good enough" judgment call DOF made
-(reflection rays don't get fresh aperture jitter either).
-
-Threading the light coordinate alongside `Depth` through
-`ray_color` / `shade_pixel` is the one real architectural
-change in this plan. The `Depth` struct is the precedent — a
-small `Copy` blob threaded by value. The recommendation is to
-keep them separate (depth and light-sample coord are
-conceptually distinct and the call sites that change one
-rarely change the other), but a combined `RayContext` is a
-reasonable alternative.
-
-New `scenes/soft_shadow_test.lisp` (a disk area light with a
-visible radius casting a soft shadow from a single sphere onto
-the checker floor) with the corresponding smoke test. The
-`render-samples.png` heatmap should light up in the penumbra
-region — that's the "adaptive sampler doing the work"
-verification the CLAUDE.md anticipates.
-
-Byte-pinned tests: point lights still ignore the new
-coordinate, so they're byte-identical; the spotlight scene from
-Phase 2 likewise ignores it, byte-identical to itself across
-phases. The new `area_light_test` scene from Phase 4 *will*
-shift: it transitions from "hard shadow at disk center" to
-"soft shadow sampled across the disk." That's the intended
-behavior change, and the smoke test only verifies the scene
-loads, so nothing in the test suite breaks.
+Done; see "Recent work history." Summary: `render::sampler`
+gained `halton_area` (bases 11, 13) and
+`cranley_patterson_area_offset` (seed 2, distinct from pixel's
+0 and lens's 1). `pixel_color` checks once per pixel whether any
+of the scene's effective lights is `LightKind::Area`; if so, it
+computes the area-CP offset once and generates a per-pixel-
+sample `light_coord` (the area Halton point shifted by the CP
+offset) — same hoisted-flag pattern as the DOF lens
+coordinate, so point/spot-only scenes pay nothing for the
+feature. `ray_color` and `shade_pixel` gained a `light_coord:
+(f64, f64)` parameter threaded by value (kept separate from
+`Depth` per the plan's recommendation); `light_vector`
+dispatches it into `light_vector_area`, where it maps through
+`concentric_disk` to a unit-disk point and gets oriented into
+world space by a new `disk_basis(axis)` helper to produce the
+shadow-ray origin (replacing `light.location`). The
+transmittance walk itself was extracted from
+`light_vector_point` into a `shadow_ray_walk(origin, target,
+scene)` helper that area lights now share — point lights still
+go through it with `origin = light.location`, producing
+bit-identical output to the pre-refactor code. Recursive rays
+(reflection, transmission) reuse the pixel sample's same
+`light_coord` rather than re-deriving one per bounce, mirroring
+the DOF "reflection rays don't get fresh aperture jitter" call.
+New `scenes/soft_shadow_test.lisp` + `soft_shadow_test_scene_loads`
+smoke test; `area_light_test` from Phase 4 transitions from a
+hard shadow at disk center to a soft shadow sampled across the
+disk (intended behavior change; the smoke test only verifies
+loading, so nothing breaks). Existing byte-pinned tests pass
+without modification.
 
 ### Phase 6 — Area light polish (optional, deferred)
 

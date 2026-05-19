@@ -627,36 +627,57 @@ impl PartialEq for RayHit {
 /// Colored shadows — red glass casting a red-tinted shadow — are
 /// deferred to land alongside colored transmission, most naturally
 /// with the refraction work.
-fn light_vector(point: &Point, scene: &Scene, light: &Light) -> Option<(Vector, f64)> {
+fn light_vector(
+    point: &Point,
+    scene: &Scene,
+    light: &Light,
+    light_coord: (f64, f64),
+) -> Option<(Vector, f64)> {
     match light.kind {
+        // Point and spot lights ignore `light_coord` — they sample a
+        // single fixed point (`light.location`) regardless of which
+        // pixel sample drives them. Only area lights consume the
+        // coordinate (for the per-sample disk-point pick), so the
+        // routing is "always thread, only one arm reads."
         LightKind::Point => light_vector_point(point, scene, light),
         LightKind::Spot { direction, inner_angle, outer_angle } => {
             light_vector_spot(point, scene, light, direction, inner_angle, outer_angle)
         }
         LightKind::Area { axis, radius } => {
-            light_vector_area(point, scene, light, axis, radius)
+            light_vector_area(point, scene, light, axis, radius, light_coord)
         }
     }
 }
 
-/// Shadow-ray test for a point light: the transmittance walk from the
-/// light's `location` toward `point`, with every occluder strictly
-/// between them multiplying the running transmittance by its surface
-/// `transparency` (0.0 = opaque, 1.0 = fully clear). An opaque
-/// occluder drives transmittance to 0 and the walk stops early;
-/// transparent occluders attenuate and the walk continues to the next
-/// hit.
-fn light_vector_point(point: &Point, scene: &Scene, light: &Light) -> Option<(Vector, f64)> {
-    let light_direction = subp(*point, light.location);
-
-    let light_distance = lenp(light_direction);
+/// The shared shadow-ray transmittance walk used by every light kind:
+/// march from `origin` toward `target`, multiplying a running
+/// transmittance by each occluder's surface `transparency` (0.0 =
+/// opaque, 1.0 = fully clear). An opaque occluder drives transmittance
+/// to 0 and the walk stops early; transparent occluders attenuate and
+/// the walk continues to the next hit.
+///
+/// Returns the unit-direction ray from `origin` to `target` paired
+/// with the surviving transmittance in `(0.0, 1.0]`, or `None` if
+/// the path is fully shadowed. The returned `ray.delta` is the
+/// shadow-ray direction that `shade_pixel` uses for the Lambert and
+/// Phong terms; `ray.start` is `origin`.
+///
+/// Phase 5 of the "Light types: spotlights and area lights" plan
+/// extracted this from `light_vector_point` so that area-light
+/// soft-shadow sampling (which picks a per-sample point on the
+/// emitter disk and uses that as the shadow-ray origin) can share
+/// the same walk. Point and spot lights still go through this with
+/// `origin = light.location`, producing bit-identical behavior to
+/// the pre-refactor code.
+fn shadow_ray_walk(origin: Point, target: &Point, scene: &Scene) -> Option<(Vector, f64)> {
+    let direction = subp(*target, origin);
+    let distance = lenp(direction);
 
     let ray = Vector {
-        start: light.location,
-        delta: normalizep(light_direction)
+        start: origin,
+        delta: normalizep(direction),
     };
 
-    // Walk the shadow ray from the light toward the shaded point.
     // `cursor` is the current origin for the next segment test; it
     // advances to each occluder's hit point in turn. Because every
     // primitive's `hit_test` rejects `t <= EPSILON`, restarting the
@@ -671,22 +692,22 @@ fn light_vector_point(point: &Point, scene: &Scene, light: &Light) -> Option<(Ve
 
         match scene.root.hit_test(&segment) {
             Some(hit) => {
-                // Distance of this hit measured from the light along
+                // Distance of this hit measured from `origin` along
                 // the (unit-length) ray direction. Every hit point
                 // lies on the original ray line, so this is just the
-                // length from the light's location.
-                let dist_from_light = lenp(subp(hit.hit_point, ray.start));
+                // length from the origin.
+                let dist_from_origin = lenp(subp(hit.hit_point, ray.start));
 
                 // A hit at (or beyond) the shaded point itself is not
                 // an occluder — it is the surface we are lighting.
                 // Stop the walk; whatever transmittance we have is
                 // the answer.
-                if dist_from_light > light_distance - EPSILON {
+                if dist_from_origin > distance - EPSILON {
                     break;
                 }
 
-                // A genuine occluder strictly between light and
-                // point. Attenuate by its transparency. An opaque
+                // A genuine occluder strictly between origin and
+                // target. Attenuate by its transparency. An opaque
                 // surface (transparency 0.0) zeroes transmittance and
                 // we can stop immediately.
                 transmittance *= hit.surface.transparency;
@@ -698,7 +719,7 @@ fn light_vector_point(point: &Point, scene: &Scene, light: &Light) -> Option<(Ve
                 cursor = hit.hit_point;
             }
             // The shadow ray hit nothing further along — no more
-            // occluders between here and the light's reach. Done.
+            // occluders between here and the target's reach. Done.
             None => break,
         }
     }
@@ -708,6 +729,14 @@ fn light_vector_point(point: &Point, scene: &Scene, light: &Light) -> Option<(Ve
     } else {
         Some((ray, transmittance))
     }
+}
+
+/// Shadow-ray test for a point light: thin wrapper that walks from
+/// `light.location` toward `point`. The full transmittance-walk logic
+/// lives in `shadow_ray_walk`; this function exists to give the
+/// `light_vector` dispatcher a uniform per-kind handler shape.
+fn light_vector_point(point: &Point, scene: &Scene, light: &Light) -> Option<(Vector, f64)> {
+    shadow_ray_walk(light.location, point, scene)
 }
 
 /// Shadow-ray test for a spotlight: cone falloff on top of the
@@ -788,35 +817,77 @@ fn light_vector_spot(
     Some((ray, transmittance * cone_falloff))
 }
 
+/// Build an orthonormal basis `(u, v)` perpendicular to a unit-length
+/// `axis`. Used by the area-light disk sampler to orient a unit-disk
+/// sample (in `(dx, dy)` coordinates) into the world-space plane the
+/// disk lies in: the world-space offset is
+/// `radius * dx * u + radius * dy * v`.
+///
+/// Picks the world axis least aligned with `axis` as the hint vector
+/// to avoid a degenerate cross product when `axis` happens to line up
+/// with a world axis (a common case — a ceiling disk light usually
+/// has `axis = [0, 0, ±1]`). With the least-aligned hint, the first
+/// cross product is always well-conditioned; the second falls out
+/// orthogonal-and-unit by construction (axis and the first basis
+/// vector are both unit and orthogonal, so their cross product is
+/// also unit).
+fn disk_basis(axis: Point) -> (Point, Point) {
+    let absx = axis[0].abs();
+    let absy = axis[1].abs();
+    let absz = axis[2].abs();
+    let hint: Point = if absx <= absy && absx <= absz {
+        [1.0, 0.0, 0.0]
+    } else if absy <= absz {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let u = normalizep(crossp(axis, hint));
+    let v = crossp(axis, u);
+    (u, v)
+}
+
 /// Shadow-ray test for a disk area light: half-space check +
-/// Lambertian cosine attenuation on top of the transmittance walk.
+/// Lambertian cosine attenuation, plus (in Phase 5) per-pixel-sample
+/// jittered shadow-ray origin sampling for soft shadows.
 ///
-/// Phase 4 of the "Light types: spotlights and area lights" plan
-/// renders this as a hard-shadowed light: the shadow ray is cast
-/// from `light.location` (the disk center) exactly. The light's
-/// contribution is scaled by the Lambertian factor
-/// `max(0, cos_theta)` where `cos_theta = dot(axis, normalize(point
-/// - light.location))` — physically, this is how much radiance a
-/// disk emitter with normal `axis` directs toward a shaded point at
-/// angle `theta` off-axis. The shaded point is on the *back* of the
-/// disk exactly when `cos_theta ≤ 0`, in which case the light
-/// contributes nothing and we return `None` to skip its shading
-/// entirely. (Same early-out shape as the spotlight cone falloff
-/// and the opaque-occluder transmittance walk.)
+/// The light's contribution is scaled by `max(0, cos_theta)` where
+/// `cos_theta = dot(axis, normalize(point - light.location))` —
+/// physically, this is how much radiance a disk emitter with normal
+/// `axis` directs toward a shaded point at angle `theta` off-axis.
+/// The shaded point is on the *back* of the disk exactly when
+/// `cos_theta ≤ 0`, in which case the light contributes nothing and
+/// we return `None`. (Same early-out shape as the spotlight cone
+/// falloff and the opaque-occluder transmittance walk.) The cosine
+/// is computed against the disk *center* — using the disk center
+/// (rather than the per-sample disk point) for the radiance
+/// attenuation matches the Phase 4 baseline and is consistent across
+/// all per-pixel samples.
 ///
-/// Phase 5 will replace the center-only sampling with per-pixel-
-/// sample jittered shadow rays to points across the disk for soft
-/// shadows. The cosine attenuation and the `axis` transform in
-/// `collect_lights` stay unchanged across phases; only the sampling
-/// of the shadow ray's target on the disk changes. `_radius` is
-/// threaded through the signature now so Phase 5's diff is the body
-/// change rather than a signature change.
+/// Phase 5 — soft shadows. `light_coord` is a per-pixel-sample
+/// coordinate in `[0, 1)²` generated by `pixel_color` from a
+/// distinct Halton base pair (11, 13) plus a dedicated CP rotation;
+/// the `concentric_disk` map turns it into a uniform unit-disk
+/// point, which `disk_basis` orients into the disk's world-space
+/// plane to produce a sample point on the emitter. That sample
+/// point replaces `light.location` as the shadow-ray origin in
+/// `shadow_ray_walk`. One pixel sample takes one shadow ray to one
+/// disk point; thirty-two pixel samples take thirty-two shadow rays
+/// to thirty-two well-distributed disk points. Penumbra pixels —
+/// where some samples reach the light and some don't — see high
+/// variance and the adaptive oversampler keeps sampling them until
+/// they stabilize; fully shadowed and fully lit pixels terminate at
+/// `min_samples` and pay almost nothing for the feature.
+///
+/// `Point` and `Spot` lights ignore `light_coord` entirely; the
+/// dispatcher in `light_vector` only routes it here.
 fn light_vector_area(
     point: &Point,
     scene: &Scene,
     light: &Light,
     axis: Point,
-    _radius: f64,
+    radius: f64,
+    light_coord: (f64, f64),
 ) -> Option<(Vector, f64)> {
     let light_to_point = subp(*point, light.location);
     let dist = lenp(light_to_point);
@@ -845,13 +916,29 @@ fn light_vector_area(
         return None;
     }
 
-    // Lit half-space: run the same shadow-ray transmittance walk
-    // as the point-light path (Phase 4 samples the disk center, so
-    // this is literally one shadow ray from `light.location`), then
-    // fold the cosine factor into the returned scalar. Transparent
-    // occluders attenuate area lights the same way they attenuate
-    // point and spot lights.
-    let (ray, transmittance) = light_vector_point(point, scene, light)?;
+    // Sample a point on the disk. `light_coord` is the per-pixel-
+    // sample `[0, 1)²` value (Halton-(11, 13) + per-pixel CP
+    // rotation, both fresh each pixel sample); `concentric_disk`
+    // maps it to a uniform unit-disk point with low distortion;
+    // `disk_basis` gives an orthonormal basis perpendicular to
+    // `axis`, in which the disk lies; multiply through to land the
+    // sample at the right place on the world-space emitter disk.
+    // That sample point is the shadow ray's origin.
+    let (lu, lv) = light_coord;
+    let (dx, dy) = sampler::concentric_disk(lu, lv);
+    let (basis_u, basis_v) = disk_basis(axis);
+    let origin = addp(
+        light.location,
+        addp(
+            scalep(basis_u, radius * dx),
+            scalep(basis_v, radius * dy),
+        ),
+    );
+
+    // Walk from the sampled disk origin toward the shaded point,
+    // through any transparent occluders, then fold the cosine
+    // attenuation into the surviving transmittance.
+    let (ray, transmittance) = shadow_ray_walk(origin, point, scene)?;
     Some((ray, transmittance * cosine))
 }
 
@@ -878,7 +965,14 @@ impl Depth {
     }
 }
 
-fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, depth: Depth) -> LinearColor {
+fn shade_pixel(
+    ray: &Vector,
+    scene: &Scene,
+    lights: &[Light],
+    hit: &RayHit,
+    depth: Depth,
+    light_coord: (f64, f64),
+) -> LinearColor {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
     let scolor = if hit.surface.checked {
@@ -896,10 +990,16 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, dept
     let reflected: LinearColor = if (hit.surface.reflection > EPSILON) && (depth.reflect < scene.reflect_limit) {
         let rvec = subp(negp(ray.delta), scalep(hit.normal, 2.0 * dotp(negp(ray.delta), hit.normal)));
 
+        // Reuse the same `light_coord` for recursive rays rather than
+        // re-deriving one per bounce. Bounces are rare enough that
+        // the bias is invisible (mirrors the DOF "reflection rays
+        // don't get fresh aperture jitter" call); plumbing a fresh
+        // per-bounce coord would require threading sampler state
+        // through recursion proper.
         let rcolor = ray_color(&Vector {
             start: hit.hit_point,
             delta: normalizep(rvec)
-        }, scene, lights, Depth { reflect: depth.reflect + 1, ..depth });
+        }, scene, lights, Depth { reflect: depth.reflect + 1, ..depth }, light_coord);
 
         let scaled = scale_linear_color(&rcolor, hit.surface.reflection);
 
@@ -927,7 +1027,7 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, dept
     // mode.
     let mut light: LinearColor = [0.0, 0.0, 0.0];
     for l in lights {
-        if let Some((lv, transmittance)) = light_vector(&hit.hit_point, scene, l) {
+        if let Some((lv, transmittance)) = light_vector(&hit.hit_point, scene, l, light_coord) {
             let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0);
             let lambert = dotp(hit.normal, negp(lv.delta));
 
@@ -1017,6 +1117,7 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, dept
             scene,
             lights,
             Depth { transmit: depth.transmit + 1, ..depth },
+            light_coord,
         );
 
         // lerp(opaque, transmitted, transparency)
@@ -1030,9 +1131,15 @@ fn shade_pixel(ray: &Vector, scene: &Scene, lights: &[Light], hit: &RayHit, dept
     }
 }
 
-fn ray_color(ray: &Vector, scene: &Scene, lights: &[Light], depth: Depth) -> LinearColor {
+fn ray_color(
+    ray: &Vector,
+    scene: &Scene,
+    lights: &[Light],
+    depth: Depth,
+    light_coord: (f64, f64),
+) -> LinearColor {
     match scene.root.hit_test(ray) {
-        Some(hit) => shade_pixel(ray, scene, lights, &hit, depth),
+        Some(hit) => shade_pixel(ray, scene, lights, &hit, depth, light_coord),
         None => scene.background
     }
 }
@@ -1086,6 +1193,22 @@ fn pixel_color(
     let dof = camera.camera.aperture_radius != 0.0;
     let (lox, loy) = if dof {
         sampler::cranley_patterson_lens_offset(x, y)
+    } else {
+        (0.0, 0.0)
+    };
+
+    // Area-light disk sampling. Same hoisted-flag pattern as DOF: if
+    // no light in the scene is an area light, we skip the per-sample
+    // area-coordinate work entirely — `light_vector_area` is the
+    // only consumer, and `LightKind::Point` / `LightKind::Spot` just
+    // ignore the coordinate. The flag is computed once per pixel
+    // rather than per sample because the lights slice is fixed for
+    // the entire frame (and indeed for the whole render call), and
+    // the matches!() probe is too cheap to bother lifting further.
+    // Phase 5 of the "Light types: spotlights and area lights" plan.
+    let has_area_light = lights.iter().any(|l| matches!(l.kind, LightKind::Area { .. }));
+    let (aox, aoy) = if has_area_light {
+        sampler::cranley_patterson_area_offset(x, y)
     } else {
         (0.0, 0.0)
     };
@@ -1164,11 +1287,25 @@ fn pixel_color(
                 (0.0, 0.0)
             };
 
+            // Per-pixel-sample area-light coordinate. Same pattern as
+            // the lens sample but on its own Halton base pair (11, 13)
+            // and CP rotation seed. `light_vector_area` is the only
+            // consumer; point/spot lights ignore it. When no area
+            // light is in the scene this stays `(0.0, 0.0)` and
+            // `halton_area` is never called on the hot path.
+            let light_coord = if has_area_light {
+                let (ahx, ahy) = sampler::halton_area(i + 1);
+                ((ahx + aox).fract(), (ahy + aoy).fract())
+            } else {
+                (0.0, 0.0)
+            };
+
             let rc = ray_color(
                 &camera_ray(&camera.camera, camera.aspect, xt, yt, lens),
                 scene,
                 lights,
                 Depth::zero(),
+                light_coord,
             );
 
             sum = add_linear_color(&sum, &rc);

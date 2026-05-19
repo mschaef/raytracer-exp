@@ -26,12 +26,21 @@
 
 (load "_common.lisp")
 
+; Sample budget — Phase 5 turned this scene from hard-shadowed
+; into soft-shadowed (area lights now sample across the disk per
+; pixel sample), and the default `:max-samples 32` is too tight
+; for the penumbra to look clean. The adaptive sampler only
+; spends the extra budget on noisy regions; flat-lit and fully-
+; shadowed pixels still terminate at `:min-samples`.
+
 (def area-light-test-scene
   (scene
-    {:name          "Area Light Test"
-     :camera        default-camera
-     :background    [0.0 0.0 0.0]
-     :reflect-limit 2
+    {:name               "Area Light Test"
+     :camera             default-camera
+     :background         [0.0 0.0 0.0]
+     :reflect-limit      2
+     :max-samples        128
+     :variance-threshold 0.002
      :objects
      [;; Disk area light, 1.0 radius, aimed straight down.
       (light-area [0 0 4]    ; location (disk center)

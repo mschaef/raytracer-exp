@@ -470,6 +470,11 @@ fn sphere_occlusion_test_scene_loads() {
 }
 
 #[test]
+fn soft_shadow_test_scene_loads() {
+    assert_scene_loads("soft_shadow_test.lisp", "soft-shadow-test-scene");
+}
+
+#[test]
 fn sphere_surface_test_scene_loads() {
     assert_scene_loads("sphere_surface_test.lisp", "sphere-surface-test-scene");
 }
