@@ -910,10 +910,10 @@ pub fn group(children: Vec<Shape>) -> Shape {
 ///
 /// For acceleration, use this on any subtree that has well-defined finite
 /// bounds and may be missed by many rays. The classic case is a loaded
-/// mesh: `bounded(load_obj("teapot.obj", surface))` gives a single AABB
-/// test that skips all of the teapot's triangles for any ray that misses
-/// the box. (A multi-level BVH from `bvh(...)` will further accelerate
-/// rays that *do* hit the box; that's phase 2.)
+/// mesh: `bounded(load_obj("teapot.obj", Some(surface)))` gives a single
+/// AABB test that skips all of the teapot's triangles for any ray that
+/// misses the box. (A multi-level BVH from `bvh(...)` will further
+/// accelerate rays that *do* hit the box; that's phase 2.)
 pub fn bounded(child: impl Into<Shape>) -> Shape {
     let child = child.into();
     let bounds = child.bounds()

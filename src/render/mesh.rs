@@ -31,11 +31,16 @@ use crate::render::shapes::{Shape, Triangle};
 /// Load a Wavefront OBJ file from disk and return it as a `Shape` (a
 /// `Shape::Group` of triangles).
 ///
-/// Every triangle in the resulting group shares the supplied `surface` —
-/// per-face materials in the OBJ are intentionally ignored because the
-/// raytracer's surface model isn't a faithful mapping of OBJ/MTL
-/// conventions. To position or scale the loaded mesh, wrap the return
-/// value in `translate(...)`, `scale(...)`, or `rotate_*(...)`.
+/// `surface` is `Option<Surface>`: pass `Some(s)` to stamp a single
+/// surface across every triangle, or `None` to leave the triangles
+/// unsurfaced — in which case a `Shape::Surfaced` ancestor must
+/// supply one (otherwise `Scene` construction rejects the result via
+/// `Shape::validate_surfaces`). Per-face materials in the OBJ are
+/// intentionally ignored because the raytracer's surface model isn't
+/// a faithful mapping of OBJ/MTL conventions.
+///
+/// To position or scale the loaded mesh, wrap the return value in
+/// `translate(...)`, `scale(...)`, or `rotate_*(...)`.
 ///
 /// Polygons with more than three vertices are fan-triangulated by tobj.
 /// If the OBJ has per-vertex normals, smooth shading falls out of
@@ -44,7 +49,7 @@ use crate::render::shapes::{Shape, Triangle};
 /// triangle's three vertex slots, which gives flat shading.
 ///
 /// Panics on I/O error, parse error, or malformed mesh data.
-pub fn load_obj(path: impl AsRef<Path>, surface: Surface) -> Shape {
+pub fn load_obj(path: impl AsRef<Path>, surface: Option<Surface>) -> Shape {
     let path_ref = path.as_ref();
 
     let load_options = tobj::LoadOptions {
@@ -102,14 +107,11 @@ pub fn load_obj(path: impl AsRef<Path>, surface: Surface) -> Shape {
             triangles.push(Shape::Triangle(Triangle {
                 vertices: [v0, v1, v2],
                 normals: [n0, n1, n2],
-                // Wrap in `Some` for the new
-                // `Triangle::surface: Option<Surface>` field. The
-                // loader still takes a required `Surface` argument
-                // for now — making it optional (so a script can
-                // `load-obj` and then wrap the result in
-                // `with-surface`) is a Phase 2 SDL ergonomics
-                // change, not a Phase 1 (renderer-internal) one.
-                surface: Some(surface),
+                // `surface` is already `Option<Surface>`: passes
+                // through verbatim. A `None` here means callers can
+                // `(with-surface S (load-obj "..."))` to apply one
+                // surface across the entire mesh from outside.
+                surface,
             }));
         }
     }

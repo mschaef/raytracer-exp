@@ -42,8 +42,8 @@ use crate::render::mesh::load_obj;
 use crate::render::render;
 use crate::render::shapes::{
     bounded, bounded_with, group, rotate_axis, rotate_x, rotate_y, rotate_z,
-    scale, transform, translate, AABB, Cone, Cuboid, Cylinder, Plane, Shape,
-    Sphere, Triangle,
+    scale, surfaced, transform, translate, AABB, Cone, Cuboid, Cylinder, Plane,
+    Shape, Sphere, Triangle,
 };
 use crate::render::transform::Affine;
 use crate::render::{Camera, HeatmapTargets, Light, Scene, Surface};
@@ -99,6 +99,7 @@ pub fn install(env: &EnvRef) {
     define_native(env, "rotate-axis", builtin_rotate_axis);
     define_native(env, "bounded", builtin_bounded);
     define_native(env, "bounded-with", builtin_bounded_with);
+    define_native(env, "with-surface", builtin_with_surface);
 
     // Affine transform constructors. Mirror the methods on
     // `Affine` so `transform` can be used directly from script.
@@ -310,16 +311,23 @@ fn require_key_string(
     require_string(require_key(map, key, ctx, pos), &format!("{} :{}", ctx, key), pos)
 }
 
-fn require_key_surface(
+/// Optional surface key: `Some(surface)` if `:surface` is present and
+/// is a `Value::Surface`, `None` if the key is absent. A present-but-
+/// wrong-type value is still rejected with an explicit error (it's
+/// almost always a bug, not an intent to fall back to the wrapper's
+/// default). Phase 2 of the surface-decoupling work uses this on
+/// every leaf primitive so scripts can leave the surface unspecified
+/// and have an enclosing `(with-surface ...)` supply one.
+fn maybe_key_surface(
     map: &HashMap<String, Value>,
     key: &str,
     ctx: &str,
     pos: &Position,
-) -> Surface {
-    let v = require_key(map, key, ctx, pos);
-    match v {
-        Value::Surface(s) => *s,
-        other => sdl_panic!(
+) -> Option<Surface> {
+    match map.get(key) {
+        None => None,
+        Some(Value::Surface(s)) => Some(*s),
+        Some(other) => sdl_panic!(
             pos.clone(),
             "{} :{} expected a surface, got {} ({})",
             ctx,
@@ -445,6 +453,22 @@ fn require_aabb(v: &Value, ctx: &str, pos: &Position) -> AABB {
         other => sdl_panic!(
             pos.clone(),
             "{} expected an aabb, got {} ({})",
+            ctx,
+            other,
+            other.type_name()
+        ),
+    }
+}
+
+/// Pull a `Surface` out of a positional argument (counterpart to the
+/// map-keyed `maybe_key_surface`). Used by `(with-surface ...)` and
+/// the positional `(load-obj path surface)` overload.
+fn require_surface(v: &Value, ctx: &str, pos: &Position) -> Surface {
+    match v {
+        Value::Surface(s) => *s,
+        other => sdl_panic!(
+            pos.clone(),
+            "{} expected a surface, got {} ({})",
             ctx,
             other,
             other.type_name()
@@ -709,13 +733,13 @@ fn builtin_sphere(args: &[Value], pos: &Position) -> Value {
     let map = require_map(&args[0], "sphere", pos);
     let center = require_key_point(&map, "center", "sphere", pos);
     let r = require_key_number(&map, "r", "sphere", pos);
-    // Phase 1 of the surface-decoupling work moved
-    // `Sphere::surface` to `Option<Surface>`; the SDL `:surface` key
-    // stays required for now, and the wrap is mechanical. Phase 2
-    // will make the SDL key optional and add a `(with-surface ...)`
-    // form for default-supply.
-    let surface = require_key_surface(&map, "surface", "sphere", pos);
-    Value::Shape(Rc::new(Shape::Sphere(Sphere { center, r, surface: Some(surface) })))
+    // `:surface` is optional. A leaf without an explicit surface
+    // inherits one from an enclosing `(with-surface ...)`; if no
+    // wrapper supplies one, `Shape::validate_surfaces` rejects the
+    // scene at build time. See the Phase 2 surface-decoupling notes
+    // on `Shape::Surfaced` in `src/render/shapes.rs`.
+    let surface = maybe_key_surface(&map, "surface", "sphere", pos);
+    Value::Shape(Rc::new(Shape::Sphere(Sphere { center, r, surface })))
 }
 
 fn builtin_plane(args: &[Value], pos: &Position) -> Value {
@@ -723,8 +747,8 @@ fn builtin_plane(args: &[Value], pos: &Position) -> Value {
     let map = require_map(&args[0], "plane", pos);
     let normal = require_key_point(&map, "normal", "plane", pos);
     let p0 = require_key_point(&map, "p0", "plane", pos);
-    let surface = require_key_surface(&map, "surface", "plane", pos);
-    Value::Shape(Rc::new(Shape::Plane(Plane { normal, p0, surface: Some(surface) })))
+    let surface = maybe_key_surface(&map, "surface", "plane", pos);
+    Value::Shape(Rc::new(Shape::Plane(Plane { normal, p0, surface })))
 }
 
 fn builtin_cuboid(args: &[Value], pos: &Position) -> Value {
@@ -732,8 +756,8 @@ fn builtin_cuboid(args: &[Value], pos: &Position) -> Value {
     let map = require_map(&args[0], "cuboid", pos);
     let center = require_key_point(&map, "center", "cuboid", pos);
     let size = require_key_point(&map, "size", "cuboid", pos);
-    let surface = require_key_surface(&map, "surface", "cuboid", pos);
-    Value::Shape(Rc::new(Shape::Cuboid(Cuboid { center, size, surface: Some(surface) })))
+    let surface = maybe_key_surface(&map, "surface", "cuboid", pos);
+    Value::Shape(Rc::new(Shape::Cuboid(Cuboid { center, size, surface })))
 }
 
 /// `(triangle {:vertices [[..] [..] [..]] :normals [[..] [..] [..]] :surface S})`.
@@ -755,7 +779,7 @@ fn builtin_triangle(args: &[Value], pos: &Position) -> Value {
     let v1 = require_point(&verts[1], "triangle :vertices[1]", pos);
     let v2 = require_point(&verts[2], "triangle :vertices[2]", pos);
 
-    let surface = require_key_surface(&map, "surface", "triangle", pos);
+    let surface = maybe_key_surface(&map, "surface", "triangle", pos);
 
     let normals = if let Some(nv) = map.get("normals") {
         let items = require_vec(nv, "triangle :normals", pos);
@@ -792,7 +816,7 @@ fn builtin_triangle(args: &[Value], pos: &Position) -> Value {
     Value::Shape(Rc::new(Shape::Triangle(Triangle {
         vertices: [v0, v1, v2],
         normals,
-        surface: Some(surface),
+        surface,
     })))
 }
 
@@ -802,8 +826,8 @@ fn builtin_cylinder(args: &[Value], pos: &Position) -> Value {
     let p0 = require_key_point(&map, "p0", "cylinder", pos);
     let p1 = require_key_point(&map, "p1", "cylinder", pos);
     let r = require_key_number(&map, "r", "cylinder", pos);
-    let surface = require_key_surface(&map, "surface", "cylinder", pos);
-    Value::Shape(Rc::new(Shape::Cylinder(Cylinder { p0, p1, r, surface: Some(surface) })))
+    let surface = maybe_key_surface(&map, "surface", "cylinder", pos);
+    Value::Shape(Rc::new(Shape::Cylinder(Cylinder { p0, p1, r, surface })))
 }
 
 /// `(cone {:p0 [..] :p1 [..] :r n :surface S})` — a closed solid cone.
@@ -815,13 +839,22 @@ fn builtin_cone(args: &[Value], pos: &Position) -> Value {
     let p0 = require_key_point(&map, "p0", "cone", pos);
     let p1 = require_key_point(&map, "p1", "cone", pos);
     let r = require_key_number(&map, "r", "cone", pos);
-    let surface = require_key_surface(&map, "surface", "cone", pos);
-    Value::Shape(Rc::new(Shape::Cone(Cone { p0, p1, r, surface: Some(surface) })))
+    let surface = maybe_key_surface(&map, "surface", "cone", pos);
+    Value::Shape(Rc::new(Shape::Cone(Cone { p0, p1, r, surface })))
 }
 
-/// `(load-obj <path-string> <surface>)` — load a Wavefront OBJ file
-/// from disk and return it as a `Shape::Group` of triangles, all
-/// sharing the supplied surface.
+/// `(load-obj <path-string>)` or `(load-obj <path-string> <surface>)`
+/// — load a Wavefront OBJ file from disk and return it as a
+/// `Shape::Group` of triangles.
+///
+/// With a `<surface>` argument, every triangle is stamped with that
+/// surface — equivalent to the pre-Phase-2 behavior. Without it,
+/// triangles carry no surface and the result must be wrapped in
+/// `(with-surface S ...)` (or have some other `Shape::Surfaced`
+/// ancestor) before going into a scene. The "wrap the load with a
+/// surface" idiom is the Phase-2 default — it makes retexturing a
+/// mesh a one-line change rather than re-passing the surface
+/// through the loader.
 ///
 /// Path resolution mirrors the `(load ...)` special form: relative
 /// paths join the loading file's directory via `CURRENT_DIR`, with
@@ -831,22 +864,29 @@ fn builtin_cone(args: &[Value], pos: &Position) -> Value {
 /// `mesh::load_obj` itself takes `impl AsRef<Path>` and does no
 /// resolution; we do all the resolution at the binding boundary.)
 ///
-/// Positional rather than map-keyed because the only two arguments
-/// (where, what surface) are obvious from order. Returns `Value::Shape`
-/// wrapping the `Shape::Group` so the result composes with the rest of
-/// the shape constructors — `(bounded (translate ... (load-obj ...)))`
-/// is the typical idiom.
+/// Positional rather than map-keyed because the argument order
+/// (where, what surface) is obvious. Returns `Value::Shape` wrapping
+/// the `Shape::Group` so the result composes with the rest of the
+/// shape constructors — `(with-surface gold (bounded (translate
+/// ... (load-obj "../models/foo.obj"))))` is the typical Phase-2
+/// idiom.
 fn builtin_load_obj(args: &[Value], pos: &Position) -> Value {
-    require_arity(args, 2, "load-obj", pos);
-    let path_str = require_string(&args[0], "load-obj path", pos);
-    let surface = match &args[1] {
-        Value::Surface(s) => *s,
-        other => sdl_panic!(
+    // Variadic arity (1 or 2): inline check since `require_arity` is
+    // fixed-arity. The 1-arg form produces an unsurfaced mesh that
+    // must be wrapped in `(with-surface ...)`; the 2-arg form keeps
+    // the pre-Phase-2 calling convention working without change.
+    if args.len() != 1 && args.len() != 2 {
+        sdl_panic!(
             pos.clone(),
-            "load-obj surface expected a surface, got {} ({})",
-            other,
-            other.type_name()
-        ),
+            "load-obj takes 1 or 2 arguments (got {})",
+            args.len()
+        );
+    }
+    let path_str = require_string(&args[0], "load-obj path", pos);
+    let surface: Option<Surface> = if args.len() == 2 {
+        Some(require_surface(&args[1], "load-obj surface", pos))
+    } else {
+        None
     };
 
     // Same resolution rule as eval_load: absolute paths used as-is,
@@ -954,6 +994,27 @@ fn builtin_bounded_with(args: &[Value], pos: &Position) -> Value {
     let aabb = require_aabb(&args[0], "bounded-with bounds", pos);
     let child = require_shape_value(&args[1], "bounded-with child", pos);
     Value::Shape(Rc::new(bounded_with(aabb, child)))
+}
+
+/// `(with-surface surface shape)` — decorate a shape subtree with a
+/// default `surface`. Every leaf in `shape` that was constructed
+/// without an explicit `:surface` inherits this one; leaves that
+/// carry their own surface keep it ("innermost wins"). Nested
+/// `(with-surface inner ... (with-surface outer ...))` lets `outer`
+/// fill in unsurfaced leaves below it that the `inner` wrapper
+/// didn't already supply.
+///
+/// Single-child by design — for multiple shapes, wrap them with
+/// `(group [...])` first. The extra paren is cheap and keeps the
+/// "what's inheriting from what" structure explicit at the call
+/// site. Lights placed inside `(with-surface ...)` are unaffected
+/// — they don't hit-test and `Shape::Surfaced::hit_test` is the
+/// only place the wrapper's surface is consulted.
+fn builtin_with_surface(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 2, "with-surface", pos);
+    let surface = require_surface(&args[0], "with-surface surface", pos);
+    let child = require_shape_value(&args[1], "with-surface child", pos);
+    Value::Shape(Rc::new(surfaced(surface, child)))
 }
 
 // ---------------------------------------------------------------------------

@@ -84,6 +84,7 @@ const DECLARED: &[&str] = &[
     "strings",
     "threading",
     "vec_ops",
+    "with_surface",
 ];
 
 fn run_script(name: &str) {
@@ -143,6 +144,7 @@ sdl_test!(render_dispatch);
 sdl_test!(strings);
 sdl_test!(threading);
 sdl_test!(vec_ops);
+sdl_test!(with_surface);
 
 /// End-to-end render-dispatch test: build a small scene in script,
 /// render it through the SDL bindings, save the result, and verify
@@ -226,6 +228,42 @@ fn render_dispatch_save() {
     );
 
     fs::remove_file(&path).ok();
+}
+
+/// Phase-2 surface-decoupling validation. A `(scene ...)` containing
+/// a leaf with no `:surface` and no enclosing `(with-surface ...)`
+/// must `sdl-panic!` at scene-build time — `Shape::validate_surfaces`
+/// in the binding catches it before the scene is ever constructed.
+///
+/// The positive cases (unsurfaced leaves under a wrapper, mixed
+/// explicit and inherited surfaces) live in `tests/sdl/with_surface.lisp`
+/// and run through the `sdl_test!` harness. This test owns the
+/// failure case because the harness has no "expect panic" form;
+/// `std::panic::catch_unwind` here turns the expected panic into a
+/// passing test.
+#[test]
+fn with_surface_validation_fails_on_unsurfaced_leaf() {
+    // The sphere has neither :surface nor an enclosing with-surface.
+    // Scene construction must reject this.
+    let source = r#"
+(def cam (camera-looking-at [0 0 5] [0 0 0] [0 1 0] 1.0))
+(scene {:name "bad"
+        :camera cam
+        :background [0 0 0]
+        :objects [(light-white [10 10 10])
+                  (sphere {:center [0 0 0] :r 1.0})]
+        :reflect-limit 0
+        :min-samples 1
+        :max-samples 1})
+"#;
+    let env = sdl::default_env();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sdl::eval_source(source, "validation_failure_test.lisp", &env);
+    }));
+    assert!(
+        result.is_err(),
+        "scene construction must reject an unsurfaced sphere with no with-surface ancestor",
+    );
 }
 
 /// Lights-as-shapes affine equivalence: a scene with a bare
