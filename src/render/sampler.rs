@@ -350,6 +350,39 @@ pub fn cosine_hemisphere_sample(u: f64, v: f64) -> (f64, f64, f64) {
     (dx, dy, z)
 }
 
+/// A 1D Russian-roulette sample in `[0, 1)`, derived from the per-
+/// pixel-sample 2D `indirect_coord` and the current indirect-bounce
+/// `depth`. Used by the indirect branch in `shade_pixel` to decide
+/// whether a path survives or terminates at this bounce.
+///
+/// The codebase's other per-pixel-sample coords (`light_coord`,
+/// `indirect_coord` itself) are 2D and reused across recursion —
+/// per-bounce decorrelation would require threading sampler state
+/// through recursion proper. Russian roulette is more variance-
+/// sensitive: if the same `u` is reused at every bounce, "lucky"
+/// rays (small `u`) terminate immediately and "unlucky" rays (large
+/// `u`) survive many bounces — predictable, correlated path
+/// lengths. To get a *different* `u` at each depth without adding
+/// a new threaded parameter, we offset the pixel-sample's `(u, v)`
+/// by `depth * φ` (φ = golden ratio) and take the fractional
+/// part. The golden ratio is the canonical low-discrepancy 1D
+/// offset: successive multiples are well-distributed modulo 1
+/// without periodicity, which is exactly what RR needs.
+///
+/// The base value mixes both `indirect_coord` components so the
+/// RR sample isn't *bit-identical* to the bounce direction's u
+/// coordinate at depth 0 (those decisions would still be
+/// correlated, but not the same number).
+pub fn rr_sample(indirect_coord: (f64, f64), depth: u32) -> f64 {
+    // Golden ratio. Constant inlined rather than pulled from a
+    // module because there's no `std::f64::consts::GOLDEN_RATIO`
+    // (yet) and the value is short.
+    const GOLDEN_RATIO: f64 = 1.618_033_988_749_895;
+    let (iu, iv) = indirect_coord;
+    let base = iu + iv * GOLDEN_RATIO;
+    (base + depth as f64 * GOLDEN_RATIO).fract()
+}
+
 /// Build an orthonormal basis `(u, v)` perpendicular to a unit-
 /// length surface `normal`. Used by the indirect-bounce branch to
 /// rotate a local-hemisphere sample (in `(dx, dy, dz)` coordinates,
@@ -751,5 +784,77 @@ mod tests {
             assert!(dotp(u, n).abs() < 1e-12, "u·n not zero for n={:?}", n);
             assert!(dotp(v, n).abs() < 1e-12, "v·n not zero for n={:?}", n);
         }
+    }
+
+    /// `rr_sample` always returns a value in `[0, 1)` for any
+    /// `indirect_coord` in `[0, 1)²` and any depth. If a value
+    /// escaped the range, the Russian-roulette survival test in
+    /// `shade_pixel` would behave nonsensically (a negative `u` is
+    /// always less than `p`, surviving guaranteed; a `u >= 1` is
+    /// always greater, terminating guaranteed).
+    #[test]
+    fn rr_sample_in_unit_interval() {
+        for ui in 0..16 {
+            for vi in 0..16 {
+                let u = ui as f64 / 16.0;
+                let v = vi as f64 / 16.0;
+                for depth in 0..32 {
+                    let s = rr_sample((u, v), depth);
+                    assert!(
+                        s >= 0.0 && s < 1.0,
+                        "rr_sample(({}, {}), {}) = {} out of [0, 1)",
+                        u, v, depth, s
+                    );
+                }
+            }
+        }
+    }
+
+    /// `rr_sample` decorrelates per bounce: at the same pixel
+    /// sample (`indirect_coord` fixed), consecutive depths return
+    /// distinct values. If the golden-ratio depth offset were
+    /// degenerate (e.g. an integer φ, or 0), the same `u` would
+    /// recur every bounce and paths would terminate-or-survive in
+    /// lockstep — the variance behavior Russian roulette
+    /// specifically tries to avoid.
+    #[test]
+    fn rr_sample_distinct_across_depths() {
+        for ui in 0..16 {
+            for vi in 0..16 {
+                let u = ui as f64 / 16.0;
+                let v = vi as f64 / 16.0;
+                // Take rr samples for depths 0..8 and check they're
+                // all distinct. Equality (within f64 tolerance) at
+                // any pair would indicate a degenerate offset.
+                let samples: Vec<f64> = (0..8u32)
+                    .map(|d| rr_sample((u, v), d))
+                    .collect();
+                for i in 0..samples.len() {
+                    for j in (i + 1)..samples.len() {
+                        assert!(
+                            (samples[i] - samples[j]).abs() > 1e-12,
+                            "rr_sample(({}, {}), depths {} and {}) collide: {} == {}",
+                            u, v, i, j, samples[i], samples[j]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// `rr_sample` decorrelates across pixel samples too: at the
+    /// same depth, different `indirect_coord` values give
+    /// different results. The base value `iu + iv * φ` is a
+    /// well-known irrational-ratio mixer; this test guards against
+    /// a future refactor that accidentally degenerates the base
+    /// (e.g. dropping `iv`).
+    #[test]
+    fn rr_sample_distinct_across_pixel_samples() {
+        // Two adjacent pixel-sample coordinates at depth 0.
+        let a = rr_sample((0.1, 0.2), 0);
+        let b = rr_sample((0.1, 0.3), 0);
+        let c = rr_sample((0.2, 0.2), 0);
+        assert!((a - b).abs() > 1e-6, "rr_sample varying iv collides: {} == {}", a, b);
+        assert!((a - c).abs() > 1e-6, "rr_sample varying iu collides: {} == {}", a, c);
     }
 }

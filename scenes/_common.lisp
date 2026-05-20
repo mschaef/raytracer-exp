@@ -133,24 +133,32 @@
 ;; (`:indirect-limit 0`), so a GI scene has to opt in by setting the
 ;; four keys below in its `(scene { ... })` map:
 ;;
-;;   :indirect-limit     gi-indirect-limit       ; recursion depth cap
+;;   :indirect-limit     gi-indirect-limit       ; safety cap (RR is primary)
 ;;   :min-samples        gi-min-samples          ; floor before variance check
 ;;   :max-samples        gi-max-samples          ; ceiling
 ;;   :variance-threshold gi-variance-threshold   ; early-termination spread
 ;;
-;; Defaults are tuned for Cornell-style indoor scenes where indirect
-;; lighting matters: depth 2 captures the dominant "wall → object →
-;; eye" color-bleed bounce without spending budget on diminishing
-;; returns; the sample budget is bumped well above the renderer's
-;; default (32) because indirect rays add variance and we want the
-;; adaptive oversampler to have room to resolve it; the variance
-;; threshold is tightened so the loop doesn't terminate too eagerly
-;; in penumbra regions where indirect contribution is highest. Faster
-;; GI scenes (the gi-test smoke render) can override individual knobs
-;; without having to remember the whole combination — pull `gi-min-
-;; samples` 16 instead of 64, say.
+;; `:indirect-limit` was the *primary* termination mechanism in
+;; Phase 2 (a hard depth cap). Phase 3 added Russian roulette to
+;; `shade_pixel`, so termination is now probabilistic — every
+;; bounce decides with survival probability `min(surface.light *
+;; max(scolor), 0.95)` whether to continue, and surviving paths
+;; scale by `1/p` to keep the estimator unbiased. On Cornell-shape
+;; matte surfaces (`p ≈ 0.72`) the expected path length is about
+;; 3–4 bounces, so `gi-indirect-limit 8` is a comfortable safety
+;; ceiling — well above what RR will reach in practice but bounded
+;; enough to protect against pathological geometry.
+;;
+;; The sample budget is bumped well above the renderer's default
+;; (32) because indirect rays add variance and we want the adaptive
+;; oversampler to have room to resolve it; the variance threshold
+;; is tightened so the loop doesn't terminate too eagerly in
+;; penumbra regions where indirect contribution is highest. Faster
+;; GI scenes (the gi-test smoke render) can override individual
+;; knobs without having to remember the whole combination — pull
+;; `gi-min-samples` 16 instead of 64, say.
 
-(def gi-indirect-limit     2)
+(def gi-indirect-limit     8)
 (def gi-min-samples        64)
 (def gi-max-samples        1024)
 (def gi-variance-threshold 0.003)

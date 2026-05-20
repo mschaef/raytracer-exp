@@ -6,17 +6,21 @@
 ; rotated toward the front-right. Lit by a single disk area light
 ; near the ceiling.
 ;
-; This is Phase 3 of the Cornell box plan, closed out by Phase 2 of
-; the path-tracing plan. Earlier phases stood in for missing renderer
-; features: Phase 1 had a single point light (hard shadows), Phase 2
-; spread a 4x4 grid of point lights across a ceiling panel to fake
-; soft shadows. Phase 3 (this version) uses the real things — a disk
-; area light produces faithful soft shadows in `light_vector_area`,
-; and `:indirect-limit 2` turns on path-traced diffuse interreflection
-; in `shade_pixel`. The two effects the Cornell box was originally
-; designed to demonstrate — soft shadows around the boxes and color
-; bleeding from the red/green walls onto adjacent white surfaces —
-; should both be visible in the render.
+; This is Phase 3 of the Cornell box plan, closed out by Phases 2-3
+; of the path-tracing plan. Earlier phases stood in for missing
+; renderer features: Phase 1 had a single point light (hard
+; shadows), Phase 2 spread a 4x4 grid of point lights across a
+; ceiling panel to fake soft shadows. Phase 3 (this version) uses
+; the real things — a disk area light produces faithful soft
+; shadows in `light_vector_area`, and `:indirect-limit gi-indirect-
+; limit` turns on path-traced diffuse interreflection in
+; `shade_pixel`. Path-tracing Phase 3 added Russian roulette,
+; making the indirect contribution unbiased and energy-conserving
+; while keeping the same `gi-indirect-limit` knob as a worst-case
+; safety net. The two effects the Cornell box was originally
+; designed to demonstrate — soft shadows around the boxes and
+; color bleeding from the red/green walls onto adjacent white
+; surfaces — should both be visible in the render.
 ;
 ; Matte ambient is dropped to 0 across the room. The `:ambient` field
 ; was a fake stand-in for indirect light filling shadowed faces off

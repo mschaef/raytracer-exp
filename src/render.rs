@@ -1093,14 +1093,15 @@ fn shade_pixel(
         [0.0, 0.0, 0.0]
     };
 
-    // Indirect (path-traced) lighting. Phase 2 of the path-tracing
-    // plan. At each diffuse, non-metallic hit, fire a single
-    // cosine-weighted hemisphere ray and accumulate the incoming
-    // radiance, tinted by the surface's body color. This is what
-    // produces color bleeding (a red wall tinting a nearby white
-    // box red on the facing side) and the soft fill in shadowed
-    // areas that makes corner darkening look natural — neither of
-    // which the direct + reflection terms above can reproduce.
+    // Indirect (path-traced) lighting. Phases 2+3 of the path-
+    // tracing plan. At each diffuse, non-metallic hit, fire a
+    // single cosine-weighted hemisphere ray and accumulate the
+    // incoming radiance, tinted by the surface's body color. This
+    // is what produces color bleeding (a red wall tinting a nearby
+    // white box red on the facing side) and the soft fill in
+    // shadowed areas that makes corner darkening look natural —
+    // neither of which the direct + reflection terms above can
+    // reproduce.
     //
     // Why one ray, not N: more *primary* rays are how variance is
     // resolved in this codebase (the adaptive oversampler in
@@ -1123,12 +1124,23 @@ fn shade_pixel(
     // the ambient, diffuse, and metallic-reflection terms above
     // already use.
     //
-    // Why a black-out fallback when off (`indirect_limit == 0`):
-    // the default is "feature off" and existing scenes render
-    // byte-identically. Once enabled, the recursion depth cap
-    // (`scene.indirect_limit`) is intuitive and bounded; Phase 3
-    // of the plan optionally replaces it with Russian roulette
-    // for unbiased termination.
+    // Russian roulette (Phase 3): rather than relying on the hard
+    // depth cap (`scene.indirect_limit`) as the only termination
+    // mechanism, every bounce decides probabilistically whether
+    // the path continues. Survival probability is the maximum
+    // channel of the local throughput `surface.light * scolor`
+    // clamped to `[0, 0.95]`: bright surfaces survive more, dark
+    // surfaces terminate more — and the contribution of every
+    // surviving path is scaled by `1/p` to maintain expectation,
+    // which is what keeps the estimator unbiased. The expected
+    // path length is `1/(1 - p)`; on Cornell-style matte surfaces
+    // (`p ≈ 0.72`) this is about 3-4 bounces, well below the
+    // depth cap that now serves only as a worst-case safety net.
+    //
+    // `scene.indirect_limit > 0` remains the off-switch gate: when
+    // 0 (the default), `indirect` is `[0; 3]`, the `opaque` sum
+    // collapses to the pre-GI form, and existing byte-pinned
+    // tests stay bit-identical via `x + 0.0 == x`.
     //
     // Why guard on `surface.light > EPSILON` and `!surface.metallic`:
     // a perfect-mirror dielectric (`light == 0`) has no diffuse
@@ -1140,50 +1152,92 @@ fn shade_pixel(
         && surface.light > EPSILON
         && !surface.metallic
     {
-        // Pick a hemisphere direction in the *local* frame (z = up),
-        // cosine-weighted via Malley's method (concentric disk + z
-        // lift). The `indirect_coord` is per-pixel-sample, derived in
-        // `pixel_color` from a Halton-(17,19) point shifted by the
-        // pixel's CP rotation (seed 3) — independent of sub-pixel,
-        // lens, and area-light coords at the same sample index.
-        let (iu, iv) = indirect_coord;
-        let (lx, ly, lz) = sampler::cosine_hemisphere_sample(iu, iv);
+        // Russian-roulette survival probability. Take the maximum
+        // channel of the local throughput `surface.light * scolor`
+        // — what the indirect contribution would be multiplied by
+        // before propagating up — and clamp to `0.95` so even an
+        // albedo-1 surface eventually terminates (bounding the
+        // worst-case path length).
+        //
+        // No explicit lower clamp: a dim surface (max ≈ 0.01)
+        // legitimately should terminate ~99% of the time because
+        // its contribution to the final pixel is correspondingly
+        // small. Adding a floor would *under-terminate* dim
+        // bounces, raising variance for negligible expected gain.
+        let max_albedo = scolor[0].max(scolor[1]).max(scolor[2]);
+        let p = (surface.light * max_albedo).min(0.95);
 
-        // Rotate the local sample into world space via an
-        // orthonormal basis built around the surface normal. The
-        // local z = up is the surface's outward normal in world
-        // space; the local x and y span the tangent plane.
-        let (basis_u, basis_v) = sampler::hemisphere_basis(hit.normal);
-        let dir = addp(
-            addp(scalep(basis_u, lx), scalep(basis_v, ly)),
-            scalep(hit.normal, lz),
-        );
+        // RR sample, decorrelated per bounce via golden-ratio
+        // offset (see `rr_sample` doc). When `p` is effectively
+        // zero, terminate without consulting the sample —
+        // dividing by zero would blow up the contribution, and
+        // the estimator is mathematically `0/0 * 0` either way.
+        let u = sampler::rr_sample(indirect_coord, depth.indirect);
+        if p <= EPSILON || u >= p {
+            // Path terminates here: no indirect contribution from
+            // this bounce. The path is *unbiased* — surviving
+            // contributions below scale by `1/p` to compensate
+            // for the (1-p) fraction that terminate.
+            [0.0, 0.0, 0.0]
+        } else {
+            // Pick a hemisphere direction in the *local* frame
+            // (z = up), cosine-weighted via Malley's method
+            // (concentric disk + z lift). The `indirect_coord` is
+            // per-pixel-sample, derived in `pixel_color` from a
+            // Halton-(17,19) point shifted by the pixel's CP
+            // rotation (seed 3) — independent of sub-pixel, lens,
+            // and area-light coords at the same sample index.
+            let (iu, iv) = indirect_coord;
+            let (lx, ly, lz) = sampler::cosine_hemisphere_sample(iu, iv);
 
-        // Cast the bounce ray. Self-intersection: every primitive's
-        // `hit_test` rejects `t <= EPSILON`, so the surface we're
-        // leaving is discarded — same guard the reflection and
-        // transmission branches use. Reuse the pixel sample's
-        // `light_coord` and `indirect_coord` for the recursion (same
-        // call as reflection/transmission); per-bounce sampler state
-        // would mean threading sampler state through recursion
-        // proper.
-        let incoming = ray_color(
-            &Vector { start: hit.hit_point, delta: dir },
-            scene,
-            lights,
-            Depth { indirect: depth.indirect + 1, ..depth },
-            light_coord,
-            indirect_coord,
-        );
+            // Rotate the local sample into world space via an
+            // orthonormal basis built around the surface normal.
+            // The local z = up is the surface's outward normal in
+            // world space; the local x and y span the tangent
+            // plane.
+            let (basis_u, basis_v) = sampler::hemisphere_basis(hit.normal);
+            let dir = addp(
+                addp(scalep(basis_u, lx), scalep(basis_v, ly)),
+                scalep(hit.normal, lz),
+            );
 
-        // Modulate the incoming radiance by the diffuse coefficient
-        // and the (checker-aware) surface color — this is the color-
-        // bleed term: light arriving from a red wall comes in tinted
-        // by the receiving surface's albedo.
-        multiply_linear_color(
-            &scale_linear_color(&incoming, surface.light),
-            &scolor,
-        )
+            // Cast the bounce ray. Self-intersection: every
+            // primitive's `hit_test` rejects `t <= EPSILON`, so
+            // the surface we're leaving is discarded — same guard
+            // the reflection and transmission branches use. Reuse
+            // the pixel sample's `light_coord` and `indirect_coord`
+            // for the recursion; per-bounce sampler state would
+            // mean threading sampler state through recursion
+            // proper. RR survival, on the other hand, *is*
+            // decorrelated per bounce via `rr_sample`'s
+            // golden-ratio depth offset.
+            let incoming = ray_color(
+                &Vector { start: hit.hit_point, delta: dir },
+                scene,
+                lights,
+                Depth { indirect: depth.indirect + 1, ..depth },
+                light_coord,
+                indirect_coord,
+            );
+
+            // Modulate the incoming radiance by the diffuse
+            // coefficient and the (checker-aware) surface color —
+            // this is the color-bleed term — and scale by `1/p`
+            // to maintain the RR estimator's unbiasedness:
+            //
+            //   E[indirect] = p * (1/p) * tint * incoming
+            //              + (1-p) * 0
+            //              = tint * incoming
+            //
+            // which is the same expectation as the no-RR Phase 2
+            // estimator, computed cheaper on average because
+            // (1-p) of paths terminate at this depth.
+            let tint = multiply_linear_color(
+                &scale_linear_color(&incoming, surface.light),
+                &scolor,
+            );
+            scale_linear_color(&tint, 1.0 / p)
+        }
     } else {
         [0.0, 0.0, 0.0]
     };
