@@ -1095,8 +1095,8 @@ fn builtin_aabb(args: &[Value], pos: &Position) -> Value {
 // ---------------------------------------------------------------------------
 
 /// `(scene {:name "..." :camera C :background [r g b] :objects [...]
-///          :reflect-limit n :transmit-limit n :min-samples n
-///          :max-samples m :variance-threshold t})`
+///          :reflect-limit n :transmit-limit n :indirect-limit n
+///          :min-samples n :max-samples m :variance-threshold t})`
 ///
 /// After the stage-2 collapse the scene is a single top-level
 /// `Shape`. `:objects` is exposed at the SDL surface as a list for
@@ -1181,6 +1181,17 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
     let transmit_limit = maybe_key_int(&map, "transmit-limit", "scene", pos)
         .unwrap_or(8) as u32;
 
+    // Indirect-bounce (path-tracing) recursion cap. Default 0 means
+    // "feature off" — no indirect rays are fired and the renderer's
+    // output is byte-identical to the pre-GI renderer. A positive
+    // value enables path-traced indirect lighting; Phase 1 of the
+    // path-tracing plan only threads the value through (no behavior
+    // change), with Phase 2 wiring the indirect branch in
+    // `shade_pixel`. Scenes with no diffuse interreflection
+    // concerns never need to set this.
+    let indirect_limit = maybe_key_int(&map, "indirect-limit", "scene", pos)
+        .unwrap_or(0) as u32;
+
     // Adaptive-sampling defaults: 4 samples on flat surfaces (which
     // matches the previous fixed `oversample = 2` cost exactly), up
     // to 32 in noisy regions, with a per-channel min/max spread of
@@ -1208,6 +1219,7 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         background,
         reflect_limit,
         transmit_limit,
+        indirect_limit,
         min_samples,
         max_samples,
         variance_threshold,

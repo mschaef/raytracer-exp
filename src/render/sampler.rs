@@ -42,6 +42,13 @@
 //!   coordinate independent of both the sub-pixel and lens
 //!   coordinates of the same sample index.
 //!
+//! * `halton_indirect(i)` — bases 17 and 19, used for the
+//!   cosine-weighted hemisphere sample at a diffuse hit in Phase 1
+//!   of the path-tracing plan. A fourth distinct pair of bases so
+//!   the indirect-bounce direction is uncorrelated with all three
+//!   other sampled dimensions (sub-pixel, lens, area-light) at the
+//!   same sample index.
+//!
 //! * `concentric_disk(u, v)` — maps a `[0, 1)²` point (e.g. a
 //!   rotated `halton_lens` value or `halton_area` value) onto the
 //!   unit disk via the Shirley–Chiu concentric mapping. Used to turn
@@ -70,6 +77,27 @@
 //!   coordinate is decorrelated from both the sub-pixel and lens
 //!   coordinates. All three go through the same `cp_hash` helper;
 //!   the seed is the only difference between them.
+//!
+//! * `cranley_patterson_indirect_offset(x, y)` — the rotation for
+//!   the path-tracing indirect-bounce sample (seed 3), keeping
+//!   the indirect direction independent of all three other CP
+//!   rotations.
+//!
+//! * `cosine_hemisphere_sample(u, v)` — turns a `[0, 1)²` point
+//!   (typically a rotated `halton_indirect` value) into a
+//!   cosine-weighted direction in the local upper hemisphere
+//!   (z ≥ 0). Used by the indirect branch in `shade_pixel` to pick
+//!   the next bounce direction; cosine-weighted because the
+//!   Lambertian shading cancels the cosine factor in the rendering
+//!   equation, leaving the unbiased estimator just `incoming *
+//!   surface.color * surface.light` with no extra weighting.
+//!
+//! * `hemisphere_basis(normal)` — builds an orthonormal basis
+//!   `(u, v)` perpendicular to a unit-length surface normal, so a
+//!   local hemisphere sample can be oriented into world space.
+//!   The third basis vector is `normal` itself.
+
+use crate::render::geometry::{crossp, normalizep, Point};
 
 /// Radical inverse in `base`, evaluated at index `i`. Returns a value
 /// in `[0, 1)`. For `i = 0` returns `0.0`. Standard low-discrepancy
@@ -130,6 +158,24 @@ pub fn halton_lens(i: u32) -> (f64, f64) {
 /// `i = 0` returns `(0, 0)`; callers pass `i >= 1`.
 pub fn halton_area(i: u32) -> (f64, f64) {
     (radical_inverse(11, i), radical_inverse(13, i))
+}
+
+/// The pair `(H_17(i), H_19(i))` — point `i` of the 2D Halton
+/// sequence with bases 17 and 19, used for the path-tracing
+/// indirect-bounce sample in Phase 1 of the path-tracing plan.
+/// Returned values are in `[0, 1)²`.
+///
+/// Distinct bases from `halton_pair` (2, 3), `halton_lens` (5, 7),
+/// and `halton_area` (11, 13) so the indirect-bounce coordinate is
+/// independent of the other three sampled dimensions at the same
+/// sample index — four uncorrelated 2D streams driven by one
+/// per-pixel sample counter. Bases 17 and 19 have somewhat coarser
+/// distribution than the lower pairs but stay well-behaved for the
+/// per-pixel sample counts the adaptive oversampler reaches in
+/// practice. As with the other Halton helpers, `i = 0` returns
+/// `(0, 0)`; callers pass `i >= 1`.
+pub fn halton_indirect(i: u32) -> (f64, f64) {
+    (radical_inverse(17, i), radical_inverse(19, i))
 }
 
 /// Shirley–Chiu concentric mapping from the unit square to the unit
@@ -253,6 +299,88 @@ pub fn cranley_patterson_lens_offset(x: u32, y: u32) -> (f64, f64) {
 /// rotations — the three sampled dimensions stay independent.
 pub fn cranley_patterson_area_offset(x: u32, y: u32) -> (f64, f64) {
     cp_hash(x, y, 2)
+}
+
+/// The Cranley-Patterson rotation for the path-tracing
+/// indirect-bounce sample: a per-pixel `(ox, oy)` offset in
+/// `[0, 1)²` applied to a `halton_indirect` point before it's
+/// mapped to a hemisphere direction by `cosine_hemisphere_sample`.
+///
+/// Uses a distinct hash seed (`3`) from `cranley_patterson_offset`
+/// (`0`), `cranley_patterson_lens_offset` (`1`), and
+/// `cranley_patterson_area_offset` (`2`), so a pixel's indirect
+/// rotation is uncorrelated with all three of its other rotations.
+/// All four CP rotations go through the same `cp_hash` helper; the
+/// seed is the only difference.
+pub fn cranley_patterson_indirect_offset(x: u32, y: u32) -> (f64, f64) {
+    cp_hash(x, y, 3)
+}
+
+/// Cosine-weighted sample of the local upper hemisphere (z ≥ 0),
+/// returned as a unit vector `(x, y, z)`. Takes a `[0, 1)²` value
+/// `(u, v)` — typically a Cranley-Patterson-rotated
+/// `halton_indirect` point — and returns a direction whose
+/// probability density is `cos(theta) / π`, where `theta` is the
+/// angle from the +z axis.
+///
+/// Implemented via Malley's method: map `(u, v)` through
+/// `concentric_disk` to a uniform unit-disk point `(dx, dy)`, then
+/// lift to the hemisphere by setting `z = sqrt(1 - dx² - dy²)`.
+/// Projecting a uniform disk sample onto the hemisphere produces
+/// the cosine-weighted distribution for free, which is exactly the
+/// distribution the rendering equation's Lambertian term wants —
+/// the cosine factor cancels with the PDF and the indirect
+/// contribution estimator collapses to `incoming * surface.color
+/// * surface.light` with no extra weighting.
+///
+/// The returned vector is in the *local* hemisphere frame (z is
+/// "up"); callers compose it with `hemisphere_basis(normal)` to
+/// rotate the sample into world space.
+///
+/// A `(0.5, 0.5)` input lands at the pole `(0, 0, 1)`; the four
+/// corners of the unit square land on the equator (`z ≈ 0`) at
+/// the four cardinal directions.
+pub fn cosine_hemisphere_sample(u: f64, v: f64) -> (f64, f64, f64) {
+    let (dx, dy) = concentric_disk(u, v);
+    // The disk is at most unit radius, so `1 - dx² - dy²` is in
+    // `[0, 1]`. The `max(0, …)` guard handles the rim where
+    // floating-point error might push the value slightly negative
+    // (`concentric_disk_within_unit_disk` allows 1e-9 slack).
+    let z = (1.0 - dx * dx - dy * dy).max(0.0).sqrt();
+    (dx, dy, z)
+}
+
+/// Build an orthonormal basis `(u, v)` perpendicular to a unit-
+/// length surface `normal`. Used by the indirect-bounce branch to
+/// rotate a local-hemisphere sample (in `(dx, dy, dz)` coordinates,
+/// where dz is "up") into world space: the world-space direction
+/// is `dx * u + dy * v + dz * normal`.
+///
+/// Mathematically identical to `disk_basis` in `render.rs` (and
+/// the same Gram-Schmidt-via-cross-product trick to dodge the
+/// degenerate case when `normal` lines up with a world axis): the
+/// world axis least aligned with `normal` is chosen as the hint
+/// vector, so the first cross product is always well-conditioned.
+/// Kept separate from `disk_basis` because the two callers think
+/// in different terms — one orients a *disk* (the third basis
+/// vector is the disk's *axis*), the other orients a *hemisphere*
+/// (the third basis vector is the surface *normal*) — and the
+/// extra helper avoids forcing the path-tracing module to reach
+/// into the renderer-internal `disk_basis`.
+pub fn hemisphere_basis(normal: Point) -> (Point, Point) {
+    let absx = normal[0].abs();
+    let absy = normal[1].abs();
+    let absz = normal[2].abs();
+    let hint: Point = if absx <= absy && absx <= absz {
+        [1.0, 0.0, 0.0]
+    } else if absy <= absz {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let u = normalizep(crossp(normal, hint));
+    let v = crossp(normal, u);
+    (u, v)
 }
 
 #[cfg(test)]
@@ -492,6 +620,136 @@ mod tests {
                     x, y
                 );
             }
+        }
+    }
+
+    /// First few base-17 / base-19 radical inverses, the bases
+    /// `halton_indirect` uses. H_17(1) = 1/17; H_19(1) = 1/19;
+    /// H_17(2) = 2/17.
+    #[test]
+    fn halton_indirect_known_values() {
+        let (x1, y1) = halton_indirect(1);
+        assert!((x1 - 1.0 / 17.0).abs() < 1e-15, "H_17(1) = {}", x1);
+        assert!((y1 - 1.0 / 19.0).abs() < 1e-15, "H_19(1) = {}", y1);
+        let (x2, _) = halton_indirect(2);
+        assert!((x2 - 2.0 / 17.0).abs() < 1e-15, "H_17(2) = {}", x2);
+    }
+
+    /// `halton_indirect` stays in `[0, 1)²` across a modest index
+    /// range — same contract as the other Halton helpers, since the
+    /// indirect sample feeds the same Cranley-Patterson rotation
+    /// before reaching the hemisphere mapper.
+    #[test]
+    fn halton_indirect_in_unit_square() {
+        for i in 0..1024 {
+            let (a, b) = halton_indirect(i);
+            assert!(a >= 0.0 && a < 1.0, "indirect x out of range at i={}: {}", i, a);
+            assert!(b >= 0.0 && b < 1.0, "indirect y out of range at i={}: {}", i, b);
+        }
+    }
+
+    /// The indirect-bounce Cranley-Patterson rotation is in range
+    /// and is decorrelated from all three of the other CP rotations:
+    /// the indirect offset (seed=3) must differ from the pixel
+    /// offset (seed=0), the lens offset (seed=1), and the area
+    /// offset (seed=2). Four uncorrelated sampled dimensions
+    /// require four distinct rotations.
+    #[test]
+    fn indirect_cp_offset_distinct_from_others() {
+        for x in 0..64 {
+            for y in 0..64 {
+                let (a, b) = cranley_patterson_indirect_offset(x, y);
+                assert!(a >= 0.0 && a < 1.0, "indirect CP x out of range: {}", a);
+                assert!(b >= 0.0 && b < 1.0, "indirect CP y out of range: {}", b);
+                assert_ne!(
+                    cranley_patterson_indirect_offset(x, y),
+                    cranley_patterson_offset(x, y),
+                    "indirect and pixel CP offsets collided at ({}, {})",
+                    x, y
+                );
+                assert_ne!(
+                    cranley_patterson_indirect_offset(x, y),
+                    cranley_patterson_lens_offset(x, y),
+                    "indirect and lens CP offsets collided at ({}, {})",
+                    x, y
+                );
+                assert_ne!(
+                    cranley_patterson_indirect_offset(x, y),
+                    cranley_patterson_area_offset(x, y),
+                    "indirect and area CP offsets collided at ({}, {})",
+                    x, y
+                );
+            }
+        }
+    }
+
+    /// `cosine_hemisphere_sample` returns a unit vector in the
+    /// upper hemisphere (z ≥ 0) for every `[0, 1)²` input. If the
+    /// hemisphere lift ever produced a negative z, the indirect
+    /// ray would aim into the surface instead of away from it,
+    /// which is wrong — and if the length drifted off unit, the
+    /// world-space composition via `hemisphere_basis` would give
+    /// a non-unit ray direction.
+    #[test]
+    fn cosine_hemisphere_unit_and_upper_half() {
+        for ui in 0..64 {
+            for vi in 0..64 {
+                let u = ui as f64 / 64.0;
+                let v = vi as f64 / 64.0;
+                let (x, y, z) = cosine_hemisphere_sample(u, v);
+                assert!(
+                    z >= 0.0,
+                    "cosine_hemisphere_sample({}, {}) = ({}, {}, {}), z < 0",
+                    u, v, x, y, z
+                );
+                let len2 = x * x + y * y + z * z;
+                // The sample lies on the hemisphere; small slack
+                // for floating-point error.
+                assert!(
+                    (len2 - 1.0).abs() < 1e-9,
+                    "cosine_hemisphere_sample({}, {}) = ({}, {}, {}), |.|² = {}",
+                    u, v, x, y, z, len2
+                );
+            }
+        }
+    }
+
+    /// `(0.5, 0.5)` — the centre of the unit square — corresponds
+    /// to the disk centre under `concentric_disk`, which lifts to
+    /// the hemisphere pole `(0, 0, 1)`. Pole-direction samples are
+    /// the most-probable outcome under cosine weighting, so this
+    /// is a useful landmark check.
+    #[test]
+    fn cosine_hemisphere_centre_at_pole() {
+        let (x, y, z) = cosine_hemisphere_sample(0.5, 0.5);
+        assert!(x.abs() < 1e-15, "centre x = {}", x);
+        assert!(y.abs() < 1e-15, "centre y = {}", y);
+        assert!((z - 1.0).abs() < 1e-15, "centre z = {}", z);
+    }
+
+    /// `hemisphere_basis(normal)` returns an orthonormal basis
+    /// perpendicular to `normal`: each basis vector is unit-length
+    /// and the three vectors are mutually orthogonal. Verified for
+    /// several normals including the world axes (the cases the
+    /// "least-aligned hint" trick was added to handle).
+    #[test]
+    fn hemisphere_basis_is_orthonormal() {
+        use crate::render::geometry::{dotp, lenp};
+        let normals = [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0 / 3f64.sqrt(), 1.0 / 3f64.sqrt(), 1.0 / 3f64.sqrt()],
+            [0.6, 0.8, 0.0],
+        ];
+        for &n in &normals {
+            let (u, v) = hemisphere_basis(n);
+            assert!((lenp(u) - 1.0).abs() < 1e-12, "u not unit: {:?}, len={}", u, lenp(u));
+            assert!((lenp(v) - 1.0).abs() < 1e-12, "v not unit: {:?}, len={}", v, lenp(v));
+            assert!(dotp(u, v).abs() < 1e-12, "u·v not zero: {:?} · {:?} = {}", u, v, dotp(u, v));
+            assert!(dotp(u, n).abs() < 1e-12, "u·n not zero for n={:?}", n);
+            assert!(dotp(v, n).abs() < 1e-12, "v·n not zero for n={:?}", n);
         }
     }
 }

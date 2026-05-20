@@ -434,6 +434,27 @@ pub struct Scene {
     /// than a handful. The SDL default is 8.
     pub transmit_limit: u32,
 
+    /// Maximum indirect-bounce recursion depth for diffuse global
+    /// illumination. `0` (the default) is "feature off" — no indirect
+    /// rays are fired and the renderer's output is byte-identical to
+    /// the pre-GI renderer. A positive value enables path-traced
+    /// indirect lighting: at each diffuse, non-metallic hit
+    /// `shade_pixel` fires one cosine-weighted hemisphere ray (using
+    /// the per-pixel-sample `indirect_coord` threaded through the
+    /// renderer) and accumulates the incoming radiance, tinted by the
+    /// surface's color, as the indirect contribution. The counter is
+    /// `Depth::indirect`, separate from `reflect` and `transmit`, for
+    /// the same reason those two are separate: a path bouncing
+    /// diffusely through a room has a different natural depth than
+    /// either a chain of mirrors or a stack of transparent panes.
+    ///
+    /// Phase 1 of the "Path tracing / GI" plan adds this field and
+    /// the surrounding infrastructure (sampler, threaded coordinate,
+    /// hoisted hot-path flag) but does *not* yet consume them — the
+    /// renderer's output is byte-identical to before. Phase 2 wires
+    /// the indirect branch in `shade_pixel`.
+    pub indirect_limit: u32,
+
     /// Adaptive oversampling parameters. The per-pixel sample loop in
     /// `pixel_color` takes at least `min_samples` samples, then keeps
     /// going batch-by-batch while the per-channel min/max spread
@@ -963,25 +984,33 @@ fn light_vector_area(
 }
 
 /// Recursion-budget tracker threaded through `ray_color` /
-/// `shade_pixel`. Reflection and transmission carry *independent*
-/// depth counters, checked against `Scene::reflect_limit` and
-/// `Scene::transmit_limit` respectively — see the doc comment on
-/// `Scene::transmit_limit` for why the two budgets are kept separate.
+/// `shade_pixel`. Reflection, transmission, and indirect (diffuse
+/// path-tracing) bounces carry *independent* depth counters, checked
+/// against `Scene::reflect_limit`, `Scene::transmit_limit`, and
+/// `Scene::indirect_limit` respectively — see the doc comment on
+/// `Scene::transmit_limit` for why these budgets are kept separate.
 ///
-/// `Copy` (two `u32`s), so it threads through the recursion by value
-/// with no ceremony; `..depth` struct-update syntax bumps one counter
-/// while carrying the other through unchanged.
+/// Phase 1 of the path-tracing plan adds the `indirect` counter
+/// alongside the existing two; it's threaded through the recursion
+/// but not yet consumed (Phase 2 wires it into the indirect branch
+/// in `shade_pixel`). Default-zero means "no bounces spent," same
+/// shape as the other two — `Depth::zero()` returns all three at 0.
+///
+/// `Copy` (three `u32`s), so it threads through the recursion by
+/// value with no ceremony; `..depth` struct-update syntax bumps one
+/// counter while carrying the others through unchanged.
 #[derive(Copy, Clone, Debug)]
 struct Depth {
     reflect: u32,
     transmit: u32,
+    indirect: u32,
 }
 
 impl Depth {
-    /// The starting budget for a primary (camera) ray: no reflection
-    /// or transmission bounces spent yet.
+    /// The starting budget for a primary (camera) ray: no reflection,
+    /// transmission, or indirect bounces spent yet.
     fn zero() -> Depth {
-        Depth { reflect: 0, transmit: 0 }
+        Depth { reflect: 0, transmit: 0, indirect: 0 }
     }
 }
 
@@ -1012,6 +1041,7 @@ fn shade_pixel(
     hit: &RayHit,
     depth: Depth,
     light_coord: (f64, f64),
+    indirect_coord: (f64, f64),
 ) -> LinearColor {
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
@@ -1036,16 +1066,16 @@ fn shade_pixel(
     let reflected: LinearColor = if (surface.reflection > EPSILON) && (depth.reflect < scene.reflect_limit) {
         let rvec = subp(negp(ray.delta), scalep(hit.normal, 2.0 * dotp(negp(ray.delta), hit.normal)));
 
-        // Reuse the same `light_coord` for recursive rays rather than
-        // re-deriving one per bounce. Bounces are rare enough that
-        // the bias is invisible (mirrors the DOF "reflection rays
-        // don't get fresh aperture jitter" call); plumbing a fresh
-        // per-bounce coord would require threading sampler state
-        // through recursion proper.
+        // Reuse the same `light_coord` and `indirect_coord` for
+        // recursive rays rather than re-deriving them per bounce.
+        // Bounces are rare enough that the bias is invisible (mirrors
+        // the DOF "reflection rays don't get fresh aperture jitter"
+        // call); plumbing fresh per-bounce coords would require
+        // threading sampler state through recursion proper.
         let rcolor = ray_color(&Vector {
             start: hit.hit_point,
             delta: normalizep(rvec)
-        }, scene, lights, Depth { reflect: depth.reflect + 1, ..depth }, light_coord);
+        }, scene, lights, Depth { reflect: depth.reflect + 1, ..depth }, light_coord, indirect_coord);
 
         let scaled = scale_linear_color(&rcolor, surface.reflection);
 
@@ -1164,6 +1194,7 @@ fn shade_pixel(
             lights,
             Depth { transmit: depth.transmit + 1, ..depth },
             light_coord,
+            indirect_coord,
         );
 
         // lerp(opaque, transmitted, transparency)
@@ -1183,9 +1214,10 @@ fn ray_color(
     lights: &[Light],
     depth: Depth,
     light_coord: (f64, f64),
+    indirect_coord: (f64, f64),
 ) -> LinearColor {
     match scene.root.hit_test(ray) {
-        Some(hit) => shade_pixel(ray, scene, lights, &hit, depth, light_coord),
+        Some(hit) => shade_pixel(ray, scene, lights, &hit, depth, light_coord, indirect_coord),
         None => scene.background
     }
 }
@@ -1255,6 +1287,23 @@ fn pixel_color(
     let has_area_light = lights.iter().any(|l| matches!(l.kind, LightKind::Area { .. }));
     let (aox, aoy) = if has_area_light {
         sampler::cranley_patterson_area_offset(x, y)
+    } else {
+        (0.0, 0.0)
+    };
+
+    // Indirect-bounce (path-tracing) sampling. Same hoisted-flag
+    // pattern as DOF and area-light sampling: when `indirect_limit`
+    // is 0 (the default), no indirect rays will ever fire and we
+    // skip the per-sample `halton_indirect` / CP work entirely.
+    // The flag is computed once per pixel; `indirect_limit` is a
+    // scene-wide constant, so this is just a clean shape that
+    // mirrors the other two features. Phase 1 of the path-tracing
+    // plan: the coordinate is threaded through `ray_color` /
+    // `shade_pixel` but has no consumer yet — Phase 2 adds the
+    // indirect branch to `shade_pixel` that reads it.
+    let has_indirect = scene.indirect_limit > 0;
+    let (iox, ioy) = if has_indirect {
+        sampler::cranley_patterson_indirect_offset(x, y)
     } else {
         (0.0, 0.0)
     };
@@ -1346,12 +1395,30 @@ fn pixel_color(
                 (0.0, 0.0)
             };
 
+            // Per-pixel-sample indirect-bounce coordinate. Same
+            // pattern as the lens and area-light samples but on
+            // Halton bases (17, 19) and CP rotation seed 3. Phase 2
+            // of the path-tracing plan will consume this in
+            // `shade_pixel` to pick the next-bounce direction at a
+            // diffuse hit; in Phase 1 the coordinate is threaded
+            // through but unused. When `indirect_limit == 0` (the
+            // default) this stays `(0.0, 0.0)` and `halton_indirect`
+            // is never called on the hot path — the off case pays
+            // nothing.
+            let indirect_coord = if has_indirect {
+                let (ihx, ihy) = sampler::halton_indirect(i + 1);
+                ((ihx + iox).fract(), (ihy + ioy).fract())
+            } else {
+                (0.0, 0.0)
+            };
+
             let rc = ray_color(
                 &camera_ray(&camera.camera, camera.aspect, xt, yt, lens),
                 scene,
                 lights,
                 Depth::zero(),
                 light_coord,
+                indirect_coord,
             );
 
             sum = add_linear_color(&sum, &rc);
