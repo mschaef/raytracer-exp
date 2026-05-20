@@ -111,16 +111,23 @@
         ;; inner-to-outer, so the rotation happens while the box is
         ;; still at the origin — it spins in place rather than
         ;; orbiting.
+        ;;
+        ;; Both boxes are matte white; rather than repeating
+        ;; `:surface cb-white` on each cuboid, the shared surface is
+        ;; lifted onto a single `(with-surface ...)` wrapper around
+        ;; both. Either box could still override locally by setting
+        ;; its own `:surface` (innermost wins), but neither does.
+        (with-surface cb-white
+          (group
+            [;; Tall box, back-left, rotated ~+18 degrees.
+             (translate [-0.35 0.35 -0.375]
+               (rotate-z (/ pi 10)
+                 (cuboid {:center [0 0 0] :size [0.55 0.55 1.25]})))
 
-        ;; Tall box, back-left, rotated ~+18 degrees.
-        (translate [-0.35 0.35 -0.375]
-          (rotate-z (/ pi 10)
-            (cuboid {:center [0 0 0] :size [0.55 0.55 1.25] :surface cb-white})))
-
-        ;; Short box, front-right, rotated ~-15 degrees.
-        (translate [0.4 -0.4 -0.7]
-          (rotate-z (/ pi -12)
-            (cuboid {:center [0 0 0] :size [0.6 0.6 0.6] :surface cb-white})))]
+             ;; Short box, front-right, rotated ~-15 degrees.
+             (translate [0.4 -0.4 -0.7]
+               (rotate-z (/ pi -12)
+                 (cuboid {:center [0 0 0] :size [0.6 0.6 0.6]})))]))]
 
        ;; The ceiling light cluster, appended onto the geometry above.
        (map make-cluster-light (range light-count)))}))

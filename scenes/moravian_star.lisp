@@ -23,19 +23,20 @@
 ;; geometric face normals point outward. Triangles are constructed
 ;; without :normals, so they take the flat geometric face normal —
 ;; appropriate for a faceted star where every side is meant to look
-;; planar.
+;; planar. Triangles are also constructed without :surface; an
+;; enclosing (with-surface ...) supplies one for the whole mesh.
 (def pyramid-sides
-  (fn [a b c d apex surface]
-    (group [(triangle {:vertices [a b apex] :surface surface})
-            (triangle {:vertices [b c apex] :surface surface})
-            (triangle {:vertices [c d apex] :surface surface})
-            (triangle {:vertices [d a apex] :surface surface})])))
+  (fn [a b c d apex]
+    (group [(triangle {:vertices [a b apex]})
+            (triangle {:vertices [b c apex]})
+            (triangle {:vertices [c d apex]})
+            (triangle {:vertices [d a apex]})])))
 
 ;; --------------------------------------------------------------------
 ;; Moravian star
 ;; --------------------------------------------------------------------
 
-;; Six-pointed "spiked cube" star.
+;; Six-pointed "spiked cube" star — geometry only.
 ;;
 ;;   center  : [x y z]  centre of the star in world space.
 ;;   size    : number   distance from `center` to each spike apex
@@ -43,12 +44,14 @@
 ;;   inner   : number   half-side of the inner cube. Smaller values
 ;;                      give longer, sharper spikes; values near
 ;;                      `size` give a blunt jack-like shape.
-;;   surface : Surface  applied to all 24 triangles.
 ;;
-;; Returns a Shape::Group of 24 triangles. Composes with `bounded`,
-;; the transform constructors, and `group` like any other shape.
+;; Returns a Shape::Group of 24 unsurfaced triangles. Wrap the
+;; result in `(with-surface s ...)` to give the whole star a single
+;; material — that's how the demo scene below uses it. Composes with
+;; `bounded`, the transform constructors, and `group` like any other
+;; shape.
 (def moravian-star
-  (fn [center size inner surface]
+  (fn [center size inner]
     (let [s inner
           ;; Eight cube corners. Names encode signs on each axis:
           ;; 'p' = +, 'm' = -, in x-y-z order.
@@ -72,12 +75,12 @@
       ;; pyramid-sides ends up with every triangle's normal pointing
       ;; outward. Comments name the face by its outward normal.
       (group
-        [(pyramid-sides cpmp cpmm cppm cppp apx surface)   ; +X face
-         (pyramid-sides cmmm cmmp cmpp cmpm amx surface)   ; -X face
-         (pyramid-sides cppm cmpm cmpp cppp apy surface)   ; +Y face
-         (pyramid-sides cmmm cpmm cpmp cmmp amy surface)   ; -Y face
-         (pyramid-sides cmmp cpmp cppp cmpp apz surface)   ; +Z face
-         (pyramid-sides cmpm cppm cpmm cmmm amz surface)]))))   ; -Z face
+        [(pyramid-sides cpmp cpmm cppm cppp apx)   ; +X face
+         (pyramid-sides cmmm cmmp cmpp cmpm amx)   ; -X face
+         (pyramid-sides cppm cmpm cmpp cppp apy)   ; +Y face
+         (pyramid-sides cmmm cpmm cpmp cmmp amy)   ; -Y face
+         (pyramid-sides cmmp cpmp cppp cmpp apz)   ; +Z face
+         (pyramid-sides cmpm cppm cpmm cmmm amz)]))))   ; -Z face
 
 ;; --------------------------------------------------------------------
 ;; Demo scene
@@ -118,8 +121,13 @@
       ;; The star itself. Bounded so a ray that misses the world-space
       ;; AABB skips every per-triangle test — a small win at 24
       ;; triangles, but the right idiom for any mesh-shaped object
-      ;; and the pattern teapot.lisp uses too.
-      (bounded (moravian-star [0 0 0] 1.5 0.4 surface-gold))
+      ;; and the pattern teapot.lisp uses too. The `with-surface`
+      ;; wrapper colors all 24 triangles in one place — `moravian-star`
+      ;; itself doesn't know or care what material the star is made
+      ;; of, and swapping to (say) `surface-silver` is a single-line
+      ;; change here.
+      (with-surface surface-gold
+        (bounded (moravian-star [0 0 0] 1.5 0.4)))
 
       ;; Reflective checker ground, same as ball_on_plane et al.
       (plane {:normal [0 0 1] :p0 [0 0 -2] :surface surface-white-c})]}))
