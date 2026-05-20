@@ -123,3 +123,34 @@
 
 (def default-camera
   (camera-looking-at [0 10 0] [0 0 0] [0 0 1] 1.0))
+
+;; --------------------------------------------------------------------
+;; Path-tracing / global-illumination defaults
+;; --------------------------------------------------------------------
+;;
+;; A bundle of recommended scene-parameter knobs for GI scenes. The
+;; renderer's default behavior has indirect lighting off
+;; (`:indirect-limit 0`), so a GI scene has to opt in by setting the
+;; four keys below in its `(scene { ... })` map:
+;;
+;;   :indirect-limit     gi-indirect-limit       ; recursion depth cap
+;;   :min-samples        gi-min-samples          ; floor before variance check
+;;   :max-samples        gi-max-samples          ; ceiling
+;;   :variance-threshold gi-variance-threshold   ; early-termination spread
+;;
+;; Defaults are tuned for Cornell-style indoor scenes where indirect
+;; lighting matters: depth 2 captures the dominant "wall → object →
+;; eye" color-bleed bounce without spending budget on diminishing
+;; returns; the sample budget is bumped well above the renderer's
+;; default (32) because indirect rays add variance and we want the
+;; adaptive oversampler to have room to resolve it; the variance
+;; threshold is tightened so the loop doesn't terminate too eagerly
+;; in penumbra regions where indirect contribution is highest. Faster
+;; GI scenes (the gi-test smoke render) can override individual knobs
+;; without having to remember the whole combination — pull `gi-min-
+;; samples` 16 instead of 64, say.
+
+(def gi-indirect-limit     2)
+(def gi-min-samples        64)
+(def gi-max-samples        1024)
+(def gi-variance-threshold 0.003)

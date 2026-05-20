@@ -1093,6 +1093,101 @@ fn shade_pixel(
         [0.0, 0.0, 0.0]
     };
 
+    // Indirect (path-traced) lighting. Phase 2 of the path-tracing
+    // plan. At each diffuse, non-metallic hit, fire a single
+    // cosine-weighted hemisphere ray and accumulate the incoming
+    // radiance, tinted by the surface's body color. This is what
+    // produces color bleeding (a red wall tinting a nearby white
+    // box red on the facing side) and the soft fill in shadowed
+    // areas that makes corner darkening look natural — neither of
+    // which the direct + reflection terms above can reproduce.
+    //
+    // Why one ray, not N: more *primary* rays are how variance is
+    // resolved in this codebase (the adaptive oversampler in
+    // `pixel_color` already routes extra samples to noisy
+    // pixels). Firing N indirect rays per shade would hide the
+    // per-sample variance the adaptive loop relies on and lock in
+    // a fixed cost everywhere.
+    //
+    // Cosine-weighted sampling: `cosine_hemisphere_sample` returns
+    // a direction with PDF `cos(theta)/π`, and the Lambertian
+    // BRDF contributes `albedo/π * cos(theta)`. The PDF cancels
+    // the cosine, so the unbiased estimator collapses to
+    // `incoming * surface.light * scolor` — no explicit cosine
+    // term, no π factor, no division by PDF.
+    //
+    // Why `scolor` (not `surface.color`): a checked surface's
+    // local color depends on which check we hit. Tinting the
+    // bounce by `scolor` means the indirect light leaving a check
+    // carries the right tint — the same checker-aware behavior
+    // the ambient, diffuse, and metallic-reflection terms above
+    // already use.
+    //
+    // Why a black-out fallback when off (`indirect_limit == 0`):
+    // the default is "feature off" and existing scenes render
+    // byte-identically. Once enabled, the recursion depth cap
+    // (`scene.indirect_limit`) is intuitive and bounded; Phase 3
+    // of the plan optionally replaces it with Russian roulette
+    // for unbiased termination.
+    //
+    // Why guard on `surface.light > EPSILON` and `!surface.metallic`:
+    // a perfect-mirror dielectric (`light == 0`) has no diffuse
+    // lobe; a metal is similarly suppressed at the direct-lighting
+    // level. Either way the bounce would multiply by zero, so
+    // skipping the recursive `ray_color` entirely is a free win.
+    let indirect: LinearColor = if scene.indirect_limit > 0
+        && depth.indirect < scene.indirect_limit
+        && surface.light > EPSILON
+        && !surface.metallic
+    {
+        // Pick a hemisphere direction in the *local* frame (z = up),
+        // cosine-weighted via Malley's method (concentric disk + z
+        // lift). The `indirect_coord` is per-pixel-sample, derived in
+        // `pixel_color` from a Halton-(17,19) point shifted by the
+        // pixel's CP rotation (seed 3) — independent of sub-pixel,
+        // lens, and area-light coords at the same sample index.
+        let (iu, iv) = indirect_coord;
+        let (lx, ly, lz) = sampler::cosine_hemisphere_sample(iu, iv);
+
+        // Rotate the local sample into world space via an
+        // orthonormal basis built around the surface normal. The
+        // local z = up is the surface's outward normal in world
+        // space; the local x and y span the tangent plane.
+        let (basis_u, basis_v) = sampler::hemisphere_basis(hit.normal);
+        let dir = addp(
+            addp(scalep(basis_u, lx), scalep(basis_v, ly)),
+            scalep(hit.normal, lz),
+        );
+
+        // Cast the bounce ray. Self-intersection: every primitive's
+        // `hit_test` rejects `t <= EPSILON`, so the surface we're
+        // leaving is discarded — same guard the reflection and
+        // transmission branches use. Reuse the pixel sample's
+        // `light_coord` and `indirect_coord` for the recursion (same
+        // call as reflection/transmission); per-bounce sampler state
+        // would mean threading sampler state through recursion
+        // proper.
+        let incoming = ray_color(
+            &Vector { start: hit.hit_point, delta: dir },
+            scene,
+            lights,
+            Depth { indirect: depth.indirect + 1, ..depth },
+            light_coord,
+            indirect_coord,
+        );
+
+        // Modulate the incoming radiance by the diffuse coefficient
+        // and the (checker-aware) surface color — this is the color-
+        // bleed term: light arriving from a red wall comes in tinted
+        // by the receiving surface's albedo.
+        multiply_linear_color(
+            &scale_linear_color(&incoming, surface.light),
+            &scolor,
+        )
+    } else {
+        [0.0, 0.0, 0.0]
+    };
+
     // Sum direct lighting contributions from every light extracted
     // from `scene.root`. Each visible light contributes a Phong
     // specular highlight and a Lambertian diffuse term, both tinted
@@ -1157,9 +1252,16 @@ fn shade_pixel(
     }
 
     // The surface's opaque shading: ambient + direct lighting +
-    // mirror reflection. For an opaque surface (transparency == 0)
-    // this is the final color.
-    let opaque = add_linear_color(&reflected, &add_linear_color(&ambient, &light));
+    // mirror reflection + indirect (path-traced) lighting. For an
+    // opaque surface (transparency == 0) this is the final color.
+    // When `scene.indirect_limit == 0` (the default) `indirect` is
+    // identically `[0; 3]` and this sum collapses to the pre-GI
+    // form `reflected + ambient + light` — what every byte-pinned
+    // test in `tests/sdl_suite.rs` exercises.
+    let opaque = add_linear_color(
+        &add_linear_color(&reflected, &add_linear_color(&ambient, &light)),
+        &indirect,
+    );
 
     // Transmission. When the surface is at all transparent (and we
     // haven't hit the recursion cap), cast a *straight-through* ray —

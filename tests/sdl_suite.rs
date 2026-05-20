@@ -478,6 +478,11 @@ fn depth_of_field_test_scene_loads() {
 }
 
 #[test]
+fn gi_test_scene_loads() {
+    assert_scene_loads("gi_test.lisp", "gi-test-scene");
+}
+
+#[test]
 fn group_test_scene_loads() {
     assert_scene_loads("group_test.lisp", "group-test-scene");
 }
