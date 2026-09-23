@@ -2415,6 +2415,248 @@ byte-identical: those variants ignore the new sample coordinate.
   existing per-light `color` channel already exposes any tint;
   a `kelvin` constructor would be ergonomics, no new variant.
 
+## CSG: implementation plan
+
+Adds constructive solid geometry — `difference` and `intersection` of
+solid shapes — so scenes can cut and combine primitives. This is the
+first step of the POV-Ray port (see `docs/povray_gap_analysis.md`):
+the Texaco star, which is a cylinder with five wedges and a "T" cut out
+of it, and the Texaco bowl, a sphere minus a slightly smaller sphere
+minus a cylinder, both need it, as do most of the other POV projects.
+The work splits into three phases, plus a deferred bucket. Phase 1 adds
+the query CSG needs without changing any output. Phase 2 adds the CSG
+node and its SDL surface. Phase 3 is the Texaco port, which serves as
+the end-to-end test.
+
+### The model: span lists
+
+`hit_test` answers "where does this ray first hit the surface?". CSG
+needs more: at each point along the ray, *is the ray inside the
+solid?* The standard answer is to describe each solid, for a given
+ray, as a sorted list of **spans** — parameter intervals `[t_in, t_out]`
+where the ray is inside the solid — and to combine span lists with
+interval set operations:
+
+- **Union** (a `Group`): merge the lists, coalescing overlaps.
+- **Intersection**: keep only the ranges covered by both lists.
+- **Difference** `A − B`: keep the ranges of A not covered by B. Where
+  a B span cuts into an A span, the new boundary is a B surface *seen
+  from inside B*, so its normal is **negated**. That flip is the
+  classic CSG bug to watch for. It's why the bowl's inner wall lights
+  correctly.
+
+Each span endpoint carries what `hit_test` would have returned at that
+point: `t`, the outward normal, and the surface (`Option<Surface>`, so
+the `Surfaced` "innermost wins" rule keeps working). The hit point
+isn't stored; it's recomputed from the ray and `t` when a hit is
+returned, exactly as `Transformed::hit_test` already does.
+
+Spans cover the **whole line**, negative `t` included. A span that
+starts behind the ray origin is how "the ray starts inside this solid"
+is represented, and a correct inside/outside state at `t > EPSILON`
+depends on it. Spans that end at or before 0 can be dropped, because
+they can't affect anything in front of the ray. That also means the
+existing `AABB::intersects` test (which already keeps boxes containing
+the origin) is a valid early-out for spans too.
+
+Convex primitives — sphere, cuboid, cylinder, cone — produce at most
+one span per ray. A plane acts as a **half-space**: the solid side is
+the side opposite `normal`, and the span is `(-∞, t]` or `[t, +∞)`
+(or the whole line or nothing, for a ray parallel to it). Infinite
+endpoints never become hits: only finite `t > EPSILON` endpoints do.
+The future torus (xmastree) is the first non-convex solid and can
+produce two spans, which is why the representation is a list and not a
+single interval.
+
+Triangles and meshes aren't solids (a triangle has no inside), so they
+aren't allowed as CSG operands. That's enforced when the scene is
+built, not silently mis-rendered.
+
+### Phase 1 — Span query (no behavior change)
+
+Scaffolding only, same posture as light-types Phase 1: nothing in the
+renderer calls the new code yet, so every scene renders
+byte-identically.
+
+- New types in `shapes.rs`: `SpanEnd { t, normal, surface }` and
+  `Span { enter: SpanEnd, exit: SpanEnd }`.
+- New method `Shape::spans(&self, ray: &Vector, out: &mut Vec<Span>)`,
+  appending the ray's spans in increasing `t`. Per variant:
+  - `Sphere`: both quadratic roots (the current `hit_test` uses only
+    the near one).
+  - `Cuboid`: the slab method's `t_enter`/`t_exit`, with the exit face
+    normal tracked the same way the entry face already is.
+  - `Cylinder`, `Cone`: the entry and exit among the side and cap
+    candidates they already compute. These are convex, so there are
+    exactly zero or two crossings.
+  - `Plane`: the half-space span described above.
+  - `Transform`: inverse-transform the ray (no renormalizing, per the
+    Pitfalls section, so `t` carries straight across), recurse, then
+    map both endpoint normals through `normal_xform` and renormalize.
+  - `Surfaced`: recurse, then fill `None` surfaces on both endpoints.
+  - `Bounded`: `AABB::intersects` early-out, then recurse.
+  - `Group`: collect every child's spans and normalize to a sorted
+    union (sort by `t_in`, coalesce overlapping spans, keeping the
+    outermost endpoints).
+  - `Light`: no spans.
+  - `Triangle`: unreachable once Phase 2's validation is in. Until then,
+    no spans, with a comment saying why.
+- The three set operations as free functions over sorted span lists:
+  `span_union`, `span_intersection`, `span_difference` (with the
+  normal negation on B-derived boundaries). Phase 1 only uses union,
+  for `Group`, but all three get unit tests here while they're fresh.
+- **Unit tests** in a `#[cfg(test)]` module in `shapes.rs`, like the
+  one in `sampler.rs`. The geometry is too fiddly to verify by eye:
+  - Per primitive: a ray through the center gives one span with the
+    expected `t`s and outward normals. A ray starting inside gives
+    `t_in < 0 < t_out`. A miss gives nothing.
+  - **Consistency with `hit_test`:** for rays starting *outside* the
+    solid, the first span's `enter` matches `hit_test`'s distance and
+    normal. Check this over a spread of deterministic rays for each
+    primitive, both bare and under a non-uniform `Transform`.
+  - The set operations on hand-built interval lists, including touching
+    and nested spans, and the normal flip in difference.
+
+A side effect worth writing down: `Sphere` and `Cuboid` currently
+treat a ray that starts inside them as a miss, so a transmitted ray
+through a `glassy` sphere never sees the back face. Spans have both
+faces, so Phase 2's CSG node gets this right automatically. Changing
+the primitives' own `hit_test` would alter existing renders, so that
+stays out of this plan (see Phase 4).
+
+### Phase 2 — The `Csg` node and SDL bindings
+
+- New variant `Shape::Csg(Box<Csg>)`, where
+  `Csg { op: CsgOp, a: Shape, b: Shape }` and
+  `CsgOp` is `Difference` or `Intersection`. POV's `union` is already
+  `group`, and `merge` (a union that hides internal surfaces, which
+  only matters for transparent objects) is deferred.
+- `Csg::spans` evaluates both operands' spans and combines them with
+  the Phase 1 set operations. Because a `Csg` node produces spans
+  itself, CSG nests: `texaco_star` is a difference whose first operand
+  is another difference.
+- `hit_test` for `Csg`: compute its spans and return the first
+  endpoint with finite `t > EPSILON`. Usually that's an `enter`. It's
+  an `exit` when the ray starts inside the solid (transmission and
+  reflection rays leaving a surface), and then the returned normal is
+  the solid's outward normal, facing away from the ray. That matches
+  what the primitives return today. Flipping normals to face the ray is
+  a shading-policy change and is out of scope.
+- The rest of the closed-enum arms:
+  - `bounds()`: difference → bounds of A; intersection → the overlap of
+    both bounds (new `AABB::intersection`), or whichever operand is
+    bounded if the other isn't (a half-space).
+  - `validate_surfaces` recurses into both operands.
+  - `collect_lights` recurses into both operands, so a light positioned
+    inside CSG geometry still works.
+  - A new `Shape::is_solid()`: false for `Triangle`; for `Group`, true
+    if every non-light child is solid; `Transform`/`Bounded`/`Surfaced`
+    pass through; true for `Csg` and the other primitives. The
+    constructors check it and refuse non-solid operands.
+  - The SDL `value.rs` Display arm, e.g. `#<shape difference>`.
+- Rust constructors: `difference(a, b)` and `intersection(a, b)`,
+  taking `impl Into<Shape>` like the others.
+- SDL bindings, variadic to match POV's n-ary forms:
+  - `(difference a b c …)` is `A − (B ∪ C ∪ …)`: the extra operands are
+    wrapped in one `group` rather than folded into nested differences.
+    That's one set operation instead of several.
+  - `(intersection a b c …)` folds left.
+  - At least two operands. A non-solid operand (a triangle or a
+    `load-obj` mesh) raises an `sdl_panic!` that names the offending
+    operand.
+- Surfaces follow directly from the span endpoints: a face cut by B
+  shows B's surface if B has one, otherwise the nearest enclosing
+  `with-surface`. That's POV's rule, and it's what the Texaco star
+  relies on (one `White` texture over the whole difference).
+- Tests:
+  - New `tests/sdl/bindings_csg.lisp` (plus its `sdl_test!` line):
+    construction, `shape?`, n-ary forms, CSG under transforms and
+    `with-surface`, nesting, and structural equality.
+  - A Rust test in `tests/sdl_suite.rs` for the rejection errors (mesh
+    operand, too few operands).
+  - New `scenes/csg_test.lisp` with a `csg_test_scene_loads` smoke
+    test: a cube minus a sphere, a sphere intersected with a cube, and
+    a bowl (sphere − sphere − half-space) on the checker floor, with one
+    reflective and one `glassy` operand so the reflection, shadow and
+    transmission paths all cross CSG surfaces.
+- Existing scenes don't use the new variant, so the byte-pinned tests
+  are unaffected.
+
+### Phase 3 — Texaco port (acceptance test)
+
+CSG is done when the scene that motivated it renders correctly.
+
+- Start `scenes/_pov.lisp`: `(box a b)` from two corners in either
+  order, the handful of `colors.inc` names Texaco uses, and
+  starting-point metal surfaces (see the gap analysis's "Decisions":
+  this renderer's own shading model, tuned by eye).
+- Port the arrow compass from the POV projects as a handedness check.
+  POV coordinates and rotation angles are expected to carry over
+  unchanged (`Camera::looking_at` puts `+x` on the right looking down
+  `+z`, like POV), and an asymmetric object confirms that before
+  anything depends on it.
+- `scenes/texaco.lisp`, following the POV original's structure:
+  `na-108` wedge, `star`, `texaco-star`, `texaco-hemi-logo`, the
+  `ambient 1` backdrop plane, one light, and the camera at
+  `[0 0 -2.2]` with zoom 1.0. Plus its smoke test.
+- Visual check against `texaco/texaco.gif` in the povray-projects repo:
+  a red metallic bowl, a silver star straddling the rim plane with the
+  T cut through it, and the star reflected in the bowl.
+- Watch the bowl: its shell is 0.001 thick, only 10× `EPSILON`. If the
+  rim or inner wall shows acne, thicken the shell in the scene rather
+  than changing `EPSILON`.
+- Optional: the 24-frame `rotate-y` animation (clock 0 → −180) as an
+  `sdl_run` script looping `render` + `save-png`.
+
+### Phase 4 — Deferred
+
+None of these is needed for Texaco.
+
+- **Performance.** Span evaluation allocates `Vec`s per ray per CSG
+  node. If the heatmap shows it matters, reuse scratch buffers, or
+  wrap each operand in `bounded` so rays that miss it skip it. No new
+  dependency without a measured need.
+- **`merge`.** A union that removes internal faces. Only visible with
+  transparent operands.
+- **Torus spans.** They land with the torus primitive (xmastree), whose
+  base subtracts tori. It's the first case with more than one span per
+  ray.
+- **Back faces of transparent primitives.** Answering `hit_test` for
+  `Sphere`/`Cuboid` from spans (or otherwise returning the exit face)
+  would let transmitted rays see a glass sphere's back surface. That's
+  a real behavior change for `transparency_test` and friends, so it
+  needs its own before/after decision.
+- **`inverse`** (POV's complement of a solid), if a scene ever needs
+  it.
+
+### Verification
+
+- **Phase 1:** the new unit tests pass, and every byte-pinned test in
+  `tests/sdl_suite.rs` passes unchanged, because nothing renders
+  differently.
+- **Phase 2:** render `scenes/csg_test.lisp`:
+  - Cut faces are lit on the correct side (the flipped-normal check).
+  - Shadows follow the cut shapes, not the uncut primitives.
+  - The bowl's inner wall is visible and lit.
+  - Reflections show the cut geometry.
+  - The `glassy` operand's back face is visible through it.
+  - Existing scenes stay byte-identical.
+- **Phase 3:** `scenes/texaco.lisp` matches `texaco.gif` in shape and
+  composition (color and finish differences are expected), and the
+  compass has red +x to the right, green +y up, and blue +z away from
+  the camera.
+
+### Decisions still open
+
+- **Span storage.** A `Vec<Span>` per call is simplest and fine for
+  Texaco. Revisit only under Phase 4 performance work.
+- **Where n-ary difference is expanded.** The plan puts it in the
+  binding (wrapping the extra operands in a group). A Rust n-ary
+  `Csg` would save a node but widen the enum; binary is recommended.
+- **Exit-hit normal orientation.** Keep outward-of-solid, matching the
+  primitives, unless the transparency work wants to revisit it for
+  every primitive at once.
+
 ## Future directions
 
 The README's own "Potential Futures" list overlaps these but is now somewhat
@@ -2447,6 +2689,9 @@ as SDL scenes get richer, since the SDL constructor functions don't
 currently fold). Work item lives here in the plan rather than in
 "Phases" because it's a self-contained optimization, not a sequenced
 SDL milestone.
+
+**CSG.** Planned — see "CSG: implementation plan" above. First
+step of the POV-Ray port (`docs/povray_gap_analysis.md`).
 
 **More primitives.** Torus is the obvious remaining one; sphere, plane,
 cuboid, triangle, cylinder, and cone are all in. Each new primitive is a
