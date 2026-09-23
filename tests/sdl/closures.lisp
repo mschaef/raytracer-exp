@@ -1,8 +1,7 @@
 ; Downward closures — fns capture their defining environment.
 
-(def make-adder
-  (fn [n]
-    (fn [x] (+ x n))))
+(defn make-adder [n]
+  (fn [x] (+ x n)))
 
 (def add5 (make-adder 5))
 (def add10 (make-adder 10))
@@ -25,6 +24,6 @@
 (assert= (counter-example -50) 50)
 
 ; Higher-order functions.
-(def apply-twice (fn [f x] (f (f x))))
+(defn apply-twice [f x] (f (f x)))
 (assert= (apply-twice (fn [n] (* n 2)) 3) 12)
 (assert= (apply-twice (make-adder 1) 0) 2)

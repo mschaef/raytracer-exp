@@ -1,4 +1,8 @@
 ; Anonymous and named functions.
+;
+; This file deliberately spells named functions long-hand as
+; `(def name (fn ...))` to exercise `fn` directly. Everywhere else
+; uses the `defn` sugar, which is covered by defn.lisp.
 
 ; Anonymous fn called inline.
 (assert= ((fn [x] (* x x)) 4) 16)

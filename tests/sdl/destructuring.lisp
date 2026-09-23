@@ -46,22 +46,21 @@
   (assert= d 4))
 
 ; Destructuring in fn parameter list.
-(def sum-pair (fn [[a b]] (+ a b)))
+(defn sum-pair [[a b]] (+ a b))
 (assert= (sum-pair [3 4]) 7)
 
 ; Nested destructuring in fn parameters.
-(def origin-distance
-  (fn [[[x1 y1] [x2 y2]]]
-    (+ (* (- x2 x1) (- x2 x1))
-       (* (- y2 y1) (- y2 y1)))))
+(defn origin-distance [[[x1 y1] [x2 y2]]]
+  (+ (* (- x2 x1) (- x2 x1))
+     (* (- y2 y1) (- y2 y1))))
 (assert= (origin-distance [[0 0] [3 4]]) 25)
 
 ; & rest in fn params.
-(def variadic (fn [a & rest] [a (count rest)]))
+(defn variadic [a & rest] [a (count rest)])
 (assert= (variadic 1) [1 0])
 (assert= (variadic 1 2 3 4) [1 3])
 
 ; Destructuring with rest in fn params.
-(def first-and-rest (fn [[head & tail]] [head tail]))
+(defn first-and-rest [[head & tail]] [head tail])
 (assert= (first-and-rest [1 2 3]) [1 [2 3]])
 (assert= (first-and-rest [1]) [1 []])

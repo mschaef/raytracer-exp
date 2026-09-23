@@ -50,14 +50,13 @@
 ;; that's actually picked up from the walls (which is what produces
 ;; the color bleed), so adding a constant ambient term on top would
 ;; just wash out the effect.
-(def matte
-  (fn [color]
-    (surface {:color      color
-              :ambient    0.0
-              :specular   0.0
-              :light      0.85
-              :checked    false
-              :reflection 0.0})))
+(defn matte [color]
+  (surface {:color      color
+            :ambient    0.0
+            :specular   0.0
+            :light      0.85
+            :checked    false
+            :reflection 0.0}))
 
 (def cb-white (matte [0.85 0.85 0.85]))
 (def cb-red   (matte [0.75 0.1  0.1]))
@@ -67,7 +66,7 @@
 ;; square frame: at distance 5 from the back wall, zoom 2.5 gives a
 ;; view half-height of exactly 1.0 — the back wall's half-height.
 (def cornell-camera
-  (camera-looking-at [0 -4 0] [0 0 0] [0 0 1] 2.5))
+  (camera-looking-at [0 -4 0] [0 0 0] [0 0 1] 1.5))
 
 ;; Ceiling area light. A disk radius 0.4 just below the ceiling,
 ;; aimed straight down. The disk is invisible to the camera (lights

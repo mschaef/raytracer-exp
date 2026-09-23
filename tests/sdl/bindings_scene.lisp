@@ -11,9 +11,7 @@
 (def cam (camera-looking-at [0 10 0] [0 0 0] [0 0 1] 1.0))
 
 ; Wrapped in a fn so we can build the same scene structure twice and
-; assert that the two results are structurally equal. (Phase 4 will
-; add `defn` as `(def x (fn ...))` sugar; for now `def` + `fn` is the
-; idiom.)
+; assert that the two results are structurally equal.
 ;
 ; After the stage-2 collapse the scene constructor no longer takes a
 ; `:lights` key — lights live alongside geometry in `:objects` and
@@ -21,19 +19,18 @@
 ; `Scene::root`. Bare `(light-white ...)` values are auto-wrapped
 ; into `Shape::Light` by `require_shape_value` at the binding
 ; boundary, so this composes without any explicit wrap.
-(def make-scene
-  (fn []
-    (scene {:name "Test Scene"
-            :camera cam
-            :background [0 0 0]
-            :objects [(light-white [10 10 10])
-                      (sphere {:center [0 0 0] :r 1.0 :surface red})
-                      (sphere {:center [3 0 0] :r 0.5 :surface green})
-                      (plane  {:normal [0 0 1] :p0 [0 0 -2] :surface ground})]
-            :reflect-limit 2
-            :min-samples 4
-            :max-samples 16
-            :variance-threshold 0.01})))
+(defn make-scene []
+  (scene {:name "Test Scene"
+          :camera cam
+          :background [0 0 0]
+          :objects [(light-white [10 10 10])
+                    (sphere {:center [0 0 0] :r 1.0 :surface red})
+                    (sphere {:center [3 0 0] :r 0.5 :surface green})
+                    (plane  {:normal [0 0 1] :p0 [0 0 -2] :surface ground})]
+          :reflect-limit 2
+          :min-samples 4
+          :max-samples 16
+          :variance-threshold 0.01}))
 
 (def s1 (make-scene))
 (assert (scene? s1))

@@ -22,8 +22,8 @@
 ;; Angle conversions
 ;; --------------------------------------------------------------------
 
-(def deg->rad (fn [d] (/ (* d pi) 180.0)))
-(def rad->deg (fn [r] (/ (* r 180.0) pi)))
+(defn deg->rad [d] (/ (* d pi) 180.0))
+(defn rad->deg [r] (/ (* r 180.0) pi))
 
 ;; --------------------------------------------------------------------
 ;; Point helpers
@@ -36,26 +36,26 @@
 ;; `p-`, `p*`) ride on top of those — defining them here in lisp keeps
 ;; the Rust surface area small.
 
-(def point (fn [x y z] [x y z]))
+(defn point [x y z] [x y z])
 
-(def x (fn [p] (nth p 0)))
-(def y (fn [p] (nth p 1)))
-(def z (fn [p] (nth p 2)))
+(defn x [p] (nth p 0))
+(defn y [p] (nth p 1))
+(defn z [p] (nth p 2))
 
 ; Component-wise add and subtract. Both operands must be 3-vectors of
 ; numbers; the host's coercion rules apply (int + float → float, etc.).
-(def p+ (fn [a b]
+(defn p+ [a b]
   [(+ (x a) (x b))
    (+ (y a) (y b))
-   (+ (z a) (z b))]))
+   (+ (z a) (z b))])
 
-(def p- (fn [a b]
+(defn p- [a b]
   [(- (x a) (x b))
    (- (y a) (y b))
-   (- (z a) (z b))]))
+   (- (z a) (z b))])
 
 ; Scalar multiply: scales each component by `s`.
-(def p* (fn [a s]
+(defn p* [a s]
   [(* (x a) s)
    (* (y a) s)
-   (* (z a) s)]))
+   (* (z a) s)])

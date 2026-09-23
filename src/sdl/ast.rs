@@ -10,9 +10,11 @@
 
 //! Reader output: AST nodes ([`Form`]) carrying source positions.
 //!
-//! The reader is the only thing that constructs `Form`s. The evaluator
-//! consumes them but never builds new ones — at runtime everything
-//! flows as [`Value`](crate::sdl::value::Value) instead.
+//! The reader constructs `Form`s, and the desugaring pass
+//! ([`crate::sdl::desugar`]) rewrites them into new `Form`s built from
+//! core special forms. The evaluator consumes them but never builds new
+//! ones — at runtime everything flows as
+//! [`Value`](crate::sdl::value::Value) instead.
 
 use crate::sdl::error::Position;
 

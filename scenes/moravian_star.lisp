@@ -25,12 +25,11 @@
 ;; appropriate for a faceted star where every side is meant to look
 ;; planar. Triangles are also constructed without :surface; an
 ;; enclosing (with-surface ...) supplies one for the whole mesh.
-(def pyramid-sides
-  (fn [a b c d apex]
-    (group [(triangle {:vertices [a b apex]})
-            (triangle {:vertices [b c apex]})
-            (triangle {:vertices [c d apex]})
-            (triangle {:vertices [d a apex]})])))
+(defn pyramid-sides [a b c d apex]
+  (group [(triangle {:vertices [a b apex]})
+          (triangle {:vertices [b c apex]})
+          (triangle {:vertices [c d apex]})
+          (triangle {:vertices [d a apex]})]))
 
 ;; --------------------------------------------------------------------
 ;; Moravian star
@@ -50,37 +49,36 @@
 ;; material — that's how the demo scene below uses it. Composes with
 ;; `bounded`, the transform constructors, and `group` like any other
 ;; shape.
-(def moravian-star
-  (fn [center size inner]
-    (let [s inner
-          ;; Eight cube corners. Names encode signs on each axis:
-          ;; 'p' = +, 'm' = -, in x-y-z order.
-          cppp (p+ center (point    s     s     s))
-          cppm (p+ center (point    s     s  (- s)))
-          cpmp (p+ center (point    s  (- s)    s))
-          cpmm (p+ center (point    s  (- s) (- s)))
-          cmpp (p+ center (point (- s)    s     s))
-          cmpm (p+ center (point (- s)    s  (- s)))
-          cmmp (p+ center (point (- s) (- s)    s))
-          cmmm (p+ center (point (- s) (- s) (- s)))
-          ;; Six spike apexes, one per face direction.
-          apx (p+ center (point    size      0      0))
-          amx (p+ center (point (- size)     0      0))
-          apy (p+ center (point       0   size      0))
-          amy (p+ center (point       0  (- size)   0))
-          apz (p+ center (point       0      0   size))
-          amz (p+ center (point       0      0  (- size)))]
-      ;; Six pyramids, one per cube face. The four base corners in each
-      ;; call are listed CCW as viewed from outside the cube face, so
-      ;; pyramid-sides ends up with every triangle's normal pointing
-      ;; outward. Comments name the face by its outward normal.
-      (group
-        [(pyramid-sides cpmp cpmm cppm cppp apx)   ; +X face
-         (pyramid-sides cmmm cmmp cmpp cmpm amx)   ; -X face
-         (pyramid-sides cppm cmpm cmpp cppp apy)   ; +Y face
-         (pyramid-sides cmmm cpmm cpmp cmmp amy)   ; -Y face
-         (pyramid-sides cmmp cpmp cppp cmpp apz)   ; +Z face
-         (pyramid-sides cmpm cppm cpmm cmmm amz)]))))   ; -Z face
+(defn moravian-star [center size inner]
+  (let [s inner
+        ;; Eight cube corners. Names encode signs on each axis:
+        ;; 'p' = +, 'm' = -, in x-y-z order.
+        cppp (p+ center (point    s     s     s))
+        cppm (p+ center (point    s     s  (- s)))
+        cpmp (p+ center (point    s  (- s)    s))
+        cpmm (p+ center (point    s  (- s) (- s)))
+        cmpp (p+ center (point (- s)    s     s))
+        cmpm (p+ center (point (- s)    s  (- s)))
+        cmmp (p+ center (point (- s) (- s)    s))
+        cmmm (p+ center (point (- s) (- s) (- s)))
+        ;; Six spike apexes, one per face direction.
+        apx (p+ center (point    size      0      0))
+        amx (p+ center (point (- size)     0      0))
+        apy (p+ center (point       0   size      0))
+        amy (p+ center (point       0  (- size)   0))
+        apz (p+ center (point       0      0   size))
+        amz (p+ center (point       0      0  (- size)))]
+    ;; Six pyramids, one per cube face. The four base corners in each
+    ;; call are listed CCW as viewed from outside the cube face, so
+    ;; pyramid-sides ends up with every triangle's normal pointing
+    ;; outward. Comments name the face by its outward normal.
+    (group
+      [(pyramid-sides cpmp cpmm cppm cppp apx)   ; +X face
+       (pyramid-sides cmmm cmmp cmpp cmpm amx)   ; -X face
+       (pyramid-sides cppm cmpm cmpp cppp apy)   ; +Y face
+       (pyramid-sides cmmm cpmm cpmp cmmp amy)   ; -Y face
+       (pyramid-sides cmmp cpmp cppp cmpp apz)   ; +Z face
+       (pyramid-sides cmpm cppm cpmm cmmm amz)])))   ; -Z face
 
 ;; --------------------------------------------------------------------
 ;; Demo scene

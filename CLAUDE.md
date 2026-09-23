@@ -1600,6 +1600,76 @@ Approximate order of recent commits, oldest first:
     the soft-shadow work" verification the CLAUDE.md anticipated
     when DOF Phase 1 introduced the sampler abstraction.
 
+36. **SDL desugaring pass + `defn`.** Phase 1 of "`defn` and the
+    desugaring pass." New `src/sdl/desugar.rs` sits between the
+    reader and the evaluator: `eval_source` now runs
+    `desugar::desugar(form)` on each top-level form immediately
+    before evaluating it. The pass walks the whole form tree
+    (lists, vectors, maps), leaves `(quote ...)` untouched, and
+    rewrites any list whose head symbol names a sugar form, then
+    re-walks the result so nested sugar is fully expanded. The
+    only sugar so far is `(defn name docstring? [params] body...)`
+    → `(def name (fn name [params] body...))`. The docstring is
+    accepted and discarded; a string after the parameter vector is
+    an ordinary body form; multi-arity is rejected (since `fn`
+    doesn't support it); malformed forms panic with an error that
+    names `defn`. Synthesized `def`/`fn` symbols carry the `defn`
+    head's source position, and everything else keeps its
+    original position. Expanding one top-level form at a time is
+    deliberate: it's the order a future `defmacro` needs, since a
+    macro defined by one form must be visible when the next is
+    expanded. Tests: new `tests/sdl/defn.lisp` (basic use,
+    equivalence with `def` + `fn`, naming, docstrings, rest args,
+    destructuring, recursion, `recur`, closures, nested `defn`,
+    quote passthrough), plus `defn_rejects_malformed_forms` in
+    `tests/sdl_suite.rs` for the error cases. Existing
+    `(def x (fn ...))` definitions are unchanged and still work;
+    migrating them is Phase 2.
+
+37. **`defn` migration.** Phase 2 of "`defn` and the desugaring
+    pass." All 37 `(def name (fn [...] ...))` definitions were
+    rewritten as `(defn name [...] ...)`: the stdlib's angle and
+    point helpers, the surface helpers in `scenes/_common.lisp`,
+    the per-scene helpers in `cornell_box`, `gi_test`,
+    `moravian_star` and `sphere_surface_test`, and the test scripts
+    `bindings_scene`, `closures`, `destructuring`, `hofs`, `points`,
+    `recur` and `threading`. Bodies were re-indented to the usual
+    two-space `defn` style. `tests/sdl/fn_form.lisp` keeps the
+    long-hand form on purpose (a header comment says why), and
+    `defn.lisp` keeps one long-hand definition as its equivalence
+    reference. `defn` is now the idiom for named functions in SDL
+    code.
+
+38. **Control-flow sugar moved into the desugaring pass.** Phase 3
+    of "`defn` and the desugaring pass." `when`, `when-not`, `cond`,
+    `->` and `->>` are no longer special forms in `eval.rs`; they
+    are source rewrites in `src/sdl/desugar.rs`:
+    `(when t body...)` → `(if t (do body...) nil)`,
+    `(when-not t body...)` → `(if t nil (do body...))`,
+    `(cond t1 e1 ...)` → nested `if`s ending in `nil`, and
+    `(-> x f (g a))` → `(g (f x) a)` (`->>` puts the value last).
+    The evaluator lost `eval_cond`, `eval_when`, `eval_when_not`,
+    `eval_thread_first`, `eval_thread_last` and `thread_step`, and
+    now handles only the core forms plus `and`, `or` and `load`.
+    Error messages for malformed forms are kept (they still name
+    the form), and are now raised when a top-level form is
+    expanded rather than when the bad subform is reached. Two
+    behavior changes, both matching Clojure's macros: a threading
+    step can itself be a special form or sugar
+    (`(-> x (if :yes :no))` is `(if x :yes :no)`; before, the head
+    was evaluated as a function and failed), and evaluation order
+    follows the rewritten call, so in `(-> x (g a))` the head `g` is
+    evaluated before `x`. Only side-effecting threaded code can tell.
+    `and` and `or` stay special forms: rewriting them into core
+    forms needs a temporary binding for the value being tested,
+    which in turn needs a `gensym`-style hygiene story the SDL
+    doesn't have yet. Tests:
+    `threading.lisp` and `control_flow.lisp` gained composition
+    cases (sugar inside sugar, special-form thread steps, `recur`
+    from `when`/`cond` bodies, long `cond` chains, quote
+    passthrough), and the Rust malformed-form test became
+    `desugar_rejects_malformed_forms`, covering every sugar form.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -1673,6 +1743,9 @@ The language is a small Clojure-subset Lisp:
   as enumerated `Value` variants. No seq abstraction, no full numeric
   tower (auto-promotion in arithmetic only), no rationals or bignums.
 - **Special forms:** `def`, `let`, `fn`, `if`, `do`, `quote`, `recur`.
+  Syntactic sugar (`defn`, `when`, `when-not`, `cond`, `->`, `->>`)
+  is rewritten into these by the desugaring pass in
+  `src/sdl/desugar.rs` before evaluation.
 - **Evaluation:** eager, single-threaded, downward closures only via
   parent-linked `Rc<RefCell<Environment>>`.
 - **Memory:** reference counting via `Rc`. Process lifetime is short.
@@ -1683,7 +1756,9 @@ The language is a small Clojure-subset Lisp:
   position, matching the rest of the codebase. No `Result` plumbing
   through the interpreter.
 - **Skipped:** macros, dynamic vars, namespaces, multimethods,
-  protocols, lazy seqs, transducers, varargs, atoms.
+  protocols, lazy seqs, transducers, varargs, atoms. (The desugaring
+  pass is shaped like macroexpansion so user macros can plug into it
+  later — see "`defn` and the desugaring pass" below.)
 
 ### Module layout
 
@@ -1694,6 +1769,8 @@ src/sdl/
   mod.rs       Re-exports and the public entry point: read + eval a file.
   reader.rs    Tokenizer + s-expression reader producing AST with source positions.
   ast.rs       AST node definitions (literal, symbol, list, vector, map, ...).
+  desugar.rs   Per-top-level-form rewrite of sugar (`defn`, `when`, `cond`,
+               `->`, ...) into core forms.
   value.rs     The runtime Value enum, including host-type variants.
   env.rs       Environment: parent-linked Rc<RefCell<HashMap>>.
   eval.rs      Evaluator: dispatch on AST node type, special forms, apply.
@@ -1767,6 +1844,21 @@ scene-definition mechanism.
 mutation of geometry); interpreter optimizations; transform
 collapsing (see "Future directions" — first perf item to tackle
 now that SDL parity is complete).
+
+### `defn` and the desugaring pass
+
+Clojure-style `defn` as sugar for `(def name (fn ...))`, implemented
+as a separate desugaring pass rather than a special form so that the
+same hook can later host real macros.
+
+- **Phase 1 — desugaring pass + `defn`.** Done; see "Recent work
+  history" entry 36.
+- **Phase 2 — migrate existing definitions.** Done; see "Recent
+  work history" entry 37.
+- **Phase 3 — move existing sugar into the pass.** Done; see
+  "Recent work history" entry 38. `and` / `or` remain special forms
+  until there's a hygiene mechanism (`gensym`) for the temporary
+  they need.
 
 ### Decisions still open
 

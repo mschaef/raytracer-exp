@@ -16,6 +16,7 @@ pub mod mesh;
 pub mod output;
 pub mod sampler;
 
+use std::cell::Cell;
 use std::convert::TryFrom;
 use std::time::Instant;
 
@@ -393,6 +394,62 @@ struct CameraDetails {
     pub aspect: f64,
 }
 
+/// Render-view diagnostic selector. Picks which component of
+/// `shade_pixel`'s output the renderer returns; the rest are
+/// computed and thrown away. Used for understanding what each
+/// shading term contributes to the final image — especially
+/// useful for verifying path-traced indirect lighting visually
+/// ("is GI actually doing anything?") and for isolating
+/// transparency / reflection / direct lighting bugs.
+///
+/// `Full` (the default) means "everything," and reproduces the
+/// renderer's normal output. The byte-pinned tests in
+/// `tests/sdl_suite.rs` rely on this default — SDL-constructed
+/// scenes always carry `ViewMode::Full` unless main.rs overrides
+/// from the `RAYTRACER_VIEW` environment variable, which the
+/// tests don't set.
+///
+/// Phase 4 of the path-tracing plan. Not exposed in the SDL: this
+/// is a render-time diagnostic knob, not a scene-authoring
+/// concern (the SDL is the canonical "what does this scene look
+/// like?" definition; switching views from inside a script would
+/// muddy that).
+#[derive(Copy, Clone, PartialEq, Debug, Default)]
+pub enum ViewMode {
+    /// The default: combine ambient + direct lighting + reflection
+    /// + indirect + transmission as `shade_pixel` normally would.
+    #[default]
+    Full,
+
+    /// Direct lighting only — ambient + the per-light Lambert /
+    /// Phong contribution at the primary hit. No reflection, no
+    /// indirect, no transmission. Approximately what the renderer
+    /// would produce *before* the GI / reflection / transparency
+    /// features landed: useful as a baseline "what does direct
+    /// lighting alone look like?" view.
+    Local,
+
+    /// Indirect (path-traced) contribution only. The answer to
+    /// "is global illumination doing anything, and where?" Pixels
+    /// near the colored walls in a Cornell-style scene should
+    /// glow with tinted indirect light; corners should show soft
+    /// fill from multi-bounce paths.
+    Indirect,
+
+    /// Mirror-reflection contribution only. Shows what the
+    /// recursive reflection ray brought back from the rest of the
+    /// scene. A scene with no reflective surfaces renders black
+    /// in this mode.
+    Reflection,
+
+    /// Transmitted contribution only, transparency-weighted.
+    /// Multiplied by `surface.transparency`, so an opaque surface
+    /// contributes nothing here even though `shade_pixel` doesn't
+    /// fire a transmission ray for it. Useful for isolating
+    /// glass / transparency behavior.
+    Transmission,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Scene {
     /// Human-readable name used in progress output and debugging.
@@ -481,6 +538,14 @@ pub struct Scene {
     /// (better quality, slower); higher → cheaper, more apparent
     /// noise.
     pub variance_threshold: f64,
+
+    /// Render-view diagnostic selector. Defaults to `ViewMode::Full`
+    /// (everything combined); main.rs overrides from the
+    /// `RAYTRACER_VIEW` environment variable when set. Not exposed
+    /// in the SDL — the SDL is the canonical "what is this scene"
+    /// definition; per-view debugging is a render-time concern.
+    /// Phase 4 of the path-tracing plan.
+    pub view_mode: ViewMode,
 }
 
 /// Optional diagnostic heatmap targets that `render()` populates
@@ -502,6 +567,41 @@ pub struct Scene {
 pub struct HeatmapTargets<'a> {
     pub time: Option<&'a dyn HeatmapTarget>,
     pub samples: Option<&'a dyn HeatmapTarget>,
+    /// Per-pixel *average indirect-bounce depth*, scaled by 100 and
+    /// stored as `u32`. The scale lets a fractional average (e.g.
+    /// 2.4 bounces) survive the u32 round-trip with two decimals of
+    /// resolution; PngHeatmapTarget's 99th-percentile normalization
+    /// renders the resulting values into grayscale just like the
+    /// time and samples heatmaps. Phase 4 of the path-tracing plan
+    /// — "per-surface convergence visualization" in the plan's
+    /// language. Filled by `pixel_color` from the per-sample max
+    /// indirect depth tracked in the `MAX_INDIRECT_DEPTH`
+    /// thread-local; `None` (the default) skips the bookkeeping
+    /// entirely.
+    pub depth: Option<&'a dyn HeatmapTarget>,
+}
+
+thread_local! {
+    /// The maximum `Depth::indirect` reached during the current
+    /// pixel sample's ray-tracing recursion. Used by the depth
+    /// heatmap to visualize where path-tracing rays go deep into
+    /// the scene before terminating — a proxy for "where is the
+    /// renderer doing more bounce work per sample."
+    ///
+    /// Thread-local because rayon parallelizes rendering across
+    /// rows: each worker thread keeps its own `MAX_INDIRECT_DEPTH`
+    /// and there's no cross-thread sharing. `pixel_color` resets
+    /// this to 0 before each sample and reads it after; the
+    /// indirect branch in `shade_pixel` updates it after the
+    /// Russian-roulette survival check (i.e. only counted when a
+    /// bounce actually fires). When `scene.indirect_limit == 0`
+    /// the indirect branch never fires, so this stays 0 and the
+    /// resulting depth heatmap is uniformly zero.
+    ///
+    /// Implemented via `Cell` rather than `RefCell` because the
+    /// payload is `Copy`; the borrow checker doesn't need to
+    /// mediate access to a `u32`.
+    static MAX_INDIRECT_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
 pub trait Hittable {
@@ -1180,6 +1280,22 @@ fn shade_pixel(
             // for the (1-p) fraction that terminate.
             [0.0, 0.0, 0.0]
         } else {
+            // Bounce will fire — record the depth we're about to
+            // reach in the thread-local max, for the depth
+            // heatmap (Phase 4 / "per-surface convergence
+            // visualization"). The bounce ray will recurse with
+            // `depth.indirect + 1`, which is the deepest level
+            // *this* sub-path reaches at this hit; deeper levels
+            // inside the recursion update the max from their own
+            // shade_pixel calls. The thread-local is reset by
+            // `pixel_color` between samples, so the running max
+            // is per-pixel-sample.
+            let new_depth = depth.indirect + 1;
+            MAX_INDIRECT_DEPTH.with(|c| {
+                if new_depth > c.get() {
+                    c.set(new_depth);
+                }
+            });
             // Pick a hemisphere direction in the *local* frame
             // (z = up), cosine-weighted via Malley's method
             // (concentric disk + z lift). The `indirect_coord` is
@@ -1340,27 +1456,83 @@ fn shade_pixel(
     // A metallic surface is always opaque: `transparency` is ignored
     // when `metallic` is set, so the `!metallic` guard short-circuits
     // the transmitted ray entirely and `opaque` is returned as-is.
-    if (surface.transparency > EPSILON) && !surface.metallic && (depth.transmit < scene.transmit_limit) {
-        let transmitted = ray_color(
-            &Vector {
-                start: hit.hit_point,
-                delta: ray.delta,
-            },
-            scene,
-            lights,
-            Depth { transmit: depth.transmit + 1, ..depth },
-            light_coord,
-            indirect_coord,
-        );
+    //
+    // `transmitted_alpha` is `surface.transparency` when the
+    // transmission ray actually fires, `0.0` otherwise (recursion
+    // cap reached, surface opaque, or metallic). Both the
+    // `Full`-mode lerp below and the `Transmission` view-mode
+    // dispatch read this same value, so the transmission ray is
+    // computed exactly once regardless of view mode.
+    let (transmitted_color, transmitted_alpha) =
+        if (surface.transparency > EPSILON) && !surface.metallic && (depth.transmit < scene.transmit_limit) {
+            let transmitted = ray_color(
+                &Vector {
+                    start: hit.hit_point,
+                    delta: ray.delta,
+                },
+                scene,
+                lights,
+                Depth { transmit: depth.transmit + 1, ..depth },
+                light_coord,
+                indirect_coord,
+            );
+            (transmitted, surface.transparency)
+        } else {
+            ([0.0, 0.0, 0.0], 0.0)
+        };
 
-        // lerp(opaque, transmitted, transparency)
-        let t = surface.transparency;
+    // Full-mode combined color: lerp(opaque, transmitted,
+    // transparency). When `transmitted_alpha == 0.0` (the
+    // common case — every fully opaque surface, plus any
+    // transparent surface at the recursion cap), the lerp
+    // collapses to `opaque` bit-identically (the
+    // `(1 - 0) * opaque + 0 * [0,0,0]` simplifies to `opaque`).
+    // So byte-pinned tests against opaque scenes don't see the
+    // refactor.
+    let combined = if transmitted_alpha > EPSILON {
+        let t = transmitted_alpha;
         add_linear_color(
             &scale_linear_color(&opaque, 1.0 - t),
-            &scale_linear_color(&transmitted, t),
+            &scale_linear_color(&transmitted_color, t),
         )
     } else {
         opaque
+    };
+
+    // Render-view dispatch (Phase 4 of the path-tracing plan).
+    // The view-mode selector applies ONLY at the *primary* hit —
+    // recursive `shade_pixel` calls from inside the reflection,
+    // transmission, and indirect branches always return the
+    // full combined color, because their callers need the full
+    // radiance at the bounce point. If a recursive call returned
+    // only one component, the upstream branch (e.g. the indirect
+    // bounce reading the secondary surface's radiance) would
+    // see only a fraction of what's actually there.
+    //
+    // "Primary" means all three depth counters are zero —
+    // `Depth::zero()` — i.e. this is the first shade in the
+    // chain from the camera ray. The default `ViewMode::Full`
+    // path is bit-identical to the pre-Phase-4 renderer: it
+    // returns `combined` exactly as the old code did.
+    let is_primary = depth.reflect == 0 && depth.transmit == 0 && depth.indirect == 0;
+    if !is_primary {
+        return combined;
+    }
+    match scene.view_mode {
+        ViewMode::Full => combined,
+        ViewMode::Local => add_linear_color(&ambient, &light),
+        ViewMode::Indirect => indirect,
+        ViewMode::Reflection => reflected,
+        // Transparency-weighted: an opaque surface contributes
+        // exactly zero here (because `transmitted_alpha` is 0.0,
+        // and the renderer never fires a transmission ray for it).
+        // A glass surface contributes `transmitted_color *
+        // transparency`, which is exactly that surface's
+        // *contribution to the Full pixel* via the lerp above —
+        // so the Transmission view shows "the visible portion of
+        // the scene that's reached via transmission," not "the
+        // raw transmitted-ray output."
+        ViewMode::Transmission => scale_linear_color(&transmitted_color, transmitted_alpha),
     }
 }
 
@@ -1386,21 +1558,33 @@ fn ray_color(
 const SAMPLE_BATCH: u32 = 4;
 
 /// Compute one pixel's color via the adaptive sampling loop, and
-/// return the sample count alongside it.
+/// return the sample count and the depth-heatmap metric alongside it.
 ///
-/// The sample count is what the Phase 3 sample-count heatmap renders.
-/// We return it always (rather than gating on whether a heatmap is
-/// active) — it's a single `u32` per pixel and the renderer's caller
-/// is free to ignore it. Threading "maybe collect the count" through
-/// here as a flag or builder would be more bookkeeping than just
-/// always returning it.
+/// The sample count is what the adaptive-oversampling Phase 3
+/// sample-count heatmap renders. The third return value is the
+/// *average max indirect depth per sample, scaled by 100* — the
+/// path-tracing Phase 4 depth heatmap. Both are returned
+/// unconditionally rather than gated on whether a heatmap is
+/// active: they're a u32 each per pixel and the renderer's caller
+/// is free to ignore them. Threading "maybe collect" flags down
+/// here would be more bookkeeping than just always returning the
+/// values.
+///
+/// "Average max indirect depth ×100": for each sample, the
+/// `MAX_INDIRECT_DEPTH` thread-local captures the deepest
+/// `Depth::indirect` reached by any branch of the ray-tracing
+/// recursion (set by the indirect branch in `shade_pixel`). The
+/// per-pixel result is the average across samples, multiplied by
+/// 100 so two decimals of resolution survive the u32 round-trip
+/// to `PngHeatmapTarget`. When `scene.indirect_limit == 0` (the
+/// default) the indirect branch never fires and this is always 0.
 fn pixel_color(
     camera: &CameraDetails,
     scene: &Scene,
     lights: &[Light],
     x: u32,
     y: u32,
-) -> (LinearColor, u32) {
+) -> (LinearColor, u32, u32) {
     // Phase 2 of the adaptive-oversampling plan: sample count per
     // pixel is variable, driven by a per-channel min/max spread
     // check. The loop takes at least `min_samples` samples, then
@@ -1477,6 +1661,16 @@ fn pixel_color(
     let mut min_c: LinearColor = [f64::INFINITY; 3];
     let mut max_c: LinearColor = [f64::NEG_INFINITY; 3];
     let mut samples: u32 = 0;
+
+    // Per-sample max-indirect-depth bookkeeping (Phase 4 depth
+    // heatmap). The thread-local `MAX_INDIRECT_DEPTH` is reset to
+    // 0 before each sample's `ray_color` call and read after; we
+    // accumulate the per-sample reads here and average at the end.
+    // When `scene.indirect_limit == 0` (the default) the indirect
+    // branch never fires and the running max stays 0 every
+    // sample, so `depth_sum` ends at 0 — bit-identical to "no
+    // depth heatmap" for any pre-Phase-2 byte-pinned test.
+    let mut depth_sum: u32 = 0;
 
     // Sample-count contract for the adaptive loop:
     //
@@ -1568,6 +1762,16 @@ fn pixel_color(
                 (0.0, 0.0)
             };
 
+            // Reset the per-sample max-indirect-depth tracker
+            // before tracing this sample. The `shade_pixel`
+            // indirect branch will bump it whenever a bounce
+            // fires; we read the final max immediately after
+            // `ray_color` returns. When indirect lighting is off
+            // (`scene.indirect_limit == 0`) the branch never
+            // fires and this stays 0 — same shape as the
+            // pre-Phase-4 renderer.
+            MAX_INDIRECT_DEPTH.with(|c| c.set(0));
+
             let rc = ray_color(
                 &camera_ray(&camera.camera, camera.aspect, xt, yt, lens),
                 scene,
@@ -1576,6 +1780,11 @@ fn pixel_color(
                 light_coord,
                 indirect_coord,
             );
+
+            // Capture the sample's max indirect depth and add it
+            // to the running total. Averaged across samples
+            // below; the result is the depth-heatmap metric.
+            depth_sum = depth_sum.saturating_add(MAX_INDIRECT_DEPTH.with(|c| c.get()));
 
             sum = add_linear_color(&sum, &rc);
             for c in 0..3 {
@@ -1608,7 +1817,25 @@ fn pixel_color(
         }
     }
 
-    (scale_linear_color(&sum, 1.0 / samples as f64), samples)
+    // Average max indirect depth × 100. The ×100 scaling preserves
+    // two decimals of fractional resolution in the u32 metric: an
+    // average of 2.4 bounces lands as 240. The PNG heatmap
+    // normalizes against the 99th percentile at save time, so the
+    // absolute scale doesn't matter — only ratios between pixels
+    // do, and 100× has plenty of headroom for the modest depths
+    // path tracing reaches in practice (8 max means at most 800
+    // here).
+    let depth_metric = if samples > 0 {
+        ((depth_sum as f64) * 100.0 / samples as f64).round() as u32
+    } else {
+        0
+    };
+
+    (
+        scale_linear_color(&sum, 1.0 / samples as f64),
+        samples,
+        depth_metric,
+    )
 }
 
 fn render_one_row<T: RenderTarget + ?Sized>(
@@ -1637,10 +1864,13 @@ fn render_one_row<T: RenderTarget + ?Sized>(
     // row remains.
     let want_time = heatmaps.time.is_some();
     let want_samples = heatmaps.samples.is_some();
+    let want_depth = heatmaps.depth.is_some();
 
     let mut timings: Vec<u32> = if want_time { vec![0u32; imgx as usize] } else { Vec::new() };
     let mut sample_counts: Vec<u32> =
         if want_samples { vec![0u32; imgx as usize] } else { Vec::new() };
+    let mut depths: Vec<u32> =
+        if want_depth { vec![0u32; imgx as usize] } else { Vec::new() };
 
     for x in 0..imgx {
         // Timer is started conditionally: when `want_time` is false,
@@ -1650,7 +1880,7 @@ fn render_one_row<T: RenderTarget + ?Sized>(
         // for the time metric.
         let start_ns = if want_time { Some(Instant::now()) } else { None };
 
-        let (pc, samples) = pixel_color(camera, scene, lights, x, y);
+        let (pc, samples, depth_metric) = pixel_color(camera, scene, lights, x, y);
         row[x as usize] = pc;
 
         if let Some(start) = start_ns {
@@ -1665,6 +1895,9 @@ fn render_one_row<T: RenderTarget + ?Sized>(
         if want_samples {
             sample_counts[x as usize] = samples;
         }
+        if want_depth {
+            depths[x as usize] = depth_metric;
+        }
     }
 
     target.submit_row(0, y, &row);
@@ -1673,6 +1906,9 @@ fn render_one_row<T: RenderTarget + ?Sized>(
     }
     if let Some(h) = heatmaps.samples {
         h.submit_metric_row(0, y, &sample_counts);
+    }
+    if let Some(h) = heatmaps.depth {
+        h.submit_metric_row(0, y, &depths);
     }
 }
 
@@ -1739,6 +1975,9 @@ pub fn render<T: RenderTarget + ?Sized>(
         h.finish();
     }
     if let Some(h) = heatmaps.samples {
+        h.finish();
+    }
+    if let Some(h) = heatmaps.depth {
         h.finish();
     }
 }

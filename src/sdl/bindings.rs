@@ -46,7 +46,7 @@ use crate::render::shapes::{
     Shape, Sphere, Triangle,
 };
 use crate::render::transform::Affine;
-use crate::render::{Camera, HeatmapTargets, Light, Scene, Surface};
+use crate::render::{Camera, HeatmapTargets, Light, Scene, Surface, ViewMode};
 
 use crate::sdl::env::EnvRef;
 use crate::sdl::error::Position;
@@ -1223,6 +1223,14 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         min_samples,
         max_samples,
         variance_threshold,
+        // Render-view diagnostic selector. Not exposed in the SDL
+        // — the SDL is the canonical "what does this scene look
+        // like?" definition; switching views from inside a script
+        // would muddy that. main.rs overrides this from the
+        // `RAYTRACER_VIEW` environment variable when set; tests
+        // and SDL scripts always get the byte-identical `Full`
+        // default.
+        view_mode: ViewMode::Full,
     }))
 }
 

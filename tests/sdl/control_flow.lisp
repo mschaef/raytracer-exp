@@ -65,3 +65,39 @@
             true  :ok
             :else (/ 1 0))
          :ok)
+
+; ----------------------------------------------------------------------
+; when, when-not and cond are source rewrites into if/do (see
+; src/sdl/desugar.rs). These check the rewrites compose.
+; ----------------------------------------------------------------------
+
+; Sugar nested inside sugar.
+(assert= (when true (cond false :a :else (when-not false :nested))) :nested)
+(assert= (cond (when true false) :a
+               (when-not false true) :b)
+         :b)
+
+; recur works from inside when / cond bodies.
+(defn count-up [n limit]
+  (cond (>= n limit) n
+        :else (recur (+ n 1) limit)))
+(assert= (count-up 0 10) 10)
+
+(defn drain [n]
+  (when (> n 0)
+    (recur (- n 1))))
+(assert= (drain 5) nil)
+
+; Long cond chains expand to nested ifs.
+(defn classify [n]
+  (cond (< n 0)   :negative
+        (= n 0)   :zero
+        (< n 10)  :small
+        (< n 100) :medium
+        :else     :large))
+(assert= (map classify [-5 0 3 42 1000])
+         [:negative :zero :small :medium :large])
+
+; Quoted forms are left alone.
+(assert= (first '(when x y)) 'when)
+(assert= (count '(cond a b c d)) 5)

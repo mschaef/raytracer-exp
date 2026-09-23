@@ -5,8 +5,8 @@
 ;; map
 ;; --------------------------------------------------------------------
 
-(def inc (fn [n] (+ n 1)))
-(def dbl (fn [n] (* n 2)))
+(defn inc [n] (+ n 1))
+(defn dbl [n] (* n 2))
 
 (assert= (map inc []) [])
 (assert= (map inc [1 2 3]) [2 3 4])
@@ -20,8 +20,8 @@
 ;; filter
 ;; --------------------------------------------------------------------
 
-(def positive? (fn [n] (> n 0)))
-(def big?      (fn [n] (> n 3)))
+(defn positive? [n] (> n 0))
+(defn big?      [n] (> n 3))
 
 (assert= (filter big?       [])              [])
 (assert= (filter big?       [1 2 3 4 5 6])   [4 5 6])
@@ -86,6 +86,6 @@
 ;; HOFs interact correctly with closures (capturing via fn).
 ;; --------------------------------------------------------------------
 
-(def add-n (fn [n] (fn [x] (+ x n))))
+(defn add-n [n] (fn [x] (+ x n)))
 (assert= (map (add-n 10) [1 2 3]) [11 12 13])
 (assert= (filter (fn [x] (> x 5)) (map (add-n 4) [1 2 3 4 5])) [6 7 8 9])

@@ -1,7 +1,8 @@
 ; Phase 4 — threading macros: -> (thread first) and ->> (thread last).
 ;
-; Implemented as special forms in eval.rs (no macros in the SDL), but
-; the script-visible behavior matches Clojure's `->` / `->>` macros.
+; Implemented as source rewrites in the desugaring pass
+; (src/sdl/desugar.rs), so they behave like Clojure's `->` / `->>`
+; macros.
 
 ;; --------------------------------------------------------------------
 ;; -> (thread first)
@@ -11,7 +12,7 @@
 (assert= (-> 5) 5)
 
 ; Bare-symbol step: (-> x f) ≡ (f x).
-(def inc (fn [n] (+ n 1)))
+(defn inc [n] (+ n 1))
 (assert= (-> 5 inc) 6)
 
 ; Multi-step bare-symbol: each step calls the function on the previous
@@ -55,3 +56,25 @@
              (conj 4)
              (conj 5))
          [1 2 3 4 5])
+
+;; --------------------------------------------------------------------
+;; Threading is a source rewrite, so steps can be special forms or
+;; other sugar, and threading forms nest.
+;; --------------------------------------------------------------------
+
+; (-> x (if a b)) ≡ (if x a b)
+(assert= (-> true (if :yes :no)) :yes)
+(assert= (-> nil  (if :yes :no)) :no)
+
+; (-> x (when body)) ≡ (when x body)
+(assert= (-> 5 (when :gate-open)) :gate-open)
+
+; Nested threading forms.
+(assert= (-> 5 (+ (->> 2 (* 10)))) 25)   ; (+ 5 (* 10 2))
+
+; A threaded step that uses fn directly.
+(assert= (->> [1 2 3] (map (fn [n] (-> n inc (* 2))))) [4 6 8])
+
+; Quoted threading forms are data, not rewritten.
+(assert= (count '(-> a b c)) 4)
+(assert= (first '(->> a b)) '->>)

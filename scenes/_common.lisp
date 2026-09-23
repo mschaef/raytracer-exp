@@ -31,23 +31,21 @@
 ;; because the SDL doesn't (yet) expose surface-field accessors;
 ;; building from the color keeps it standalone.
 
-(def glossy
-  (fn [color]
-    (surface {:color      color
-              :ambient    ambient
-              :specular   specular
-              :light      light
-              :checked    false
-              :reflection 0.0})))
+(defn glossy [color]
+  (surface {:color      color
+            :ambient    ambient
+            :specular   specular
+            :light      light
+            :checked    false
+            :reflection 0.0}))
 
-(def reflective
-  (fn [color]
-    (surface {:color      color
-              :ambient    ambient
-              :specular   specular
-              :light      light
-              :checked    false
-              :reflection 0.2})))
+(defn reflective [color]
+  (surface {:color      color
+            :ambient    ambient
+            :specular   specular
+            :light      light
+            :checked    false
+            :reflection 0.2}))
 
 ;; `glassy` builds a see-through surface: same matte body + specular
 ;; highlight as `glossy`, plus a transmission coefficient. Phase 1
@@ -57,15 +55,14 @@
 ;; transparency as a parameter since variable transparency is the
 ;; whole point.
 
-(def glassy
-  (fn [color transparency]
-    (surface {:color        color
-              :ambient      ambient
-              :specular     specular
-              :light        light
-              :checked      false
-              :reflection   0.0
-              :transparency transparency})))
+(defn glassy [color transparency]
+  (surface {:color        color
+            :ambient      ambient
+            :specular     specular
+            :light        light
+            :checked      false
+            :reflection   0.0
+            :transparency transparency}))
 
 ;; `metallic` builds a metal surface: the :metallic flag tells the
 ;; renderer to tint both the mirror reflection and the specular
@@ -75,15 +72,14 @@
 ;; is true. Takes the reflection strength as a parameter since
 ;; polished-vs-dull is the main knob worth varying.
 
-(def metallic
-  (fn [color reflection]
-    (surface {:color      color
-              :ambient    ambient
-              :specular   specular
-              :light      light
-              :checked    false
-              :reflection reflection
-              :metallic   true})))
+(defn metallic [color reflection]
+  (surface {:color      color
+            :ambient    ambient
+            :specular   specular
+            :light      light
+            :checked    false
+            :reflection reflection
+            :metallic   true}))
 
 ;; --------------------------------------------------------------------
 ;; Surface presets — match SURFACE_* constants in scenes.rs

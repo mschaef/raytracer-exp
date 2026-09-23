@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Instant;
 
-use raytracer::render::{render, HeatmapTargets, Scene};
+use raytracer::render::{render, HeatmapTargets, Scene, ViewMode};
 use raytracer::render::output::{
     PngTarget,
     StreamTarget,
@@ -36,6 +36,67 @@ fn is_parallel() -> bool {
     match env::var("PARALLEL") {
         Ok(val) => val.to_lowercase() == "y",
         Err(_) => true
+    }
+}
+
+/// Resolve the diagnostic render-view selector. `RAYTRACER_VIEW` is
+/// an opt-in knob for understanding what each shading term
+/// contributes to the final image: setting it to `indirect`,
+/// `reflection`, `transmission`, `local`, or `full` makes the
+/// renderer return only that component at the primary hit. Unknown
+/// values print a warning and fall back to `full`, so a typo
+/// doesn't silently render the wrong thing. Phase 4 of the
+/// path-tracing plan.
+fn view_mode() -> ViewMode {
+    let s = match env::var("RAYTRACER_VIEW") {
+        Ok(s) => s,
+        Err(_) => return ViewMode::Full,
+    };
+    match s.to_lowercase().as_str() {
+        "full" => ViewMode::Full,
+        "local" | "direct" => ViewMode::Local,
+        "indirect" | "gi" => ViewMode::Indirect,
+        "reflection" | "reflect" => ViewMode::Reflection,
+        "transmission" | "transmit" => ViewMode::Transmission,
+        other => {
+            eprintln!(
+                "warning: RAYTRACER_VIEW={:?} not recognized \
+                 (full|local|indirect|reflection|transmission); using full",
+                other
+            );
+            ViewMode::Full
+        }
+    }
+}
+
+/// The output PNG filename for the main pixel target. `render.png`
+/// in `Full` mode (the default) so a normal render produces the
+/// same file it always has; `render-{mode}.png` in any other view
+/// so successive diagnostic renders don't clobber each other.
+fn output_filename(mode: ViewMode) -> &'static str {
+    match mode {
+        ViewMode::Full => "render.png",
+        ViewMode::Local => "render-local.png",
+        ViewMode::Indirect => "render-indirect.png",
+        ViewMode::Reflection => "render-reflection.png",
+        ViewMode::Transmission => "render-transmission.png",
+    }
+}
+
+/// `RAYTRACER_DECOMP` is the sample-source decomposition switch:
+/// when set to any truthy value (anything but unset, empty, or
+/// `"0"`), main.rs renders the scene at all four non-`Full` view
+/// modes after the main render and writes each component to its
+/// own PNG. Together with the canonical `render.png` (always
+/// produced) this gives five views of the same scene from a single
+/// invocation. Phase 4 of the path-tracing plan.
+///
+/// Cost: 5x the render time of a single `Full` render. Decomp is a
+/// diagnostic, run on demand; the every-day path skips it.
+fn decomposition_enabled() -> bool {
+    match env::var("RAYTRACER_DECOMP") {
+        Ok(v) => !v.is_empty() && v != "0" && v.to_lowercase() != "false",
+        Err(_) => false,
     }
 }
 
@@ -166,6 +227,14 @@ fn usage_and_exit() -> ! {
     eprintln!("  PARALLEL=n           Disable Rayon parallelism (default on).");
     eprintln!("  RTVIEW_ADDR=host:port  Stream pixels to a live receiver");
     eprintln!("                       instead of writing render.png.");
+    eprintln!("  RAYTRACER_VIEW=MODE  Render only one shade_pixel component:");
+    eprintln!("                       full (default), local, indirect,");
+    eprintln!("                       reflection, transmission. Output goes");
+    eprintln!("                       to render-MODE.png for non-full modes.");
+    eprintln!("  RAYTRACER_DECOMP=1   After the main render, also render at");
+    eprintln!("                       each non-full view mode, producing");
+    eprintln!("                       render-local/indirect/reflection/");
+    eprintln!("                       transmission.png. Costs 5x render time.");
     process::exit(2);
 }
 
@@ -184,7 +253,14 @@ fn main() {
         _ => usage_and_exit(),
     };
 
-    let scene = load_scene(&script_path);
+    let mut scene = load_scene(&script_path);
+    // The SDL constructs scenes with `view_mode: ViewMode::Full`;
+    // main.rs is the only place that flips it, from the
+    // `RAYTRACER_VIEW` env var. Tests evaluate SDL scripts
+    // directly (no `RAYTRACER_VIEW` plumbing), so byte-pinned
+    // tests always render at `Full` — bit-identical to the
+    // pre-Phase-4 renderer.
+    scene.view_mode = view_mode();
     let (width, height) = image_size();
 
     // Diagnostic heatmaps: same dimensions as the pixel target.
@@ -205,9 +281,19 @@ fn main() {
     // bookkeeping for that metric entirely.
     let time_heatmap = PngHeatmapTarget::new(width, height);
     let samples_heatmap = PngHeatmapTarget::new(width, height);
+    // Per-pixel average max indirect-bounce depth, scaled by 100
+    // (so a 2.4-bounce average lands as 240). Phase 4 of the
+    // path-tracing plan — "per-surface convergence visualization"
+    // in the plan's language. Saved as `render-depth.png`. For
+    // scenes with `indirect_limit == 0` (the default) the metric
+    // is identically zero everywhere; the resulting PNG normalizes
+    // to all-black, which is the right diagnostic outcome for
+    // "no GI happened."
+    let depth_heatmap = PngHeatmapTarget::new(width, height);
     let heatmaps = HeatmapTargets {
         time: Some(&time_heatmap),
         samples: Some(&samples_heatmap),
+        depth: Some(&depth_heatmap),
     };
 
     // RTVIEW_ADDR=host:port routes pixels to a streaming receiver
@@ -224,7 +310,13 @@ fn main() {
         Err(_) => {
             let target = PngTarget::new(width, height);
             render_into(&target, heatmaps, &scene, width, height);
-            target.save("render.png").unwrap();
+            // `render.png` in `Full` mode (the default — same
+            // behavior as every prior phase); `render-{mode}.png`
+            // when the user has asked for a diagnostic view via
+            // `RAYTRACER_VIEW`. Distinct filenames so successive
+            // diagnostic renders don't clobber the canonical
+            // `render.png` from a previous `Full` run.
+            target.save(output_filename(scene.view_mode)).unwrap();
         }
     }
 
@@ -243,4 +335,77 @@ fn main() {
     // honest read of "how many samples did this pixel take vs. the
     // typical pixel."
     samples_heatmap.save("render-samples.png", HeatmapScale::Linear).unwrap();
+
+    // Depth heatmap: `HeatmapScale::Linear`. Like the samples
+    // heatmap, depth is bounded (between 0 and `100 *
+    // indirect_limit`, since the stored value is "average max
+    // depth ×100"), so a linear scale is honest. Pixels with no
+    // indirect lighting (`indirect_limit == 0` or all paths
+    // RR-terminated at the first bounce) read as black; pixels
+    // where paths reach the deepest bounces (well-lit open areas
+    // with bright surfaces) read brightest. Useful as a "where is
+    // path tracing doing more bounce work" view that complements
+    // the sample-count heatmap's "where is the adaptive sampler
+    // doing more work."
+    depth_heatmap.save("render-depth.png", HeatmapScale::Linear).unwrap();
+
+    // Sample-source decomposition (Phase 4 of the path-tracing plan).
+    // When `RAYTRACER_DECOMP` is set, render the scene at each of the
+    // four non-`Full` view modes after the main render, writing one
+    // PNG per mode. Together with the canonical `render.png` produced
+    // above this gives five views of the same scene — useful for
+    // verifying that direct lighting, indirect (GI), reflection, and
+    // transmission each behave as expected on their own.
+    //
+    // Each decomposition render reuses the same scene, just with a
+    // different `view_mode`; the renderer at the primary hit returns
+    // only the selected component. Recursive rays from inside the
+    // shading branches still compute the full radiance at their
+    // bounce points, so the indirect / reflection / transmission
+    // contributions include everything they bring back from the
+    // scene — they're just isolated at the primary level.
+    //
+    // No diagnostic heatmaps are written per decomp render: they
+    // would either collide with each other or require five more
+    // filenames, and the canonical heatmaps from the main render
+    // are the most diagnostically useful single view anyway.
+    // Disabling them via `HeatmapTargets::default()` also skips the
+    // per-pixel timing and sample-count bookkeeping inside the
+    // renderer, shaving overhead off each decomp pass.
+    if decomposition_enabled() {
+        // Skip decomposition entirely when streaming — the
+        // diagnostic deliverable is PNGs on disk, and serializing
+        // five renders to one streaming receiver would be confusing.
+        if env::var("RTVIEW_ADDR").is_ok() {
+            eprintln!(
+                "warning: RAYTRACER_DECOMP ignored when RTVIEW_ADDR is set \
+                 (decomposition writes PNGs, not a stream)"
+            );
+        } else {
+            for mode in [
+                ViewMode::Local,
+                ViewMode::Indirect,
+                ViewMode::Reflection,
+                ViewMode::Transmission,
+            ] {
+                // Skip whichever mode the user already requested via
+                // RAYTRACER_VIEW — that PNG was just written by the
+                // main render, no point overwriting it with a
+                // bit-identical render.
+                if mode == scene.view_mode {
+                    continue;
+                }
+                scene.view_mode = mode;
+                let decomp_target = PngTarget::new(width, height);
+                render_into(
+                    &decomp_target,
+                    HeatmapTargets::default(),
+                    &scene,
+                    width,
+                    height,
+                );
+                decomp_target.save(output_filename(mode)).unwrap();
+            }
+        }
+    }
 }

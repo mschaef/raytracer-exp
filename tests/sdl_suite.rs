@@ -66,6 +66,7 @@ const DECLARED: &[&str] = &[
     "comparison",
     "control_flow",
     "def_let",
+    "defn",
     "destructuring",
     "fn_form",
     "hofs",
@@ -126,6 +127,7 @@ sdl_test!(closures);
 sdl_test!(comparison);
 sdl_test!(control_flow);
 sdl_test!(def_let);
+sdl_test!(defn);
 sdl_test!(destructuring);
 sdl_test!(fn_form);
 sdl_test!(hofs);
@@ -264,6 +266,54 @@ fn with_surface_validation_fails_on_unsurfaced_leaf() {
         result.is_err(),
         "scene construction must reject an unsurfaced sphere with no with-surface ancestor",
     );
+}
+
+/// Malformed sugar forms (`defn`, `when`, `when-not`, `cond`, `->`,
+/// `->>`) must be rejected by the desugaring pass with an error that
+/// names the form, rather than falling through to a confusing
+/// downstream failure in the core form it expands into. The harness
+/// has no "expect panic" form, so the failure cases live here.
+#[test]
+fn desugar_rejects_malformed_forms() {
+    // (source, text the error must contain, description)
+    let cases: &[(&str, &str, &str)] = &[
+        ("(defn)", "defn", "defn: missing name"),
+        ("(defn f)", "defn", "defn: missing parameter vector"),
+        ("(defn \"f\" [x] x)", "defn", "defn: non-symbol name"),
+        ("(defn f \"doc\")", "defn", "defn: docstring with no parameter vector"),
+        ("(defn f x x)", "defn", "defn: non-vector parameters"),
+        ("(defn f ([x] x) ([x y] y))", "defn", "defn: multi-arity definition"),
+        ("(when)", "when", "when: missing test"),
+        ("(when-not)", "when-not", "when-not: missing test"),
+        ("(cond true)", "cond", "cond: odd number of forms"),
+        ("(cond true 1 false)", "cond", "cond: dangling test"),
+        ("(->)", "->", "->: missing value"),
+        ("(->>)", "->>", "->>: missing value"),
+        ("(-> 1 ())", "->", "->: empty-list step"),
+        ("(->> 1 ())", "->>", "->>: empty-list step"),
+    ];
+    for &(source, expected, what) in cases.iter() {
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(source, "desugar_malformed.lisp", &env);
+        }));
+        let payload = match result {
+            Ok(_) => panic!("must reject {}: {}", what, source),
+            Err(p) => p,
+        };
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            message.contains(expected),
+            "error for {} ({}) should mention {:?}, got: {}",
+            what,
+            source,
+            expected,
+            message
+        );
+    }
 }
 
 /// Lights-as-shapes affine equivalence: a scene with a bare

@@ -15,14 +15,13 @@
 ;; Per-sphere surface — same body color, light/specular vary by grid cell.
 ;; --------------------------------------------------------------------
 
-(def test-surface
-  (fn [light specular]
-    (surface {:color      [1.0 0.0 0.0]
-              :ambient    ambient
-              :specular   specular
-              :light      light
-              :checked    false
-              :reflection 0.0})))
+(defn test-surface [light specular]
+  (surface {:color      [1.0 0.0 0.0]
+            :ambient    ambient
+            :specular   specular
+            :light      light
+            :checked    false
+            :reflection 0.0}))
 
 ;; --------------------------------------------------------------------
 ;; Build one sphere from a linear index in [0, 25).
@@ -32,13 +31,12 @@
 ;; come out as fractions of 5: 0.0, 0.2, 0.4, 0.6, 0.8 — same as
 ;; the Rust expression (x % 5) as f64 / 5.0.
 
-(def make-sphere
-  (fn [x]
-    (let [col (mod  x 5)
-          row (quot x 5)]
-      (sphere {:center  [(- col 2) 0 (- row 2)]
-               :r       0.4
-               :surface (test-surface (/ col 5.0) (/ row 5.0))}))))
+(defn make-sphere [x]
+  (let [col (mod  x 5)
+        row (quot x 5)]
+    (sphere {:center  [(- col 2) 0 (- row 2)]
+             :r       0.4
+             :surface (test-surface (/ col 5.0) (/ row 5.0))})))
 
 (def sphere-surface-test-scene
   (scene

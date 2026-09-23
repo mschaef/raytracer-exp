@@ -34,14 +34,13 @@
 ;; Matte body for the colored box. Saturated red so the bounce off
 ;; it has a strong tint; ambient zero so the bounce isn't drowned
 ;; out by an ambient term that would brighten the sphere uniformly.
-(def matte
-  (fn [color]
-    (surface {:color      color
-              :ambient    0.0
-              :specular   0.0
-              :light      0.9
-              :checked    false
-              :reflection 0.0})))
+(defn matte [color]
+  (surface {:color      color
+            :ambient    0.0
+            :specular   0.0
+            :light      0.9
+            :checked    false
+            :reflection 0.0}))
 
 (def gi-red   (matte [0.85 0.08 0.08]))
 (def gi-white (matte [0.85 0.85 0.85]))

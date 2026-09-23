@@ -18,11 +18,16 @@
 //! (`png-target`, `offset-target`, `progress-target`), `(render ...)`,
 //! and `(save-png ...)` — so a script can drive an end-to-end render
 //! to disk without touching Rust. Phase 4 adds in-language ergonomics:
-//! control-flow special forms (`cond`, `when`, `when-not`, `->`, `->>`),
+//! control-flow forms (`cond`, `when`, `when-not`, `->`, `->>`, now
+//! implemented in the desugaring pass),
 //! HOFs (`map`, `filter`, `reduce`, `range`, `repeat`, `apply`), and
 //! a small lisp standard library (`stdlib.lisp`) with math constants,
 //! angle conversions, and point helpers. See `CLAUDE.md` for the full
 //! phased plan.
+//!
+//! Every top-level form passes through [`desugar::desugar`] before it
+//! reaches the evaluator, which rewrites syntactic sugar (`defn`,
+//! `when`, `when-not`, `cond`, `->`, `->>`) into core special forms.
 //!
 //! Public entry points:
 //!
@@ -38,6 +43,7 @@
 pub mod ast;
 pub mod bindings;
 pub mod builtins;
+pub mod desugar;
 pub mod env;
 pub mod error;
 pub mod eval;
@@ -139,7 +145,11 @@ pub fn eval_source(source: &str, filename: &str, env: &EnvRef) -> Value {
     let forms = reader::read_all(source, filename);
     let mut last = Value::Nil;
     for form in &forms {
-        last = eval::eval(form, env);
+        // Desugar one top-level form at a time, immediately before
+        // evaluating it — the shape a future macro system needs, since
+        // a macro defined by one form must be visible to the next.
+        let expanded = desugar::desugar(form);
+        last = eval::eval(&expanded, env);
     }
     last
 }
