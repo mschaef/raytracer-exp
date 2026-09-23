@@ -125,9 +125,20 @@ pub enum Shape {
     Group(Vec<Shape>),                 // hierarchical container
     Transform(Box<Transformed>),       // affine-transformed subtree
     Bounded(Box<Bounded>),             // AABB-accelerated subtree
+    Surfaced(Box<SurfacedShape>),      // default surface for a subtree
+    Csg(Box<Csg>),                     // difference / intersection of solids
     Light(Light),                      // positioned light source (invisible)
 }
 ```
+
+`Csg { op: CsgOp, a, b }` is a binary difference or intersection of two
+*solids* (`Shape::is_solid`: everything except triangles, and so
+meshes). It works on **spans**, the intervals along a ray where the
+ray is inside a solid. `Shape::spans` produces them for every variant:
+a `Plane` counts as a half-space, and a `Group` as a union. The
+operands' span lists are combined with interval set operations, and
+`hit_test` returns the first boundary in front of the ray. See "CSG:
+implementation plan".
 
 `Hittable for Shape` is a single match dispatching to per-variant logic.
 `Sphere`/`Plane`/`Cuboid` implement `Hittable` with the standard analytic ray
@@ -1670,6 +1681,110 @@ Approximate order of recent commits, oldest first:
     passthrough), and the Rust malformed-form test became
     `desugar_rejects_malformed_forms`, covering every sugar form.
 
+39. **CSG phase 1: span query.** Phase 1 of the "CSG: implementation
+    plan": the query CSG needs, with no change to any render. New in
+    `src/render/shapes.rs`: `SpanEnd { t, normal, surface }` and
+    `Span { enter, exit }`, and `Shape::spans(ray, &mut Vec<Span>)`,
+    which appends the whole-line intervals (negative `t` included)
+    where the ray is inside a solid, sorted and non-overlapping.
+    `Sphere`, `Cuboid`, `Cylinder` and `Cone` each give at most one
+    span. They reuse their `hit_test` math but keep both crossings and
+    the exit normal, and the cylinder and cone share a `convex_span`
+    helper that takes the smallest and largest valid crossing. `Plane`
+    is a half-space (solid opposite `normal`) with infinite endpoints.
+    Of the wrappers: `Transform` maps the ray without renormalizing (so
+    `t` carries straight across) and maps normals through
+    `normal_xform`; `Surfaced` fills missing surfaces; `Bounded` reuses
+    `AABB::intersects`, which is valid because spans entirely behind
+    the origin can't matter; and `Group` is a union. `Triangle` and
+    `Light` give no spans. The set operations `span_union`,
+    `span_intersection` and `span_difference` are free functions over
+    sorted span lists. Difference flips the normals of the boundaries
+    the subtracted solid contributes and keeps its surface.
+    `first_span_hit(spans, ray)`, the first finite endpoint with
+    `t > EPSILON` as a `RayHit`, landed early because the tests need
+    it; Phase 2's `Csg::hit_test` will use it. One deliberate
+    difference from the cone's `hit_test`: a lateral root on the apex
+    tip gets a normal pointing out through the apex instead of being
+    skipped, so a ray down the axis still has two endpoints. New
+    `#[cfg(test)] mod span_tests` (18 tests): the spans of each
+    primitive through, from inside, and missing; the plane half-space
+    in every direction; the wrappers; the set operations on
+    hand-built lists, including touching spans and the normal flip; a
+    sphere-minus-sphere-minus-plane bowl; and a property check, over
+    2,000 deterministic rays per solid (bare and under a non-uniform
+    rotate/scale/translate stack), that the first span endpoint in
+    front of an outside origin matches `hit_test`'s distance and
+    normal. Nothing outside this section calls the new code, so every
+    scene renders byte-identically. **Verification caveat:** the
+    session that wrote this had no crates.io access, so the tests ran
+    in a dependency-free harness crate (edition 2018, same as this
+    crate) that compiled the real `shapes.rs`, `geometry.rs`,
+    `transform.rs` and `color.rs` against verbatim copies of the
+    `render.rs` types they use. A full `cargo test` here is still
+    needed. (Superseded by entry 40: Phase 2's session compiled the
+    whole crate and ran the full suite against stand-in libraries.)
+
+40. **CSG phase 2: the `Csg` node and SDL bindings.** New variant
+    `Shape::Csg(Box<Csg>)`, where `Csg { op: CsgOp, a, b }` and `CsgOp`
+    is `Difference` or `Intersection`. There's no union variant because
+    `Group` already is one.
+    - **Evaluation.** `Csg` computes its operands' span lists, skipping
+      `b` when `a` is empty, and combines them with
+      `span_difference` / `span_intersection`. Its `hit_test` is
+      `first_span_hit` over the result. Because the node also answers
+      `spans`, CSG nests.
+    - **Other match arms.** `bounds()`: a difference is bounded by
+      `a`; an intersection by the overlap of the two bounds (new
+      `AABB::intersection`, which clamps to a degenerate box when there
+      is no overlap), or by whichever operand is bounded when the other
+      is a half-space. `validate_surfaces` and `collect_lights` recurse
+      into both operands, and the SDL `Display` arm prints
+      `#<shape difference>` / `#<shape intersection>`.
+    - **Solidity.** New `Shape::is_solid()`: false for `Triangle`,
+      true for the other primitives, `Plane`, `Csg` and `Light`; a
+      `Group` is solid when all its children are; the wrappers pass
+      through. The Rust constructors `difference(a, b)` and
+      `intersection(a, b)` assert it.
+    - **SDL.** `(difference a b c …)` means `a − (b ∪ c ∪ …)`: the
+      binding wraps the extra operands in one `group`, which is POV's
+      n-ary form. `(intersection a b c …)` folds left. Both need at
+      least two operands, and a non-solid operand (a triangle, or a
+      `load-obj` mesh) is rejected with a positioned `sdl_panic!` that
+      names it by number. Faces cut by an operand show that operand's
+      surface if it has one, otherwise the nearest `with-surface`.
+    - **Tests.**
+      - Seven new Rust unit tests in `shapes.rs`: the bowl's interior,
+        back and rim; a multi-cutter difference and nesting, with exact
+        `t` and normals; intersection hits and bounds; hits unchanged
+        whether a transform wraps the whole CSG node or each operand;
+        cut-face surfaces; `is_solid`; and the constructor panic.
+      - New `tests/sdl/bindings_csg.lisp` (registered in both
+        `DECLARED` and the `sdl_test!` list): construction, display,
+        equality, the n-ary forms, composition and nesting, and a
+        small render.
+      - New `csg_rejects_bad_operands` Rust test in
+        `tests/sdl_suite.rs`.
+      - New `scenes/csg_test.lisp` with a `csg_test_scene_loads` smoke
+        test. It shows a cube minus a sphere, with the sphere's own
+        yellow surface on the cut faces, a glassy sphere∩cube, and a
+        gold bowl (sphere − sphere − half-space) opening upward.
+    - **Visual check.** A render of `csg_test` looked right: cut faces
+      lit on the correct side, glass showing its back faces, and the
+      bowl's rim and interior visible.
+    - **Pitfall.** Plane normals must be unit length, both for
+      `hit_test` (which returns `normal` as is) and for half-space
+      spans. The SDL `plane` binding doesn't normalize.
+    - **How it was verified.** This session had no crates.io access
+      either. The whole crate was built against small local stand-ins
+      for `image` (raw-pixel save/open), `rayon` (sequential) and
+      `tobj` (a `v`/`vn`/`f` parser), with `num-complex` dropped as
+      unused. All 47 unit tests and all 61 `sdl_suite` tests pass
+      there, and the renders were made with those stand-ins. It still
+      needs a `cargo test` with the real crates.
+    - **Unchanged.** Scenes without CSG don't reach any new code, so
+      they render byte-identically.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -2474,48 +2589,16 @@ built, not silently mis-rendered.
 
 ### Phase 1 — Span query (no behavior change)
 
-Scaffolding only, same posture as light-types Phase 1: nothing in the
-renderer calls the new code yet, so every scene renders
-byte-identically.
-
-- New types in `shapes.rs`: `SpanEnd { t, normal, surface }` and
-  `Span { enter: SpanEnd, exit: SpanEnd }`.
-- New method `Shape::spans(&self, ray: &Vector, out: &mut Vec<Span>)`,
-  appending the ray's spans in increasing `t`. Per variant:
-  - `Sphere`: both quadratic roots (the current `hit_test` uses only
-    the near one).
-  - `Cuboid`: the slab method's `t_enter`/`t_exit`, with the exit face
-    normal tracked the same way the entry face already is.
-  - `Cylinder`, `Cone`: the entry and exit among the side and cap
-    candidates they already compute. These are convex, so there are
-    exactly zero or two crossings.
-  - `Plane`: the half-space span described above.
-  - `Transform`: inverse-transform the ray (no renormalizing, per the
-    Pitfalls section, so `t` carries straight across), recurse, then
-    map both endpoint normals through `normal_xform` and renormalize.
-  - `Surfaced`: recurse, then fill `None` surfaces on both endpoints.
-  - `Bounded`: `AABB::intersects` early-out, then recurse.
-  - `Group`: collect every child's spans and normalize to a sorted
-    union (sort by `t_in`, coalesce overlapping spans, keeping the
-    outermost endpoints).
-  - `Light`: no spans.
-  - `Triangle`: unreachable once Phase 2's validation is in. Until then,
-    no spans, with a comment saying why.
-- The three set operations as free functions over sorted span lists:
-  `span_union`, `span_intersection`, `span_difference` (with the
-  normal negation on B-derived boundaries). Phase 1 only uses union,
-  for `Group`, but all three get unit tests here while they're fresh.
-- **Unit tests** in a `#[cfg(test)]` module in `shapes.rs`, like the
-  one in `sampler.rs`. The geometry is too fiddly to verify by eye:
-  - Per primitive: a ray through the center gives one span with the
-    expected `t`s and outward normals. A ray starting inside gives
-    `t_in < 0 < t_out`. A miss gives nothing.
-  - **Consistency with `hit_test`:** for rays starting *outside* the
-    solid, the first span's `enter` matches `hit_test`'s distance and
-    normal. Check this over a spread of deterministic rays for each
-    primitive, both bare and under a non-uniform `Transform`.
-  - The set operations on hand-built interval lists, including touching
-    and nested spans, and the normal flip in difference.
+Done; see "Recent work history" entry 39. Summary: `SpanEnd` / `Span`
+types, `Shape::spans` for every variant (convex primitives give one
+span, `Plane` is a half-space with infinite endpoints, `Group` is a
+union, `Transform`/`Surfaced`/`Bounded` pass through, and `Triangle`
+and `Light` give nothing), the free functions `span_union`,
+`span_intersection` and `span_difference` (normals of subtracted
+boundaries flipped), and `first_span_hit` for Phase 2's `hit_test`.
+Unit tests in `shapes.rs`, including a check against `hit_test` over
+thousands of rays. Output is byte-identical because nothing calls
+the new code yet.
 
 A side effect worth writing down: `Sphere` and `Cuboid` currently
 treat a ray that starts inside them as a miss, so a transmitted ray
@@ -2526,61 +2609,23 @@ stays out of this plan (see Phase 4).
 
 ### Phase 2 — The `Csg` node and SDL bindings
 
-- New variant `Shape::Csg(Box<Csg>)`, where
-  `Csg { op: CsgOp, a: Shape, b: Shape }` and
-  `CsgOp` is `Difference` or `Intersection`. POV's `union` is already
-  `group`, and `merge` (a union that hides internal surfaces, which
-  only matters for transparent objects) is deferred.
-- `Csg::spans` evaluates both operands' spans and combines them with
-  the Phase 1 set operations. Because a `Csg` node produces spans
-  itself, CSG nests: `texaco_star` is a difference whose first operand
-  is another difference.
-- `hit_test` for `Csg`: compute its spans and return the first
-  endpoint with finite `t > EPSILON`. Usually that's an `enter`. It's
-  an `exit` when the ray starts inside the solid (transmission and
-  reflection rays leaving a surface), and then the returned normal is
-  the solid's outward normal, facing away from the ray. That matches
-  what the primitives return today. Flipping normals to face the ray is
-  a shading-policy change and is out of scope.
-- The rest of the closed-enum arms:
-  - `bounds()`: difference → bounds of A; intersection → the overlap of
-    both bounds (new `AABB::intersection`), or whichever operand is
-    bounded if the other isn't (a half-space).
-  - `validate_surfaces` recurses into both operands.
-  - `collect_lights` recurses into both operands, so a light positioned
-    inside CSG geometry still works.
-  - A new `Shape::is_solid()`: false for `Triangle`; for `Group`, true
-    if every non-light child is solid; `Transform`/`Bounded`/`Surfaced`
-    pass through; true for `Csg` and the other primitives. The
-    constructors check it and refuse non-solid operands.
-  - The SDL `value.rs` Display arm, e.g. `#<shape difference>`.
-- Rust constructors: `difference(a, b)` and `intersection(a, b)`,
-  taking `impl Into<Shape>` like the others.
-- SDL bindings, variadic to match POV's n-ary forms:
-  - `(difference a b c …)` is `A − (B ∪ C ∪ …)`: the extra operands are
-    wrapped in one `group` rather than folded into nested differences.
-    That's one set operation instead of several.
-  - `(intersection a b c …)` folds left.
-  - At least two operands. A non-solid operand (a triangle or a
-    `load-obj` mesh) raises an `sdl_panic!` that names the offending
-    operand.
-- Surfaces follow directly from the span endpoints: a face cut by B
-  shows B's surface if B has one, otherwise the nearest enclosing
-  `with-surface`. That's POV's rule, and it's what the Texaco star
-  relies on (one `White` texture over the whole difference).
-- Tests:
-  - New `tests/sdl/bindings_csg.lisp` (plus its `sdl_test!` line):
-    construction, `shape?`, n-ary forms, CSG under transforms and
-    `with-surface`, nesting, and structural equality.
-  - A Rust test in `tests/sdl_suite.rs` for the rejection errors (mesh
-    operand, too few operands).
-  - New `scenes/csg_test.lisp` with a `csg_test_scene_loads` smoke
-    test: a cube minus a sphere, a sphere intersected with a cube, and
-    a bowl (sphere − sphere − half-space) on the checker floor, with one
-    reflective and one `glassy` operand so the reflection, shadow and
-    transmission paths all cross CSG surfaces.
-- Existing scenes don't use the new variant, so the byte-pinned tests
-  are unaffected.
+Done; see "Recent work history" entry 40. Summary:
+
+- `Shape::Csg(Box<Csg { op, a, b }>)` computes its spans from its
+  operands' spans and uses `first_span_hit` as its `hit_test`.
+- `bounds`, `validate_surfaces`, `collect_lights` and the SDL
+  `Display` arm are updated.
+- `Shape::is_solid` gates the `difference` / `intersection`
+  constructors.
+- SDL `(difference a b c …)` = `a − (b ∪ c ∪ …)` and a left-folding
+  `(intersection …)`, both rejecting triangles and meshes with a
+  positioned error.
+- Unit tests, a binding test script, a rejection test, and the
+  `csg_test` scene.
+
+The open decisions below were settled as recommended: binary `Csg`
+with n-ary difference expanded in the binding, `Vec<Span>` storage,
+and outward-of-solid normals on exit hits.
 
 ### Phase 3 — Texaco port (acceptance test)
 

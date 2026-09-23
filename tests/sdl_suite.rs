@@ -56,6 +56,7 @@ use raytracer::sdl::value::Value;
 const DECLARED: &[&str] = &[
     "arithmetic",
     "bindings_camera",
+    "bindings_csg",
     "bindings_lights",
     "bindings_mesh",
     "bindings_scene",
@@ -117,6 +118,7 @@ macro_rules! sdl_test {
 
 sdl_test!(arithmetic);
 sdl_test!(bindings_camera);
+sdl_test!(bindings_csg);
 sdl_test!(bindings_lights);
 sdl_test!(bindings_mesh);
 sdl_test!(bindings_scene);
@@ -296,6 +298,52 @@ fn desugar_rejects_malformed_forms() {
         let env = sdl::default_env();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             sdl::eval_source(source, "desugar_malformed.lisp", &env);
+        }));
+        let payload = match result {
+            Ok(_) => panic!("must reject {}: {}", what, source),
+            Err(p) => p,
+        };
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            message.contains(expected),
+            "error for {} ({}) should mention {:?}, got: {}",
+            what,
+            source,
+            expected,
+            message
+        );
+    }
+}
+
+/// CSG constructors reject what can't be a CSG operand: fewer than two
+/// operands, and anything that isn't a solid (a triangle, a group or
+/// transform containing one, or a `load-obj` mesh). A script can't
+/// catch these, so they're checked from Rust like the desugar errors.
+#[test]
+fn csg_rejects_bad_operands() {
+    let ball = "(sphere {:center [0 0 0] :r 1})";
+    let tri = "(triangle {:vertices [[0 0 0] [1 0 0] [0 1 0]]})";
+    let mesh = format!(
+        "(load-obj {:?} (surface {{:color [1 1 1]}}))",
+        sdl_dir().join("load_obj_fixture.obj").to_string_lossy()
+    );
+    // (source, text the error must contain, description)
+    let cases: Vec<(String, &str, &str)> = vec![
+        (format!("(difference {})", ball), "at least 2", "difference: one operand"),
+        ("(intersection)".to_string(), "at least 2", "intersection: no operands"),
+        (format!("(difference {} {})", ball, tri), "operand 2", "difference: triangle operand"),
+        (format!("(intersection {} {})", tri, ball), "operand 1", "intersection: triangle operand"),
+        (format!("(difference {} (translate [1 0 0] (group [{} {}])))", ball, ball, tri),
+         "not a solid", "difference: triangle inside a transformed group"),
+        (format!("(difference {} {} {})", ball, ball, mesh), "operand 3", "difference: mesh operand"),
+    ];
+    for (source, expected, what) in cases.iter() {
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(source, "csg_bad_operands.lisp", &env);
         }));
         let payload = match result {
             Ok(_) => panic!("must reject {}: {}", what, source),
@@ -510,6 +558,11 @@ fn cone_test_scene_loads() {
 #[test]
 fn cornell_box_scene_loads() {
     assert_scene_loads("cornell_box.lisp", "cornell-box-scene");
+}
+
+#[test]
+fn csg_test_scene_loads() {
+    assert_scene_loads("csg_test.lisp", "csg-test-scene");
 }
 
 #[test]

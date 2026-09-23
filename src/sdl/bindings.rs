@@ -41,9 +41,9 @@ use crate::render::geometry::{Point, lenp, normalizep, EPSILON};
 use crate::render::mesh::load_obj;
 use crate::render::render;
 use crate::render::shapes::{
-    bounded, bounded_with, group, rotate_axis, rotate_x, rotate_y, rotate_z,
-    scale, surfaced, transform, translate, AABB, Cone, Cuboid, Cylinder, Plane,
-    Shape, Sphere, Triangle,
+    bounded, bounded_with, difference, group, intersection, rotate_axis,
+    rotate_x, rotate_y, rotate_z, scale, surfaced, transform, translate, AABB,
+    Cone, Cuboid, Cylinder, Plane, Shape, Sphere, Triangle,
 };
 use crate::render::transform::Affine;
 use crate::render::{Camera, HeatmapTargets, Light, Scene, Surface, ViewMode};
@@ -100,6 +100,10 @@ pub fn install(env: &EnvRef) {
     define_native(env, "bounded", builtin_bounded);
     define_native(env, "bounded-with", builtin_bounded_with);
     define_native(env, "with-surface", builtin_with_surface);
+
+    // Constructive solid geometry.
+    define_native(env, "difference", builtin_difference);
+    define_native(env, "intersection", builtin_intersection);
 
     // Affine transform constructors. Mirror the methods on
     // `Affine` so `transform` can be used directly from script.
@@ -1015,6 +1019,68 @@ fn builtin_with_surface(args: &[Value], pos: &Position) -> Value {
     let surface = require_surface(&args[0], "with-surface surface", pos);
     let child = require_shape_value(&args[1], "with-surface child", pos);
     Value::Shape(Rc::new(surfaced(surface, child)))
+}
+
+// ---------------------------------------------------------------------------
+// Constructive solid geometry
+// ---------------------------------------------------------------------------
+
+/// Extract the CSG operands from `args`: at least two, each a solid
+/// shape. Triangles and `load-obj` meshes have no inside, so they're
+/// rejected here with a positioned error rather than reaching the host
+/// constructors' assert.
+fn require_csg_operands(args: &[Value], name: &str, pos: &Position) -> Vec<Shape> {
+    if args.len() < 2 {
+        sdl_panic!(
+            pos.clone(),
+            "{} takes at least 2 arguments (got {})",
+            name,
+            args.len()
+        );
+    }
+    args.iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let shape = require_shape_value(v, &format!("{} operand", name), pos);
+            if !shape.is_solid() {
+                sdl_panic!(
+                    pos.clone(),
+                    "{} operand {} ({}) is not a solid: triangles and meshes have no inside",
+                    name,
+                    i + 1,
+                    v
+                );
+            }
+            shape
+        })
+        .collect()
+}
+
+/// `(difference a b c ...)` — the points inside `a` and not inside any
+/// of `b`, `c`, .... POV-Ray's n-ary form: the operands after the first
+/// are combined into one `group` (a union) and subtracted in a single
+/// operation. Faces cut by an operand show that operand's surface if it
+/// has one, otherwise an enclosing `with-surface`'s.
+fn builtin_difference(args: &[Value], pos: &Position) -> Value {
+    let mut operands = require_csg_operands(args, "difference", pos);
+    let rest = operands.split_off(1);
+    let a = operands.pop().unwrap();
+    let b = if rest.len() == 1 {
+        rest.into_iter().next().unwrap()
+    } else {
+        group(rest)
+    };
+    Value::Shape(Rc::new(difference(a, b)))
+}
+
+/// `(intersection a b c ...)` — the points inside every operand.
+/// Folds left: `(intersection (intersection a b) c)`.
+fn builtin_intersection(args: &[Value], pos: &Position) -> Value {
+    let operands = require_csg_operands(args, "intersection", pos);
+    let mut iter = operands.into_iter();
+    let first = iter.next().unwrap();
+    let result = iter.fold(first, intersection);
+    Value::Shape(Rc::new(result))
 }
 
 // ---------------------------------------------------------------------------

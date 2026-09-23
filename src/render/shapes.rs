@@ -143,6 +143,20 @@ impl AABB {
         AABB { min, max }
     }
 
+    /// The overlap of `self` and `other`. If they don't overlap, the
+    /// result is a degenerate (zero-volume) box at the corner where
+    /// they come closest rather than an inverted one, so it stays a
+    /// valid, if useless, bound.
+    pub fn intersection(&self, other: &AABB) -> AABB {
+        let mut min = [0.0; 3];
+        let mut max = [0.0; 3];
+        for i in 0..3 {
+            min[i] = self.min[i].max(other.min[i]);
+            max[i] = self.max[i].min(other.max[i]).max(min[i]);
+        }
+        AABB { min, max }
+    }
+
     /// Smallest AABB that encloses both `self` and `other`. Used to
     /// compute group bounds by accumulating across children.
     pub fn union(&self, other: &AABB) -> AABB {
@@ -291,6 +305,7 @@ pub enum Shape {
     Transform(Box<Transformed>),
     Bounded(Box<Bounded>),
     Surfaced(Box<SurfacedShape>),
+    Csg(Box<Csg>),
     Light(Light),
 }
 
@@ -336,6 +351,30 @@ pub struct SurfacedShape {
     pub child: Shape,
 }
 
+/// Which CSG operation a `Shape::Csg` node performs. There's no
+/// `Union`: a union of solids is just a `Group`, which already
+/// behaves as one both for `hit_test` and for `spans`.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum CsgOp {
+    /// Points inside `a` and not inside `b`.
+    Difference,
+    /// Points inside both `a` and `b`.
+    Intersection,
+}
+
+/// Storage for a `Shape::Csg` node: a binary CSG operation on two solid
+/// operands. Both operands are solids (`Shape::is_solid`), which the
+/// `difference` / `intersection` constructors enforce. The node answers
+/// `hit_test` by combining its operands' span lists (see "CSG span
+/// query" below) and returning the first boundary in front of the ray.
+/// It also answers `spans`, so CSG nodes nest.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Csg {
+    pub op: CsgOp,
+    pub a: Shape,
+    pub b: Shape,
+}
+
 impl From<Sphere> for Shape {
     fn from(s: Sphere) -> Self { Shape::Sphere(s) }
 }
@@ -377,6 +416,7 @@ impl Hittable for Shape {
             Shape::Transform(t)     => t.hit_test(ray),
             Shape::Bounded(b)       => b.hit_test(ray),
             Shape::Surfaced(s)      => s.hit_test(ray),
+            Shape::Csg(c)           => c.hit_test(ray),
             // Lights are invisible to every ray (primary, shadow,
             // reflection). The renderer reaches them through
             // `Shape::collect_lights` at render entry, not through
@@ -602,6 +642,19 @@ impl Shape {
             }
             Shape::Bounded(b) => Some(b.bounds),
             Shape::Surfaced(s) => s.child.bounds(),
+            Shape::Csg(c) => match c.op {
+                // `a − b` never extends beyond `a`.
+                CsgOp::Difference => c.a.bounds(),
+                // `a ∩ b` lies inside both bounds, so their overlap
+                // bounds it. An unbounded operand (a half-space plane)
+                // doesn't constrain it.
+                CsgOp::Intersection => match (c.a.bounds(), c.b.bounds()) {
+                    (Some(a), Some(b)) => Some(a.intersection(&b)),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                },
+            },
             Shape::Light(l) => {
                 // A point light has zero extent — its bound is the
                 // degenerate AABB containing only its location. We
@@ -705,6 +758,12 @@ impl Shape {
                 // can't pick up the wrapper's surface anyway.
                 s.child.collect_lights(world_from_local, out);
             }
+            Shape::Csg(c) => {
+                // A light inside CSG geometry is just positioned there;
+                // the CSG operation doesn't affect it.
+                c.a.collect_lights(world_from_local, out);
+                c.b.collect_lights(world_from_local, out);
+            }
             // Leaf geometry contains no lights.
             Shape::Sphere(_)
             | Shape::Plane(_)
@@ -750,6 +809,10 @@ impl Shape {
             Shape::Transform(t) => t.child.validate_surfaces(has_surfaced_ancestor),
             Shape::Bounded(b) => b.child.validate_surfaces(has_surfaced_ancestor),
             Shape::Surfaced(s) => s.child.validate_surfaces(true),
+            Shape::Csg(c) => {
+                c.a.validate_surfaces(has_surfaced_ancestor)?;
+                c.b.validate_surfaces(has_surfaced_ancestor)
+            }
             // Lights don't have surfaces (and aren't hit-tested), so
             // they're trivially valid regardless of ancestry.
             Shape::Light(_) => Ok(()),
@@ -966,6 +1029,28 @@ pub fn surfaced(surface: Surface, child: impl Into<Shape>) -> Shape {
 /// impls take care of promoting a leaf primitive into the right
 /// `Shape` variant automatically, so callers can write
 /// `translate([1,0,0], Sphere { ... })` without an explicit wrap.
+/// `a − b`: the points inside `a` and not inside `b`. Faces cut by `b`
+/// show `b`'s surface if it has one, otherwise an enclosing
+/// `Surfaced` wrapper's (the same "innermost wins" rule as any leaf).
+///
+/// Panics if either operand isn't a solid (see `Shape::is_solid`);
+/// the SDL binding checks first so scripts get a positioned error.
+pub fn difference(a: impl Into<Shape>, b: impl Into<Shape>) -> Shape {
+    csg(CsgOp::Difference, a.into(), b.into())
+}
+
+/// `a ∩ b`: the points inside both `a` and `b`. Panics if either
+/// operand isn't a solid (see `Shape::is_solid`).
+pub fn intersection(a: impl Into<Shape>, b: impl Into<Shape>) -> Shape {
+    csg(CsgOp::Intersection, a.into(), b.into())
+}
+
+fn csg(op: CsgOp, a: Shape, b: Shape) -> Shape {
+    assert!(a.is_solid() && b.is_solid(),
+            "CSG operands must be solids (triangles and meshes have no inside)");
+    Shape::Csg(Box::new(Csg { op, a, b }))
+}
+
 pub fn transform(forward: Affine, child: impl Into<Shape>) -> Shape {
     let inverse = forward.inverse();
     // normal_xform = (forward.linear)^{-T} = transpose(inverse.linear)
@@ -1438,5 +1523,1095 @@ impl Hittable for Cone {
             normal,
             surface: self.surface,
         })
+    }
+}
+
+// ---------------------------------------------------------------------
+// CSG span query
+// ---------------------------------------------------------------------
+//
+// Phase 1 of the "CSG: implementation plan" in CLAUDE.md. `hit_test`
+// answers "where does this ray first hit the surface?"; CSG needs to
+// know, at every point along the ray, whether the ray is *inside* the
+// solid. Each solid describes that as a sorted list of `Span`s — the
+// parameter intervals `[enter.t, exit.t]` where the ray is inside it —
+// and CSG operators combine span lists with interval set operations.
+//
+// Spans cover the whole line, negative `t` included: a span that starts
+// behind the ray origin is how "the ray starts inside this solid" is
+// represented. Endpoints can be infinite (a `Plane` is a half-space);
+// infinite endpoints never become hits.
+//
+// The renderer reaches this code only through `Shape::Csg` nodes, so
+// scenes without CSG render exactly as they did before it existed.
+
+/// One boundary crossing of a solid along a ray. Carries what
+/// `hit_test` would return at that point: the ray parameter `t`, the
+/// solid's *outward* normal there, and the surface (`Option` so the
+/// `Surfaced` "innermost wins" rule keeps working). The hit point
+/// isn't stored; it's recomputed from the ray and `t` when a hit is
+/// returned, the same way `Transformed::hit_test` does it.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct SpanEnd {
+    pub t: f64,
+    pub normal: Point,
+    pub surface: Option<Surface>,
+}
+
+/// One interval `[enter.t, exit.t]` along a ray where the ray is inside
+/// a solid. `enter.t < exit.t` always holds; either end may be infinite.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct Span {
+    pub enter: SpanEnd,
+    pub exit: SpanEnd,
+}
+
+impl SpanEnd {
+    /// The same crossing seen from the other side of the surface. Used
+    /// by `span_difference`: where a subtracted solid B carves into A,
+    /// the new boundary is B's surface viewed from inside B, so its
+    /// outward normal (as a boundary of `A − B`) points the other way.
+    fn flipped(self) -> SpanEnd {
+        SpanEnd { normal: negp(self.normal), ..self }
+    }
+
+    fn fill_surface(&mut self, surface: Surface) {
+        if self.surface.is_none() {
+            self.surface = Some(surface);
+        }
+    }
+}
+
+/// Build the single span of a *convex* solid from its candidate surface
+/// crossings (in any order): the ray is inside between the smallest and
+/// largest crossing. Fewer than two distinct crossings — a miss, or a
+/// ray grazing an edge — gives no span.
+fn convex_span(candidates: &[(f64, Point)], surface: Option<Surface>) -> Option<Span> {
+    let mut lo: Option<(f64, Point)> = None;
+    let mut hi: Option<(f64, Point)> = None;
+    for &(t, n) in candidates {
+        if lo.map_or(true, |(lt, _)| t < lt) {
+            lo = Some((t, n));
+        }
+        if hi.map_or(true, |(ht, _)| t > ht) {
+            hi = Some((t, n));
+        }
+    }
+    match (lo, hi) {
+        (Some((t0, n0)), Some((t1, n1))) if t0 < t1 => Some(Span {
+            enter: SpanEnd { t: t0, normal: n0, surface },
+            exit: SpanEnd { t: t1, normal: n1, surface },
+        }),
+        _ => None,
+    }
+}
+
+impl Shape {
+    /// Whether this shape encloses a volume, and so can be a CSG
+    /// operand. Every primitive is a solid except `Triangle`, which is
+    /// a surface with no inside; that includes meshes from `load_obj`,
+    /// which are groups of triangles. `Plane` counts as a solid: a
+    /// half-space. A `Group` is solid if all its children are.
+    /// `Light`s don't enclose anything but don't break solidity either,
+    /// so a light can sit inside a CSG operand.
+    pub fn is_solid(&self) -> bool {
+        match self {
+            Shape::Triangle(_) => false,
+            Shape::Group(children) => children.iter().all(Shape::is_solid),
+            Shape::Transform(t) => t.child.is_solid(),
+            Shape::Bounded(b) => b.child.is_solid(),
+            Shape::Surfaced(s) => s.child.is_solid(),
+            Shape::Sphere(_)
+            | Shape::Plane(_)
+            | Shape::Cuboid(_)
+            | Shape::Cylinder(_)
+            | Shape::Cone(_)
+            | Shape::Csg(_)
+            | Shape::Light(_) => true,
+        }
+    }
+
+    /// Append this shape's spans along `ray` to `out`: sorted by `t`,
+    /// non-overlapping, covering the whole line (negative `t`
+    /// included). See the section comment above.
+    ///
+    /// `Triangle`s aren't solids and contribute nothing; the CSG
+    /// constructors refuse them as operands (see `is_solid`), so a
+    /// triangle never reaches this from a `Csg` node. `Light`s
+    /// contribute nothing.
+    pub fn spans(&self, ray: &Vector, out: &mut Vec<Span>) {
+        match self {
+            Shape::Sphere(s)   => out.extend(s.span(ray)),
+            Shape::Plane(p)    => out.extend(p.span(ray)),
+            Shape::Cuboid(c)   => out.extend(c.span(ray)),
+            Shape::Cylinder(c) => out.extend(c.span(ray)),
+            Shape::Cone(c)     => out.extend(c.span(ray)),
+            // Not a solid: a triangle has no inside.
+            Shape::Triangle(_) => {}
+            Shape::Light(_)    => {}
+            Shape::Group(children) => {
+                // A group is the union of its children. Each child's
+                // list is already sorted and non-overlapping, but lists
+                // from different children can overlap, so normalize.
+                let mut all = Vec::new();
+                for child in children {
+                    child.spans(ray, &mut all);
+                }
+                out.extend(span_union_of(all));
+            }
+            Shape::Transform(t) => {
+                // Same ray transform as `Transformed::hit_test`,
+                // deliberately *not* renormalizing the local direction,
+                // so `t` is identical in local and world space and the
+                // span endpoints need no conversion. Only the normals
+                // go back through the inverse-transpose.
+                let local_ray = Vector {
+                    start: t.inverse.transform_point(ray.start),
+                    delta: t.inverse.transform_vector(ray.delta),
+                };
+                let first = out.len();
+                t.child.spans(&local_ray, out);
+                for span in &mut out[first..] {
+                    span.enter.normal = normalizep(mat3_apply(t.normal_xform, span.enter.normal));
+                    span.exit.normal = normalizep(mat3_apply(t.normal_xform, span.exit.normal));
+                }
+            }
+            Shape::Bounded(b) => {
+                // `AABB::intersects` keeps any box the ray is in front
+                // of *or inside*, and only rejects boxes entirely
+                // behind the origin. Spans behind the origin can't
+                // affect anything at `t > 0`, so this early-out is as
+                // valid for spans as it is for `hit_test`.
+                if b.bounds.intersects(ray) {
+                    b.child.spans(ray, out);
+                }
+            }
+            Shape::Csg(c) => out.extend(c.spans(ray)),
+            Shape::Surfaced(s) => {
+                let first = out.len();
+                s.child.spans(ray, out);
+                for span in &mut out[first..] {
+                    span.enter.fill_surface(s.surface);
+                    span.exit.fill_surface(s.surface);
+                }
+            }
+        }
+    }
+}
+
+impl Csg {
+    /// This node's spans along `ray`: the operands' span lists
+    /// combined by the node's set operation.
+    fn spans(&self, ray: &Vector) -> Vec<Span> {
+        let mut a = Vec::new();
+        self.a.spans(ray, &mut a);
+        // Both operations are empty wherever `a` is, so a ray that
+        // misses `a` needn't evaluate `b` at all.
+        if a.is_empty() {
+            return a;
+        }
+        let mut b = Vec::new();
+        self.b.spans(ray, &mut b);
+        match self.op {
+            CsgOp::Difference => span_difference(&a, &b),
+            CsgOp::Intersection => span_intersection(&a, &b),
+        }
+    }
+
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        first_span_hit(&self.spans(ray), ray)
+    }
+}
+
+/// The hit a ray sees on a solid described by `spans`: the first finite
+/// endpoint with `t > EPSILON`. Usually that's an `enter`; it's an
+/// `exit` when the ray starts inside the solid, and the normal is then
+/// the solid's outward normal, facing away from the ray (the same thing
+/// the primitives' `hit_test` would report for a back face).
+///
+/// `Csg::hit_test` is this applied to the node's spans.
+pub fn first_span_hit(spans: &[Span], ray: &Vector) -> Option<RayHit> {
+    for span in spans {
+        for end in [span.enter, span.exit] {
+            if end.t > EPSILON && end.t.is_finite() {
+                return Some(RayHit {
+                    distance: end.t,
+                    hit_point: ray_location(ray, end.t),
+                    normal: end.normal,
+                    surface: end.surface,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Union of an arbitrary collection of spans (any order, possibly
+/// overlapping) as a sorted, non-overlapping list. Touching spans
+/// coalesce, so the shared face between two abutting solids disappears.
+fn span_union_of(mut spans: Vec<Span>) -> Vec<Span> {
+    spans.sort_by(|a, b| a.enter.t.total_cmp(&b.enter.t));
+    let mut result: Vec<Span> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match result.last_mut() {
+            Some(last) if span.enter.t <= last.exit.t => {
+                if span.exit.t > last.exit.t {
+                    last.exit = span.exit;
+                }
+            }
+            _ => result.push(span),
+        }
+    }
+    result
+}
+
+/// Union of two sorted, non-overlapping span lists.
+pub fn span_union(a: &[Span], b: &[Span]) -> Vec<Span> {
+    span_union_of(a.iter().chain(b.iter()).copied().collect())
+}
+
+/// Intersection of two sorted, non-overlapping span lists: the ranges
+/// inside both. Each result endpoint is the crossing that bounds the
+/// overlap (the later of the two enters, the earlier of the two exits),
+/// so it carries the right solid's normal and surface.
+pub fn span_intersection(a: &[Span], b: &[Span]) -> Vec<Span> {
+    let mut result = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        let enter = if a[i].enter.t >= b[j].enter.t { a[i].enter } else { b[j].enter };
+        let exit = if a[i].exit.t <= b[j].exit.t { a[i].exit } else { b[j].exit };
+        if enter.t < exit.t {
+            result.push(Span { enter, exit });
+        }
+        // Advance whichever span ends first; the other may still
+        // overlap the next span of the list that advanced.
+        if a[i].exit.t <= b[j].exit.t {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    result
+}
+
+/// Difference of two sorted, non-overlapping span lists: the ranges
+/// inside `a` but not inside `b`. Boundaries contributed by `b` are
+/// flipped (see `SpanEnd::flipped`) and keep `b`'s surface.
+pub fn span_difference(a: &[Span], b: &[Span]) -> Vec<Span> {
+    let mut result = Vec::new();
+    // `j` skips `b` spans that end before the current `a` span starts.
+    // It never skips past a `b` span that might still overlap a later
+    // `a` span, since both lists are sorted.
+    let mut j = 0;
+    for span in a {
+        while j < b.len() && b[j].exit.t <= span.enter.t {
+            j += 1;
+        }
+        let mut enter = span.enter;
+        let mut k = j;
+        while k < b.len() && b[k].enter.t < span.exit.t {
+            let cut = b[k];
+            if cut.enter.t > enter.t {
+                result.push(Span { enter, exit: cut.enter.flipped() });
+            }
+            if cut.exit.t > enter.t {
+                enter = cut.exit.flipped();
+            }
+            k += 1;
+        }
+        if enter.t < span.exit.t {
+            result.push(Span { enter, exit: span.exit });
+        }
+    }
+    result
+}
+
+impl Sphere {
+    fn span(&self, ray: &Vector) -> Option<Span> {
+        // Same quadratic as `hit_test`, keeping both roots and not
+        // rejecting negative `t`. A tangent ray (zero discriminant)
+        // touches the sphere at one point and has no inside.
+        let oc = subp(ray.start, self.center);
+        let a = dotp(ray.delta, ray.delta);
+        let b = 2.0 * dotp(oc, ray.delta);
+        let c = dotp(oc, oc) - self.r * self.r;
+        let discriminant = b * b - 4.0 * a * c;
+        if discriminant <= 0.0 {
+            return None;
+        }
+        let sqrt_disc = discriminant.sqrt();
+        let t0 = (-b - sqrt_disc) / (2.0 * a);
+        let t1 = (-b + sqrt_disc) / (2.0 * a);
+        let normal_at = |t| normalizep(subp(ray_location(ray, t), self.center));
+        Some(Span {
+            enter: SpanEnd { t: t0, normal: normal_at(t0), surface: self.surface },
+            exit: SpanEnd { t: t1, normal: normal_at(t1), surface: self.surface },
+        })
+    }
+}
+
+impl Plane {
+    fn span(&self, ray: &Vector) -> Option<Span> {
+        // A plane is a half-space: the solid side is the one opposite
+        // `normal`, i.e. the points where `(P - p0)·normal <= 0`.
+        let side = |t: f64| SpanEnd { t, normal: self.normal, surface: self.surface };
+        let denom = dotp(self.normal, ray.delta);
+        if denom.abs() < EPSILON {
+            // Parallel to the plane: the ray is inside for its whole
+            // length or not at all.
+            let inside = dotp(subp(ray.start, self.p0), self.normal) <= 0.0;
+            return inside.then(|| Span {
+                enter: side(f64::NEG_INFINITY),
+                exit: side(f64::INFINITY),
+            });
+        }
+        let t = dotp(subp(self.p0, ray.start), self.normal) / denom;
+        if denom < 0.0 {
+            // Moving against the normal: enters the solid side at `t`.
+            Some(Span { enter: side(t), exit: side(f64::INFINITY) })
+        } else {
+            Some(Span { enter: side(f64::NEG_INFINITY), exit: side(t) })
+        }
+    }
+}
+
+impl Cuboid {
+    fn span(&self, ray: &Vector) -> Option<Span> {
+        // Slab method, as in `hit_test`, but tracking the exit face as
+        // well as the entry face and without rejecting negative `t`.
+        let mut t_enter = f64::NEG_INFINITY;
+        let mut t_exit = f64::INFINITY;
+        let mut enter_normal: Point = [0.0, 0.0, 0.0];
+        let mut exit_normal: Point = [0.0, 0.0, 0.0];
+
+        for i in 0..3 {
+            let half = self.size[i] * 0.5;
+            let min = self.center[i] - half;
+            let max = self.center[i] + half;
+            let origin = ray.start[i];
+            let dir = ray.delta[i];
+
+            if dir.abs() < EPSILON {
+                if origin < min || origin > max {
+                    return None;
+                }
+                continue;
+            }
+
+            let inv = 1.0 / dir;
+            let mut t1 = (min - origin) * inv;
+            let mut t2 = (max - origin) * inv;
+            // Moving in +axis: enter through the min face (normal
+            // -axis), exit through the max face (+axis). Moving in
+            // -axis, the other way round.
+            let mut sign = -1.0;
+            if t1 > t2 {
+                std::mem::swap(&mut t1, &mut t2);
+                sign = 1.0;
+            }
+            if t1 > t_enter {
+                t_enter = t1;
+                enter_normal = [0.0, 0.0, 0.0];
+                enter_normal[i] = sign;
+            }
+            if t2 < t_exit {
+                t_exit = t2;
+                exit_normal = [0.0, 0.0, 0.0];
+                exit_normal[i] = -sign;
+            }
+        }
+
+        // At least one axis constrains `t` (the direction is nonzero),
+        // so both ends are finite here.
+        (t_enter < t_exit).then_some(Span {
+            enter: SpanEnd { t: t_enter, normal: enter_normal, surface: self.surface },
+            exit: SpanEnd { t: t_exit, normal: exit_normal, surface: self.surface },
+        })
+    }
+}
+
+impl Cylinder {
+    fn span(&self, ray: &Vector) -> Option<Span> {
+        // The same side and cap tests as `hit_test`, keeping every
+        // valid crossing instead of the nearest one in front. The
+        // cylinder is convex, so the span runs from the smallest
+        // crossing to the largest.
+        let axis = subp(self.p1, self.p0);
+        let axis_len = lenp(axis);
+        if axis_len < EPSILON {
+            return None;
+        }
+        let axis_unit = scalep(axis, 1.0 / axis_len);
+
+        let delta = subp(ray.start, self.p0);
+        let d_dot_a = dotp(ray.delta, axis_unit);
+        let delta_dot_a = dotp(delta, axis_unit);
+
+        let mut candidates: Vec<(f64, Point)> = Vec::with_capacity(4);
+
+        // Side surface.
+        let d_perp = subp(ray.delta, scalep(axis_unit, d_dot_a));
+        let delta_perp = subp(delta, scalep(axis_unit, delta_dot_a));
+        let a = dotp(d_perp, d_perp);
+        if a >= EPSILON {
+            let b = 2.0 * dotp(delta_perp, d_perp);
+            let c = dotp(delta_perp, delta_perp) - self.r * self.r;
+            let discriminant = b * b - 4.0 * a * c;
+            if discriminant > 0.0 {
+                let sqrt_disc = discriminant.sqrt();
+                for t in [(-b - sqrt_disc) / (2.0 * a), (-b + sqrt_disc) / (2.0 * a)] {
+                    let s = delta_dot_a + t * d_dot_a;
+                    if (0.0..=axis_len).contains(&s) {
+                        let center_on_axis = addp(self.p0, scalep(axis_unit, s));
+                        let normal = normalizep(subp(ray_location(ray, t), center_on_axis));
+                        candidates.push((t, normal));
+                    }
+                }
+            }
+        }
+
+        // End caps.
+        let r_sq = self.r * self.r;
+        for (cap_center, cap_normal) in [(self.p0, negp(axis_unit)), (self.p1, axis_unit)] {
+            let denom = dotp(cap_normal, ray.delta);
+            if denom.abs() < EPSILON {
+                continue;
+            }
+            let t = dotp(subp(cap_center, ray.start), cap_normal) / denom;
+            let radial = subp(ray_location(ray, t), cap_center);
+            if dotp(radial, radial) <= r_sq {
+                candidates.push((t, cap_normal));
+            }
+        }
+
+        convex_span(&candidates, self.surface)
+    }
+}
+
+impl Cone {
+    fn span(&self, ray: &Vector) -> Option<Span> {
+        // The same lateral and base-cap tests as `hit_test`, keeping
+        // every valid crossing. A closed cone is convex, so the span
+        // runs from the smallest crossing to the largest.
+        let axis = subp(self.p0, self.p1);
+        let axis_len = lenp(axis);
+        if axis_len < EPSILON || self.r < EPSILON {
+            return None;
+        }
+        let axis_unit = scalep(axis, 1.0 / axis_len);
+        let apex = self.p1;
+
+        let axis_len_sq = axis_len * axis_len;
+        let cos2 = axis_len_sq / (axis_len_sq + self.r * self.r);
+
+        let co = subp(ray.start, apex);
+        let dv = dotp(ray.delta, axis_unit);
+        let cv = dotp(co, axis_unit);
+        let dd = dotp(ray.delta, ray.delta);
+        let dc = dotp(ray.delta, co);
+        let cc = dotp(co, co);
+
+        let a = dv * dv - cos2 * dd;
+        let b = 2.0 * (dv * cv - cos2 * dc);
+        let c = cv * cv - cos2 * cc;
+
+        let mut roots: [Option<f64>; 2] = [None, None];
+        if a.abs() < EPSILON {
+            if b.abs() >= EPSILON {
+                roots[0] = Some(-c / b);
+            }
+        } else {
+            // `>= 0`, not `> 0`: a ray straight down the axis passes
+            // through the apex, where the root is double. A tangent
+            // graze also gives a double root, but with no other
+            // crossing `convex_span` discards it.
+            let disc = b * b - 4.0 * a * c;
+            if disc >= 0.0 {
+                let sqrt_disc = disc.sqrt();
+                roots[0] = Some((-b - sqrt_disc) / (2.0 * a));
+                roots[1] = Some((-b + sqrt_disc) / (2.0 * a));
+            }
+        }
+
+        let mut candidates: Vec<(f64, Point)> = Vec::with_capacity(3);
+        let slope = self.r / axis_len;
+        for t in roots.iter().flatten().copied() {
+            // `s >= 0` discards the double cone's second nappe behind
+            // the apex; `s <= axis_len` clips at the base plane.
+            let s = cv + t * dv;
+            if !(0.0..=axis_len).contains(&s) {
+                continue;
+            }
+            let apex_to_p = subp(ray_location(ray, t), apex);
+            let perp = subp(apex_to_p, scalep(axis_unit, s));
+            let perp_len = lenp(perp);
+            // At the apex tip the lateral normal is undefined.
+            // `hit_test` skips such a hit; here dropping it could leave
+            // the span without an endpoint, so point the normal out
+            // through the apex instead.
+            let normal = if perp_len < EPSILON {
+                negp(axis_unit)
+            } else {
+                normalizep(subp(scalep(perp, 1.0 / perp_len), scalep(axis_unit, slope)))
+            };
+            candidates.push((t, normal));
+        }
+
+        // Base cap at `p0`, outward normal `+axis_unit`.
+        let denom = dotp(axis_unit, ray.delta);
+        if denom.abs() >= EPSILON {
+            let t = dotp(subp(self.p0, ray.start), axis_unit) / denom;
+            let radial = subp(ray_location(ray, t), self.p0);
+            if dotp(radial, radial) <= self.r * self.r {
+                candidates.push((t, axis_unit));
+            }
+        }
+
+        convex_span(&candidates, self.surface)
+    }
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::*;
+
+    const TOL: f64 = 1e-9;
+
+    fn ray(start: Point, delta: Point) -> Vector {
+        Vector { start, delta }
+    }
+
+    fn surface(r: f64) -> Surface {
+        Surface {
+            color: [r, 0.0, 0.0],
+            ambient: 0.2,
+            specular: 0.5,
+            light: 0.6,
+            checked: false,
+            reflection: 0.0,
+            transparency: 0.0,
+            metallic: false,
+        }
+    }
+
+    fn spans_of(shape: &Shape, r: &Vector) -> Vec<Span> {
+        let mut out = Vec::new();
+        shape.spans(r, &mut out);
+        out
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < TOL
+    }
+
+    fn close_p(a: Point, b: Point) -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() < 1e-7)
+    }
+
+    fn sphere(center: Point, r: f64) -> Shape {
+        Shape::Sphere(Sphere { center, r, surface: None })
+    }
+
+    fn cuboid(center: Point, size: Point) -> Shape {
+        Shape::Cuboid(Cuboid { center, size, surface: None })
+    }
+
+    fn cylinder(p0: Point, p1: Point, r: f64) -> Shape {
+        Shape::Cylinder(Cylinder { p0, p1, r, surface: None })
+    }
+
+    fn cone(p0: Point, p1: Point, r: f64) -> Shape {
+        Shape::Cone(Cone { p0, p1, r, surface: None })
+    }
+
+    fn assert_single_span(spans: &[Span], t0: f64, n0: Point, t1: f64, n1: Point) {
+        assert_eq!(spans.len(), 1, "expected one span, got {:?}", spans);
+        let s = spans[0];
+        assert!(close(s.enter.t, t0), "enter t {} != {}", s.enter.t, t0);
+        assert!(close(s.exit.t, t1), "exit t {} != {}", s.exit.t, t1);
+        assert!(close_p(s.enter.normal, n0), "enter normal {:?} != {:?}", s.enter.normal, n0);
+        assert!(close_p(s.exit.normal, n1), "exit normal {:?} != {:?}", s.exit.normal, n1);
+    }
+
+    // --- Per-primitive spans ----------------------------------------
+
+    #[test]
+    fn sphere_through_center() {
+        let s = sphere([0.0, 0.0, 0.0], 1.0);
+        let spans = spans_of(&s, &ray([0.0, 0.0, -5.0], [0.0, 0.0, 1.0]));
+        assert_single_span(&spans, 4.0, [0.0, 0.0, -1.0], 6.0, [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn sphere_from_inside_and_miss() {
+        let s = sphere([0.0, 0.0, 0.0], 1.0);
+        let spans = spans_of(&s, &ray([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
+        assert_single_span(&spans, -1.0, [-1.0, 0.0, 0.0], 1.0, [1.0, 0.0, 0.0]);
+        assert!(spans_of(&s, &ray([0.0, 5.0, -5.0], [0.0, 0.0, 1.0])).is_empty());
+    }
+
+    #[test]
+    fn cuboid_through_center_and_from_inside() {
+        let c = cuboid([0.0, 0.0, 0.0], [2.0, 4.0, 6.0]);
+        let spans = spans_of(&c, &ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
+        assert_single_span(&spans, 4.0, [-1.0, 0.0, 0.0], 6.0, [1.0, 0.0, 0.0]);
+        let spans = spans_of(&c, &ray([0.0, 0.0, 0.0], [0.0, -1.0, 0.0]));
+        assert_single_span(&spans, -2.0, [0.0, 1.0, 0.0], 2.0, [0.0, -1.0, 0.0]);
+        assert!(spans_of(&c, &ray([5.0, 0.0, 0.0], [0.0, 1.0, 0.0])).is_empty());
+    }
+
+    #[test]
+    fn cylinder_across_and_along_axis() {
+        let c = cylinder([0.0, 0.0, -1.0], [0.0, 0.0, 1.0], 0.5);
+        // Across: in and out through the curved side.
+        let spans = spans_of(&c, &ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
+        assert_single_span(&spans, 4.5, [-1.0, 0.0, 0.0], 5.5, [1.0, 0.0, 0.0]);
+        // Along the axis: in and out through the caps.
+        let spans = spans_of(&c, &ray([0.0, 0.0, -5.0], [0.0, 0.0, 1.0]));
+        assert_single_span(&spans, 4.0, [0.0, 0.0, -1.0], 6.0, [0.0, 0.0, 1.0]);
+        // In through a cap, out through the side.
+        let spans = spans_of(&c, &ray([0.0, 0.0, -2.0], [0.25, 0.0, 1.0]));
+        assert_eq!(spans.len(), 1);
+        assert!(close_p(spans[0].enter.normal, [0.0, 0.0, -1.0]));
+        assert!(close_p(spans[0].exit.normal, [1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn cone_across_base_and_lateral() {
+        // Base at z=0 (radius 1), apex at z=1. 45° half-angle.
+        let c = cone([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0);
+        // Up the axis: in through the base, out at the apex.
+        let spans = spans_of(&c, &ray([0.0, 0.0, -5.0], [0.0, 0.0, 1.0]));
+        assert_eq!(spans.len(), 1);
+        assert!(close(spans[0].enter.t, 5.0) && close(spans[0].exit.t, 6.0));
+        assert!(close_p(spans[0].enter.normal, [0.0, 0.0, -1.0]));
+        // Across at z=0.5, where the radius is 0.5: through the
+        // lateral surface both ways, normals tilted toward the apex.
+        let spans = spans_of(&c, &ray([-5.0, 0.0, 0.5], [1.0, 0.0, 0.0]));
+        let h = std::f64::consts::FRAC_1_SQRT_2;
+        assert_single_span(&spans, 4.5, [-h, 0.0, h], 5.5, [h, 0.0, h]);
+        // Above the apex: the second nappe of the double cone must not
+        // show up.
+        assert!(spans_of(&c, &ray([-5.0, 0.0, 1.5], [1.0, 0.0, 0.0])).is_empty());
+    }
+
+    #[test]
+    fn plane_is_a_half_space() {
+        // Solid below z=0 (opposite the +z normal).
+        let p = Shape::Plane(Plane { normal: [0.0, 0.0, 1.0], p0: [0.0, 0.0, 0.0], surface: None });
+        let down = spans_of(&p, &ray([0.0, 0.0, 5.0], [0.0, 0.0, -1.0]));
+        assert_eq!(down.len(), 1);
+        assert!(close(down[0].enter.t, 5.0) && down[0].exit.t == f64::INFINITY);
+        let up = spans_of(&p, &ray([0.0, 0.0, 5.0], [0.0, 0.0, 1.0]));
+        assert_eq!(up.len(), 1);
+        assert!(up[0].enter.t == f64::NEG_INFINITY && close(up[0].exit.t, -5.0));
+        let inside = spans_of(&p, &ray([0.0, 0.0, -1.0], [1.0, 0.0, 0.0]));
+        assert_eq!(inside.len(), 1);
+        assert!(inside[0].enter.t == f64::NEG_INFINITY && inside[0].exit.t == f64::INFINITY);
+        assert!(spans_of(&p, &ray([0.0, 0.0, 1.0], [1.0, 0.0, 0.0])).is_empty());
+    }
+
+    #[test]
+    fn non_solids_have_no_spans() {
+        let r = ray([0.0, 0.0, -5.0], [0.0, 0.0, 1.0]);
+        let tri = Shape::Triangle(Triangle {
+            vertices: [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: [[0.0, 0.0, -1.0]; 3],
+            surface: None,
+        });
+        assert!(spans_of(&tri, &r).is_empty());
+        assert!(spans_of(&Shape::Light(Light::white([0.0, 0.0, 0.0])), &r).is_empty());
+    }
+
+    // --- Wrappers ----------------------------------------------------
+
+    #[test]
+    fn transform_preserves_t_and_maps_normals() {
+        // A unit sphere stretched 2x along x: along x the span is
+        // [8, 12] in world `t`, same `t` as the local ray.
+        let s = scale([2.0, 1.0, 1.0], sphere([0.0, 0.0, 0.0], 1.0));
+        let spans = spans_of(&s, &ray([-10.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
+        assert_single_span(&spans, 8.0, [-1.0, 0.0, 0.0], 12.0, [1.0, 0.0, 0.0]);
+        // Rotated cuboid: a 2x2x2 box rotated 90° about z still has
+        // face normals along ±x for a ray along x.
+        let c = rotate_z(std::f64::consts::FRAC_PI_2, cuboid([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]));
+        let spans = spans_of(&c, &ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
+        assert_single_span(&spans, 4.0, [-1.0, 0.0, 0.0], 6.0, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn surfaced_fills_only_missing_surfaces() {
+        let outer = surface(0.1);
+        let inner = surface(0.9);
+        let g = surfaced(outer, group(vec![
+            sphere([0.0, 0.0, 0.0], 1.0),
+            Shape::Sphere(Sphere { center: [5.0, 0.0, 0.0], r: 1.0, surface: Some(inner) }),
+        ]));
+        let spans = spans_of(&g, &ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].enter.surface, Some(outer));
+        assert_eq!(spans[0].exit.surface, Some(outer));
+        assert_eq!(spans[1].enter.surface, Some(inner));
+        assert_eq!(spans[1].exit.surface, Some(inner));
+    }
+
+    #[test]
+    fn group_is_a_union() {
+        let r = ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        // Overlapping spheres coalesce into one span.
+        let g = group(vec![sphere([0.5, 0.0, 0.0], 1.0), sphere([-0.5, 0.0, 0.0], 1.0)]);
+        assert_single_span(&spans_of(&g, &r), 3.5, [-1.0, 0.0, 0.0], 6.5, [1.0, 0.0, 0.0]);
+        // Disjoint spheres give two spans, sorted, whatever the child order.
+        let g = group(vec![sphere([3.0, 0.0, 0.0], 1.0), sphere([-3.0, 0.0, 0.0], 1.0)]);
+        let spans = spans_of(&g, &r);
+        assert_eq!(spans.len(), 2);
+        assert!(close(spans[0].enter.t, 1.0) && close(spans[1].enter.t, 7.0));
+    }
+
+    #[test]
+    fn bounded_matches_its_child() {
+        let child = sphere([0.0, 0.0, 0.0], 1.0);
+        let b = bounded(child.clone());
+        for r in [
+            ray([-5.0, 0.2, 0.1], [1.0, 0.0, 0.0]),
+            ray([0.0, 0.0, 0.0], [0.0, 1.0, 0.0]),   // origin inside
+            ray([-5.0, 5.0, 0.0], [1.0, 0.0, 0.0]),  // miss
+        ] {
+            assert_eq!(spans_of(&b, &r), spans_of(&child, &r));
+        }
+    }
+
+    // --- Consistency with hit_test -----------------------------------
+
+    /// Deterministic pseudo-random numbers in [0, 1) (splitmix64).
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> f64 {
+            self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+            ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+        }
+        fn in_range(&mut self, lo: f64, hi: f64) -> f64 {
+            lo + (hi - lo) * self.next()
+        }
+    }
+
+    /// For rays starting well outside `shape` and aimed near it, the
+    /// first span endpoint in front of the ray must be an `enter`
+    /// that agrees with `hit_test`'s distance and normal, and
+    /// `first_span_hit` must return the same hit.
+    fn check_consistency(name: &str, shape: &Shape) {
+        let mut rng = Rng(0x5eed);
+        let mut hits = 0;
+        for _ in 0..2000 {
+            // Origin on a sphere of radius 20 around the origin.
+            let dir = normalizep([rng.in_range(-1.0, 1.0), rng.in_range(-1.0, 1.0), rng.in_range(-1.0, 1.0)]);
+            let start = scalep(dir, 20.0);
+            let target = [rng.in_range(-2.0, 2.0), rng.in_range(-2.0, 2.0), rng.in_range(-2.0, 2.0)];
+            let r = ray(start, normalizep(subp(target, start)));
+
+            let hit = shape.hit_test(&r);
+            let spans = spans_of(shape, &r);
+            let span_hit = first_span_hit(&spans, &r);
+
+            match (&hit, &span_hit) {
+                (None, None) => {}
+                (Some(h), Some(s)) => {
+                    hits += 1;
+                    assert!((h.distance - s.distance).abs() < 1e-7,
+                            "{}: hit_test t {} vs span t {}", name, h.distance, s.distance);
+                    assert!(close_p(h.normal, s.normal),
+                            "{}: hit_test normal {:?} vs span normal {:?}", name, h.normal, s.normal);
+                    let front = spans.iter().find(|sp| sp.exit.t > EPSILON).unwrap();
+                    assert!(front.enter.t > EPSILON, "{}: origin should be outside", name);
+                }
+                _ => panic!("{}: hit_test {:?} vs spans {:?} disagree", name, hit.map(|h| h.distance), spans),
+            }
+        }
+        assert!(hits > 200, "{}: too few hits ({}) to be a meaningful check", name, hits);
+    }
+
+    fn solids() -> Vec<(&'static str, Shape)> {
+        vec![
+            ("sphere", sphere([0.3, -0.2, 0.1], 1.5)),
+            ("cuboid", cuboid([0.2, 0.1, -0.3], [2.0, 1.0, 3.0])),
+            ("cylinder", cylinder([-1.0, -0.5, 0.0], [1.0, 1.0, 0.5], 0.8)),
+            ("cone", cone([0.0, -1.0, 0.0], [0.5, 1.5, 0.3], 1.2)),
+        ]
+    }
+
+    #[test]
+    fn spans_agree_with_hit_test() {
+        for (name, shape) in solids() {
+            check_consistency(name, &shape);
+        }
+    }
+
+    #[test]
+    fn spans_agree_with_hit_test_under_transforms() {
+        for (name, shape) in solids() {
+            let t = translate([0.3, -0.4, 0.2],
+                              rotate_axis([1.0, 2.0, 0.5], 0.7,
+                                          scale([1.5, 0.6, 1.1], shape)));
+            check_consistency(name, &t);
+        }
+    }
+
+    // --- Set operations ----------------------------------------------
+
+    /// A span with a marker normal: `+x` at the enter end, `+y` at
+    /// the exit end, scaled by `tag` so results can be traced back to
+    /// the list they came from.
+    fn mk(t0: f64, t1: f64, tag: f64) -> Span {
+        Span {
+            enter: SpanEnd { t: t0, normal: [tag, 0.0, 0.0], surface: None },
+            exit: SpanEnd { t: t1, normal: [0.0, tag, 0.0], surface: None },
+        }
+    }
+
+    fn ts(spans: &[Span]) -> Vec<(f64, f64)> {
+        spans.iter().map(|s| (s.enter.t, s.exit.t)).collect()
+    }
+
+    #[test]
+    fn union_coalesces_overlapping_and_touching_spans() {
+        let a = [mk(0.0, 2.0, 1.0), mk(5.0, 6.0, 1.0)];
+        let b = [mk(1.0, 3.0, 2.0), mk(6.0, 7.0, 2.0), mk(9.0, 10.0, 2.0)];
+        let u = span_union(&a, &b);
+        assert_eq!(ts(&u), vec![(0.0, 3.0), (5.0, 7.0), (9.0, 10.0)]);
+        // The coalesced span keeps the outermost endpoints' normals.
+        assert_eq!(u[0].enter.normal, [1.0, 0.0, 0.0]);
+        assert_eq!(u[0].exit.normal, [0.0, 2.0, 0.0]);
+    }
+
+    #[test]
+    fn intersection_keeps_overlaps_with_bounding_crossings() {
+        let a = [mk(0.0, 4.0, 1.0), mk(6.0, 10.0, 1.0)];
+        let b = [mk(2.0, 7.0, 2.0), mk(8.0, 9.0, 2.0)];
+        let i = span_intersection(&a, &b);
+        assert_eq!(ts(&i), vec![(2.0, 4.0), (6.0, 7.0), (8.0, 9.0)]);
+        assert_eq!(i[0].enter.normal, [2.0, 0.0, 0.0]); // entered via b
+        assert_eq!(i[0].exit.normal, [0.0, 1.0, 0.0]);  // left via a
+        // Touching spans don't intersect.
+        assert!(span_intersection(&[mk(0.0, 1.0, 1.0)], &[mk(1.0, 2.0, 2.0)]).is_empty());
+    }
+
+    #[test]
+    fn difference_carves_and_flips_cut_normals() {
+        let a = [mk(0.0, 10.0, 1.0)];
+        // A hole in the middle splits the span; both new boundaries are
+        // b's crossings with flipped normals.
+        let d = span_difference(&a, &[mk(3.0, 5.0, 2.0)]);
+        assert_eq!(ts(&d), vec![(0.0, 3.0), (5.0, 10.0)]);
+        assert_eq!(d[0].exit.normal, [-2.0, 0.0, 0.0]);
+        assert_eq!(d[1].enter.normal, [0.0, -2.0, 0.0]);
+        assert_eq!(d[1].exit.normal, [0.0, 1.0, 0.0]);
+        // b covering the start trims it.
+        assert_eq!(ts(&span_difference(&a, &[mk(-1.0, 4.0, 2.0)])), vec![(4.0, 10.0)]);
+        // b covering the end trims it.
+        assert_eq!(ts(&span_difference(&a, &[mk(8.0, 12.0, 2.0)])), vec![(0.0, 8.0)]);
+        // b covering everything removes it.
+        assert!(span_difference(&a, &[mk(-1.0, 11.0, 2.0)]).is_empty());
+        // Several holes, and a b span straddling two a spans.
+        let a2 = [mk(0.0, 4.0, 1.0), mk(6.0, 10.0, 1.0)];
+        let b2 = [mk(1.0, 2.0, 2.0), mk(3.0, 7.0, 2.0), mk(8.0, 9.0, 2.0)];
+        assert_eq!(ts(&span_difference(&a2, &b2)),
+                   vec![(0.0, 1.0), (2.0, 3.0), (7.0, 8.0), (9.0, 10.0)]);
+        // Nothing to subtract.
+        assert_eq!(ts(&span_difference(&a2, &[])), ts(&a2));
+    }
+
+    #[test]
+    fn first_span_hit_handles_inside_and_behind() {
+        let r = ray([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        // Entirely behind the origin: no hit.
+        assert!(first_span_hit(&[mk(-5.0, -1.0, 1.0)], &r).is_none());
+        // Origin inside: the exit is the hit.
+        let h = first_span_hit(&[mk(-1.0, 3.0, 1.0)], &r).unwrap();
+        assert_eq!(h.distance, 3.0);
+        assert_eq!(h.normal, [0.0, 1.0, 0.0]);
+        // Infinite ends are never hits.
+        let inf = [mk(f64::NEG_INFINITY, f64::INFINITY, 1.0)];
+        assert!(first_span_hit(&inf, &r).is_none());
+    }
+
+    // --- The Csg node -------------------------------------------------
+
+    fn plane(normal: Point, p0: Point) -> Shape {
+        Shape::Plane(Plane { normal, p0, surface: None })
+    }
+
+    /// A unit bowl open toward -z: sphere minus a 0.9 sphere minus the
+    /// half-space z <= 0.
+    fn bowl() -> Shape {
+        difference(difference(sphere([0.0, 0.0, 0.0], 1.0), sphere([0.0, 0.0, 0.0], 0.9)),
+                   plane([0.0, 0.0, 1.0], [0.0, 0.0, 0.0]))
+    }
+
+    #[test]
+    fn csg_hit_test_sees_the_bowl_interior() {
+        let b = bowl();
+        // Straight in from the open side: the first surface is the
+        // inner wall, facing back toward the camera.
+        let hit = b.hit_test(&ray([0.0, 0.0, -5.0], [0.0, 0.0, 1.0])).unwrap();
+        assert!(close(hit.distance, 5.9));
+        assert!(close_p(hit.normal, [0.0, 0.0, -1.0]));
+        // From behind: the outer wall.
+        let hit = b.hit_test(&ray([0.0, 0.0, 5.0], [0.0, 0.0, -1.0])).unwrap();
+        assert!(close(hit.distance, 4.0));
+        assert!(close_p(hit.normal, [0.0, 0.0, 1.0]));
+        // In front of the rim plane there's nothing left to hit.
+        assert!(b.hit_test(&ray([-5.0, 0.0, -0.5], [1.0, 0.0, 0.0])).is_none());
+        // The rim itself: a ray along z just inside the outer radius
+        // enters through the flat cut face, whose normal is the
+        // flipped plane normal (pointing -z, out of the bowl).
+        let hit = b.hit_test(&ray([0.95, 0.0, -5.0], [0.0, 0.0, 1.0])).unwrap();
+        assert!(close(hit.distance, 5.0));
+        assert!(close_p(hit.normal, [0.0, 0.0, -1.0]));
+    }
+
+    #[test]
+    fn csg_difference_with_several_cutters_and_nesting() {
+        // A 2x2x2 cube with a hole bored through along x (a cylinder)
+        // and a notch cut from the top (a box), subtracted together
+        // as one group, the way the n-ary SDL form builds it.
+        let holed = difference(
+            cuboid([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]),
+            group(vec![cylinder([-2.0, 0.0, 0.0], [2.0, 0.0, 0.0], 0.3),
+                       cuboid([0.0, 1.0, 0.0], [0.5, 1.0, 4.0])]),
+        );
+        // Down the bore: nothing to hit.
+        assert!(holed.hit_test(&ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0])).is_none());
+        // Beside the bore: the cube's own face.
+        let hit = holed.hit_test(&ray([-5.0, 0.6, 0.0], [1.0, 0.0, 0.0])).unwrap();
+        assert!(close(hit.distance, 4.0));
+        assert!(close_p(hit.normal, [-1.0, 0.0, 0.0]));
+        // Down into the notch: the notch floor at y = 0.5, facing up.
+        let hit = holed.hit_test(&ray([0.0, 5.0, 0.5], [0.0, -1.0, 0.0])).unwrap();
+        assert!(close(hit.distance, 4.5));
+        assert!(close_p(hit.normal, [0.0, 1.0, 0.0]));
+        // Nesting: a Csg node is itself a valid operand.
+        let nested = difference(holed, sphere([1.0, 1.0, 1.0], 0.5));
+        assert!(nested.is_solid());
+        let hit = nested.hit_test(&ray([5.0, 0.8, 0.8], [-1.0, 0.0, 0.0])).unwrap();
+        // The sphere scoops the corner out: the ray first meets the
+        // sphere's surface at x = 1 - sqrt(0.25 - 0.08), and the normal
+        // there is the sphere's, flipped to point out of the scoop.
+        let dx = 0.17_f64.sqrt();
+        assert!(close(hit.distance, 4.0 + dx));
+        assert!(close_p(hit.normal, [dx / 0.5, 0.4, 0.4]));
+    }
+
+    #[test]
+    fn csg_intersection_and_bounds() {
+        // A sphere clipped to a cube: flat faces where the cube is
+        // inside the sphere, round elsewhere.
+        let lens = intersection(sphere([0.0, 0.0, 0.0], 1.0), cuboid([0.0, 0.0, 0.0], [1.0, 1.0, 3.0]));
+        let hit = lens.hit_test(&ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0])).unwrap();
+        assert!(close(hit.distance, 4.5) && close_p(hit.normal, [-1.0, 0.0, 0.0]));
+        let hit = lens.hit_test(&ray([0.0, 0.0, -5.0], [0.0, 0.0, 1.0])).unwrap();
+        assert!(close(hit.distance, 4.0) && close_p(hit.normal, [0.0, 0.0, -1.0]));
+        let b = lens.bounds().unwrap();
+        assert_eq!(b.min, [-0.5, -0.5, -1.0]);
+        assert_eq!(b.max, [0.5, 0.5, 1.0]);
+        // Difference is bounded by its first operand; an intersection
+        // with a half-space is bounded by the bounded operand.
+        assert_eq!(bowl().bounds(), sphere([0.0, 0.0, 0.0], 1.0).bounds());
+        let half = intersection(sphere([0.0, 0.0, 0.0], 1.0), plane([0.0, 0.0, 1.0], [0.0, 0.0, 0.0]));
+        assert_eq!(half.bounds(), sphere([0.0, 0.0, 0.0], 1.0).bounds());
+    }
+
+    #[test]
+    fn csg_agrees_with_itself_under_transforms() {
+        // The Transform wrapper must give the same hits whether it sits
+        // above the Csg node or the node's operands are each wrapped.
+        let above = rotate_y(0.4, scale([1.5, 0.7, 1.2], bowl()));
+        let wrap = |s: Shape| rotate_y(0.4, scale([1.5, 0.7, 1.2], s));
+        let below = difference(
+            difference(wrap(sphere([0.0, 0.0, 0.0], 1.0)), wrap(sphere([0.0, 0.0, 0.0], 0.9))),
+            wrap(plane([0.0, 0.0, 1.0], [0.0, 0.0, 0.0])),
+        );
+        let mut rng = Rng(0xb0);
+        let mut hits = 0;
+        for _ in 0..1000 {
+            let dir = normalizep([rng.in_range(-1.0, 1.0), rng.in_range(-1.0, 1.0), rng.in_range(-1.0, 1.0)]);
+            let start = scalep(dir, 10.0);
+            let target = [rng.in_range(-1.0, 1.0), rng.in_range(-1.0, 1.0), rng.in_range(-1.0, 1.0)];
+            let r = ray(start, normalizep(subp(target, start)));
+            match (above.hit_test(&r), below.hit_test(&r)) {
+                (None, None) => {}
+                (Some(x), Some(y)) => {
+                    hits += 1;
+                    assert!((x.distance - y.distance).abs() < 1e-7);
+                    assert!(close_p(x.normal, y.normal));
+                }
+                (x, y) => panic!("disagree: {:?} vs {:?}", x.map(|h| h.distance), y.map(|h| h.distance)),
+            }
+        }
+        assert!(hits > 100);
+    }
+
+    #[test]
+    fn csg_cut_faces_take_the_cutters_surface() {
+        let body = surface(0.1);
+        let cutter = surface(0.9);
+        let s = surfaced(body, difference(
+            cuboid([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]),
+            Shape::Sphere(Sphere { center: [-1.0, 0.0, 0.0], r: 0.5, surface: Some(cutter) }),
+        ));
+        // Into the dimple: the cutter's surface.
+        let hit = s.hit_test(&ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0])).unwrap();
+        assert_eq!(hit.surface, Some(cutter));
+        // Beside it: the body's inherited surface.
+        let hit = s.hit_test(&ray([-5.0, 0.8, 0.0], [1.0, 0.0, 0.0])).unwrap();
+        assert_eq!(hit.surface, Some(body));
+    }
+
+    #[test]
+    fn solidity() {
+        let tri = Shape::Triangle(Triangle {
+            vertices: [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: [[0.0, 0.0, 1.0]; 3],
+            surface: None,
+        });
+        assert!(!tri.is_solid());
+        assert!(!group(vec![sphere([0.0, 0.0, 0.0], 1.0), tri.clone()]).is_solid());
+        assert!(!translate([1.0, 0.0, 0.0], group(vec![tri])).is_solid());
+        assert!(group(vec![sphere([0.0, 0.0, 0.0], 1.0), Shape::Light(Light::white([0.0; 3]))]).is_solid());
+        assert!(bowl().is_solid());
+        assert!(plane([0.0, 0.0, 1.0], [0.0; 3]).is_solid());
+    }
+
+    #[test]
+    #[should_panic(expected = "CSG operands must be solids")]
+    fn csg_rejects_non_solid_operands() {
+        let tri = Shape::Triangle(Triangle {
+            vertices: [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: [[0.0, 0.0, 1.0]; 3],
+            surface: None,
+        });
+        difference(sphere([0.0, 0.0, 0.0], 1.0), tri);
+    }
+
+    #[test]
+    fn csg_of_real_shapes_through_span_ops() {
+        // End-to-end preview of Phase 2: a bowl, i.e. a unit sphere
+        // minus a smaller concentric sphere minus the half-space
+        // z <= 0 (a plane with normal +z).
+        let r = ray([0.0, 0.0, -5.0], [0.0, 0.0, 1.0]);
+        let outer = spans_of(&sphere([0.0, 0.0, 0.0], 1.0), &r);
+        let inner = spans_of(&sphere([0.0, 0.0, 0.0], 0.9), &r);
+        let front = spans_of(&Shape::Plane(Plane { normal: [0.0, 0.0, 1.0], p0: [0.0, 0.0, 0.0], surface: None }), &r);
+        let shell = span_difference(&outer, &inner);
+        let bowl = span_difference(&shell, &front);
+        // Only the back wall of the shell remains: z from 0.9 to 1.0.
+        assert_eq!(bowl.len(), 1);
+        assert!(close(bowl[0].enter.t, 5.9) && close(bowl[0].exit.t, 6.0));
+        // Seen from the camera, the first surface is the *inside* of
+        // the inner sphere, whose normal must face back toward -z.
+        let hit = first_span_hit(&bowl, &r).unwrap();
+        assert!(close_p(hit.normal, [0.0, 0.0, -1.0]));
     }
 }

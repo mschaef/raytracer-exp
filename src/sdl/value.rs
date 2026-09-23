@@ -33,7 +33,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::render::{Camera, Light, Scene, Surface};
-use crate::render::shapes::{AABB, Shape};
+use crate::render::shapes::{AABB, CsgOp, Shape};
 use crate::render::transform::Affine;
 use crate::sdl::ast::Form;
 use crate::sdl::env::EnvRef;
@@ -274,6 +274,10 @@ impl fmt::Display for Value {
                 Shape::Transform(_) => f.write_str("#<shape transform>"),
                 Shape::Bounded(_)   => f.write_str("#<shape bounded>"),
                 Shape::Surfaced(_)  => f.write_str("#<shape surfaced>"),
+                Shape::Csg(c) => match c.op {
+                    CsgOp::Difference   => f.write_str("#<shape difference>"),
+                    CsgOp::Intersection => f.write_str("#<shape intersection>"),
+                },
                 Shape::Light(_)     => f.write_str("#<shape light>"),
             },
             Value::Scene(s) => write!(f, "#<scene {:?}>", s.name),
