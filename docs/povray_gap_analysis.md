@@ -20,6 +20,18 @@ plans.
 
 ---
 
+## Status (2026-09-22)
+
+- **Texaco: ported.** `scenes/texaco.lisp` and
+  `scenes/texaco_frames.lisp`, with CSG added for it (CLAUDE.md
+  history entries 39–41). Surfaces are untuned starting points.
+- **Conventions confirmed:**
+  - `scenes/pov_compass.lisp` confirms handedness; POV coordinates and
+    `rotate` angles port unchanged.
+  - The black-background reference GIFs were rendered without the
+    white backdrop plane that the newest `texaco.pov` adds.
+- **Next on the list:** xmastree (§5).
+
 ## 1. Summary
 
 **Texaco** needs one new renderer feature: **CSG** (`difference`, and

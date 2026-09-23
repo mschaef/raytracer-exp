@@ -561,6 +561,16 @@ fn cornell_box_scene_loads() {
 }
 
 #[test]
+fn pov_compass_scene_loads() {
+    assert_scene_loads("pov_compass.lisp", "pov-compass-scene");
+}
+
+#[test]
+fn texaco_scene_loads() {
+    assert_scene_loads("texaco.lisp", "texaco-scene");
+}
+
+#[test]
 fn csg_test_scene_loads() {
     assert_scene_loads("csg_test.lisp", "csg-test-scene");
 }

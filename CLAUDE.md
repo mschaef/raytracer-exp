@@ -1785,6 +1785,62 @@ Approximate order of recent commits, oldest first:
     - **Unchanged.** Scenes without CSG don't reach any new code, so
       they render byte-identically.
 
+41. **CSG phase 3: Texaco port.** The acceptance test for CSG, and
+    the first scene ported from the POV-Ray projects
+    (github.com/mschaef/povray-projects; see
+    `docs/povray_gap_analysis.md`).
+    - **`scenes/_pov.lisp`.** Porting helpers:
+      - `pov-white` / `-black` / `-red` / `-green` / `-blue`.
+      - `(box a b)`, a cuboid from two corners in either order.
+      - `pov-arrow`, the POV projects' `makeArrow`.
+      - `(pov-camera loc look-at)`, which is zoom 1.0 with up `+y`.
+        That's POV's default camera; `direction k*z` is zoom k.
+      - Starting-point surfaces: `pov-plain`, `pov-plain-specular`,
+        `pov-metal-a` and `pov-metal-c`. The metals borrow `F_MetalA` /
+        `F_MetalC`'s ambient, diffuse (`:light`), specular and
+        reflection numbers, and deliberately aren't `:metallic`,
+        because this renderer's metallic model drops diffuse.
+      - The header records the porting conventions.
+    - **Handedness confirmed.** `scenes/pov_compass.lisp` renders the
+      projects' arrow compass from a camera at -z: red +x points right,
+      green +y up, and blue +z away, as in POV-Ray. POV's z-rotation
+      matrix (`source/backend/math/matrices.cpp`, applied to row
+      vectors) is the same rotation as `Affine::rotation_z`. So POV
+      coordinates and `rotate` angles port unchanged, with degrees
+      converted, and POV's transform order, where the first one written
+      applies first, becomes the innermost call.
+    - **`scenes/texaco.lisp`.** A structural port of `texaco.pov`:
+      - `na-108` wedge cutters.
+      - `star` is a cylinder minus five cutters via
+        `(apply difference disk cutters)`.
+      - `texaco-star` subtracts the T.
+      - The bowl is sphere − sphere(0.999) − cylinder.
+      - The star is scaled to 0.16 deep and turned about y.
+      - `(texaco-at angle backdrop?)` builds any animation frame;
+        `texaco-scene` is `(texaco-at 0 false)`.
+    - **The backdrop plane.** It's optional because only the newest
+      `texaco.pov` has the white `ambient 1` plane at z = 10. The older
+      `texacobackup.pov` and `texaco_animation.pov` don't, and the
+      black-background reference GIFs were rendered without it.
+    - **`scenes/texaco_frames.lisp`.** A side-effecting script for
+      `sdl_run` that renders the original's 24-frame animation (star
+      0° → -180° about y) to `texaco00.png` … `texaco23.png`.
+    - **Visual check.** Against `texaco.gif`, the shape, framing, T cut
+      and star-in-bowl match, and the 0.001-thick rim renders cleanly.
+      The star's shadow inside the bowl is stronger than in the
+      reference, and the reference shows more reflected star in the
+      walls; both are surface tuning, left for later by choice.
+    - **Sampling note.** A near-pixel-aligned horizontal edge on the
+      star shows faint speckle at the default adaptive settings. It
+      renders as a smooth anti-aliased row at a fixed 64 samples, so
+      it's sampler noise (four samples agreeing early), not geometry.
+    - **Tests.** New `pov_compass_scene_loads` and `texaco_scene_loads`
+      smoke tests. The frames script isn't smoke-tested because it
+      writes files.
+    - **How it was verified.** As in entry 40: built against stand-in
+      libraries, with 47 unit and 63 suite tests passing, and the
+      renders and all 24 frames made with that build.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -2629,29 +2685,17 @@ and outward-of-solid normals on exit hits.
 
 ### Phase 3 — Texaco port (acceptance test)
 
-CSG is done when the scene that motivated it renders correctly.
+Done; see "Recent work history" entry 41. Summary:
 
-- Start `scenes/_pov.lisp`: `(box a b)` from two corners in either
-  order, the handful of `colors.inc` names Texaco uses, and
-  starting-point metal surfaces (see the gap analysis's "Decisions":
-  this renderer's own shading model, tuned by eye).
-- Port the arrow compass from the POV projects as a handedness check.
-  POV coordinates and rotation angles are expected to carry over
-  unchanged (`Camera::looking_at` puts `+x` on the right looking down
-  `+z`, like POV), and an asymmetric object confirms that before
-  anything depends on it.
-- `scenes/texaco.lisp`, following the POV original's structure:
-  `na-108` wedge, `star`, `texaco-star`, `texaco-hemi-logo`, the
-  `ambient 1` backdrop plane, one light, and the camera at
-  `[0 0 -2.2]` with zoom 1.0. Plus its smoke test.
-- Visual check against `texaco/texaco.gif` in the povray-projects repo:
-  a red metallic bowl, a silver star straddling the rim plane with the
-  T cut through it, and the star reflected in the bowl.
-- Watch the bowl: its shell is 0.001 thick, only 10× `EPSILON`. If the
-  rim or inner wall shows acne, thicken the shell in the scene rather
-  than changing `EPSILON`.
-- Optional: the 24-frame `rotate-y` animation (clock 0 → −180) as an
-  `sdl_run` script looping `render` + `save-png`.
+- `scenes/_pov.lisp` holds the porting helpers and conventions.
+- `scenes/pov_compass.lisp` confirms POV coordinates and rotations
+  carry over unchanged.
+- `scenes/texaco.lisp` is a structural port of the logo whose
+  geometry matches `texaco.gif`.
+- `scenes/texaco_frames.lisp` renders the 24-frame animation through
+  `sdl_run`.
+
+Surface tuning is deliberately left for later.
 
 ### Phase 4 — Deferred
 
