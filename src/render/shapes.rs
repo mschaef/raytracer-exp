@@ -122,6 +122,29 @@ pub struct Cone {
     pub surface: Option<Surface>,
 }
 
+/// A solid torus: the set of points within `minor` of a circle of
+/// radius `major` centered at `center` in the plane perpendicular to
+/// `axis` (a unit vector). POV-Ray's `torus { major, minor }` is this
+/// with `center` at the origin and `axis` along +y.
+///
+/// `minor < major` is required (a "ring" torus); the SDL binding
+/// checks it. The ray intersection is a quartic, solved by
+/// `render::poly::solve_quartic`. A ray can pass through the tube
+/// twice, so a torus can have two spans, which makes it the first
+/// non-convex CSG solid.
+///
+/// Like `Cylinder` and `Cone`, a uniformly scaled torus is still a
+/// torus but a non-uniformly scaled one isn't; wrap it in `Transform`
+/// rather than baking a non-uniform scale into the radii.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Torus {
+    pub center: Point,
+    pub axis: Point,
+    pub major: f64,
+    pub minor: f64,
+    pub surface: Option<Surface>,
+}
+
 /// Axis-aligned bounding box. Used as the acceleration primitive for the
 /// `Bounded` variant: a ray that misses the AABB doesn't need to recurse
 /// into the wrapped subtree at all.
@@ -301,6 +324,7 @@ pub enum Shape {
     Triangle(Triangle),
     Cylinder(Cylinder),
     Cone(Cone),
+    Torus(Torus),
     Group(Vec<Shape>),
     Transform(Box<Transformed>),
     Bounded(Box<Bounded>),
@@ -351,15 +375,21 @@ pub struct SurfacedShape {
     pub child: Shape,
 }
 
-/// Which CSG operation a `Shape::Csg` node performs. There's no
-/// `Union`: a union of solids is just a `Group`, which already
-/// behaves as one both for `hit_test` and for `spans`.
+/// Which CSG operation a `Shape::Csg` node performs.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum CsgOp {
     /// Points inside `a` and not inside `b`.
     Difference,
     /// Points inside both `a` and `b`.
     Intersection,
+    /// Points inside `a` or `b`, as one solid. A `Group` is also a
+    /// union, but its `hit_test` still sees each child's own surface,
+    /// including the parts buried inside another child. `Merge` answers
+    /// `hit_test` from the combined spans, so buried surfaces disappear.
+    /// That only shows with transparent operands, where a group shows
+    /// the internal faces through the glass (POV-Ray's `merge` vs
+    /// `union`).
+    Merge,
 }
 
 /// Storage for a `Shape::Csg` node: a binary CSG operation on two solid
@@ -399,6 +429,10 @@ impl From<Cone> for Shape {
     fn from(c: Cone) -> Self { Shape::Cone(c) }
 }
 
+impl From<Torus> for Shape {
+    fn from(t: Torus) -> Self { Shape::Torus(t) }
+}
+
 impl From<Light> for Shape {
     fn from(l: Light) -> Self { Shape::Light(l) }
 }
@@ -412,6 +446,7 @@ impl Hittable for Shape {
             Shape::Triangle(t)      => t.hit_test(ray),
             Shape::Cylinder(c)      => c.hit_test(ray),
             Shape::Cone(c)          => c.hit_test(ray),
+            Shape::Torus(t)         => t.hit_test(ray),
             Shape::Group(children)  => nearest_hit(ray, children),
             Shape::Transform(t)     => t.hit_test(ray),
             Shape::Bounded(b)       => b.hit_test(ray),
@@ -548,6 +583,20 @@ impl Shape {
                     ))
                 }
             }
+            Shape::Torus(t) => {
+                // The core circle (radius `major`, perpendicular to
+                // `axis`) extends `major * sqrt(1 - axis[i]²)` along
+                // world axis i, the same trick as the cylinder's cap
+                // disks; the tube adds `minor` in every direction. Tight.
+                let mut min = t.center;
+                let mut max = t.center;
+                for i in 0..3 {
+                    let e = t.major * (1.0 - t.axis[i] * t.axis[i]).max(0.0).sqrt() + t.minor;
+                    min[i] -= e;
+                    max[i] += e;
+                }
+                Some(AABB::new(min, max))
+            }
             Shape::Cone(c) => {
                 // The cone is enclosed by the union of its base disk
                 // (radius r, centered at p0) and its apex point p1. The
@@ -653,6 +702,11 @@ impl Shape {
                     (Some(a), None) => Some(a),
                     (None, Some(b)) => Some(b),
                     (None, None) => None,
+                },
+                // A union is unbounded if either operand is.
+                CsgOp::Merge => match (c.a.bounds(), c.b.bounds()) {
+                    (Some(a), Some(b)) => Some(a.union(&b)),
+                    _ => None,
                 },
             },
             Shape::Light(l) => {
@@ -770,7 +824,8 @@ impl Shape {
             | Shape::Cuboid(_)
             | Shape::Triangle(_)
             | Shape::Cylinder(_)
-            | Shape::Cone(_) => {}
+            | Shape::Cone(_)
+            | Shape::Torus(_) => {}
         }
     }
 
@@ -800,6 +855,7 @@ impl Shape {
             Shape::Triangle(t) => check_leaf_surface(&t.surface, has_surfaced_ancestor, "triangle"),
             Shape::Cylinder(c) => check_leaf_surface(&c.surface, has_surfaced_ancestor, "cylinder"),
             Shape::Cone(c) => check_leaf_surface(&c.surface, has_surfaced_ancestor, "cone"),
+            Shape::Torus(t) => check_leaf_surface(&t.surface, has_surfaced_ancestor, "torus"),
             Shape::Group(children) => {
                 for child in children {
                     child.validate_surfaces(has_surfaced_ancestor)?;
@@ -1045,10 +1101,33 @@ pub fn intersection(a: impl Into<Shape>, b: impl Into<Shape>) -> Shape {
     csg(CsgOp::Intersection, a.into(), b.into())
 }
 
+/// `a ∪ b` as a single solid with no internal faces (see
+/// `CsgOp::Merge`). Panics if either operand isn't a solid.
+pub fn merge(a: impl Into<Shape>, b: impl Into<Shape>) -> Shape {
+    csg(CsgOp::Merge, a.into(), b.into())
+}
+
 fn csg(op: CsgOp, a: Shape, b: Shape) -> Shape {
     assert!(a.is_solid() && b.is_solid(),
             "CSG operands must be solids (triangles and meshes have no inside)");
-    Shape::Csg(Box::new(Csg { op, a, b }))
+    Shape::Csg(Box::new(Csg { op, a: auto_bound(a), b: auto_bound(b) }))
+}
+
+/// Wrap a compound CSG operand in `Bounded`, so a ray that misses the
+/// operand's box skips it with one slab test instead of evaluating its
+/// whole subtree. Leaf primitives are left alone (their own tests are
+/// about as cheap as the slab test), as are operands that are already
+/// bounded or have no finite bounds (anything containing a half-space).
+fn auto_bound(shape: Shape) -> Shape {
+    match shape {
+        Shape::Group(_) | Shape::Transform(_) | Shape::Surfaced(_) | Shape::Csg(_) => {
+            match shape.bounds() {
+                Some(b) => Shape::Bounded(Box::new(Bounded { bounds: b, child: shape })),
+                None => shape,
+            }
+        }
+        _ => shape,
+    }
 }
 
 pub fn transform(forward: Affine, child: impl Into<Shape>) -> Shape {
@@ -1526,6 +1605,162 @@ impl Hittable for Cone {
     }
 }
 
+/// Two unit vectors perpendicular to the unit vector `axis` and to each
+/// other, completing a right-handed frame `(u, axis, w)`. Built from
+/// whichever world axis is least aligned with `axis`, so the cross
+/// product never degenerates.
+fn perpendicular_frame(axis: Point) -> (Point, Point) {
+    let hint = if axis[0].abs() <= axis[1].abs() && axis[0].abs() <= axis[2].abs() {
+        [1.0, 0.0, 0.0]
+    } else if axis[1].abs() <= axis[2].abs() {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let w = normalizep(crossp(hint, axis));
+    let u = crossp(axis, w);
+    (u, w)
+}
+
+/// A ray expressed in a torus's local frame: center at the origin,
+/// axis along +y. `t` is the same as along the world ray.
+struct TorusRay {
+    origin: Point,
+    delta: Point,
+    u: Point,
+    w: Point,
+}
+
+impl TorusRay {
+    fn point(&self, t: f64) -> Point {
+        addp(self.origin, scalep(self.delta, t))
+    }
+}
+
+impl Torus {
+    fn local_ray(&self, ray: &Vector) -> TorusRay {
+        let (u, w) = perpendicular_frame(self.axis);
+        let rel = subp(ray.start, self.center);
+        TorusRay {
+            origin: [dotp(rel, u), dotp(rel, self.axis), dotp(rel, w)],
+            delta: [dotp(ray.delta, u), dotp(ray.delta, self.axis), dotp(ray.delta, w)],
+            u,
+            w,
+        }
+    }
+
+    /// Every `t` (whole line) where the ray crosses the torus surface,
+    /// ascending. A tangent ray may produce a repeated root.
+    ///
+    /// Two things keep the quartic well conditioned. The direction is
+    /// normalized, so the polynomial is monic with coefficients of the
+    /// scene's own scale. And the ray is re-originated where it enters
+    /// the torus's bounding sphere, so the roots are small numbers
+    /// rather than large distances with small differences. A ray that
+    /// misses the bounding sphere can't hit the torus at all.
+    fn local_roots(&self, lr: &TorusRay) -> Vec<f64> {
+        let len = lenp(lr.delta);
+        if len < 1e-12 {
+            return vec![];
+        }
+        let d = scalep(lr.delta, 1.0 / len);
+
+        // Bounding sphere, radius major + minor.
+        let bound = self.major + self.minor;
+        let g = dotp(lr.origin, d);
+        let disc = g * g - (dotp(lr.origin, lr.origin) - bound * bound);
+        if disc <= 0.0 {
+            return vec![];
+        }
+        let s_enter = -g - disc.sqrt();
+        let s_exit = -g + disc.sqrt();
+        let o = addp(lr.origin, scalep(d, s_enter));
+
+        // (|p|² + R² - r²)² = 4R²(px² + pz²) with p = o + s d, |d| = 1.
+        let r2 = self.major * self.major;
+        let k = dotp(o, o) + r2 - self.minor * self.minor;
+        let g = dotp(o, d);
+        let dxz = d[0] * d[0] + d[2] * d[2];
+        let a = 4.0 * g;
+        let b = 4.0 * g * g + 2.0 * k - 4.0 * r2 * dxz;
+        let c = 4.0 * g * k - 8.0 * r2 * (o[0] * d[0] + o[2] * d[2]);
+        let e = k * k - 4.0 * r2 * (o[0] * o[0] + o[2] * o[2]);
+
+        // Roots can only lie inside the bounding sphere. The slack
+        // allows for rounding at the sphere's surface.
+        let slack = 1e-6 * bound;
+        crate::render::poly::solve_quartic(a, b, c, e)
+            .into_iter()
+            .map(|s| s + s_enter)
+            .filter(|&s| s >= s_enter - slack && s <= s_exit + slack)
+            .map(|s| s / len)
+            .collect()
+    }
+
+    /// Whether the local-frame point `p` is inside the solid torus.
+    fn contains_local(&self, p: Point) -> bool {
+        let r2 = self.major * self.major;
+        let k = dotp(p, p) + r2 - self.minor * self.minor;
+        k * k < 4.0 * r2 * (p[0] * p[0] + p[2] * p[2])
+    }
+
+    /// World-space outward normal at local-frame point `p`: the
+    /// direction from the nearest point on the core circle to `p`.
+    fn normal_at(&self, lr: &TorusRay, p: Point) -> Point {
+        let radial = (p[0] * p[0] + p[2] * p[2]).sqrt();
+        let local = if radial < 1e-12 {
+            // Only reachable on the axis, which a ring torus never
+            // touches; kept total for safety.
+            [0.0, p[1].signum(), 0.0]
+        } else {
+            let core = [p[0] * self.major / radial, 0.0, p[2] * self.major / radial];
+            normalizep(subp(p, core))
+        };
+        addp(addp(scalep(lr.u, local[0]), scalep(self.axis, local[1])), scalep(lr.w, local[2]))
+    }
+
+    fn end(&self, lr: &TorusRay, t: f64) -> SpanEnd {
+        SpanEnd { t, normal: self.normal_at(lr, lr.point(t)), surface: self.surface }
+    }
+
+    /// The torus's spans along `ray`: zero, one or two. Rather than
+    /// pairing roots by position, which a tangent ray's double root
+    /// would upset, each gap between consecutive roots is classified
+    /// by testing its midpoint.
+    fn spans(&self, ray: &Vector, out: &mut Vec<Span>) {
+        let lr = self.local_ray(ray);
+        let roots = self.local_roots(&lr);
+        let first = out.len();
+        out.extend(
+            roots
+                .windows(2)
+                .filter(|w| w[1] > w[0] && self.contains_local(lr.point(0.5 * (w[0] + w[1]))))
+                .map(|w| Span { enter: self.end(&lr, w[0]), exit: self.end(&lr, w[1]) }),
+        );
+        // Merge spans that meet at a repeated root.
+        normalize_union_tail(out, first);
+    }
+}
+
+impl Hittable for Torus {
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        // The nearest crossing in front of the ray. Like the other
+        // primitives, a ray starting inside the solid sees the far wall
+        // of the tube from inside; unlike `Sphere` and `Cuboid`, which
+        // report nothing in that case, this matches what the spans say.
+        let lr = self.local_ray(ray);
+        self.local_roots(&lr)
+            .into_iter()
+            .find(|&t| t > EPSILON)
+            .map(|t| RayHit {
+                distance: t,
+                hit_point: ray_location(ray, t),
+                normal: self.normal_at(&lr, lr.point(t)),
+                surface: self.surface,
+            })
+    }
+}
+
 // ---------------------------------------------------------------------
 // CSG span query
 // ---------------------------------------------------------------------
@@ -1626,6 +1861,7 @@ impl Shape {
             | Shape::Cuboid(_)
             | Shape::Cylinder(_)
             | Shape::Cone(_)
+            | Shape::Torus(_)
             | Shape::Csg(_)
             | Shape::Light(_) => true,
         }
@@ -1646,18 +1882,20 @@ impl Shape {
             Shape::Cuboid(c)   => out.extend(c.span(ray)),
             Shape::Cylinder(c) => out.extend(c.span(ray)),
             Shape::Cone(c)     => out.extend(c.span(ray)),
+            Shape::Torus(t)    => t.spans(ray, out),
             // Not a solid: a triangle has no inside.
             Shape::Triangle(_) => {}
             Shape::Light(_)    => {}
             Shape::Group(children) => {
                 // A group is the union of its children. Each child's
                 // list is already sorted and non-overlapping, but lists
-                // from different children can overlap, so normalize.
-                let mut all = Vec::new();
+                // from different children can overlap, so normalize the
+                // appended range in place.
+                let first = out.len();
                 for child in children {
-                    child.spans(ray, &mut all);
+                    child.spans(ray, out);
                 }
-                out.extend(span_union_of(all));
+                normalize_union_tail(out, first);
             }
             Shape::Transform(t) => {
                 // Same ray transform as `Transformed::hit_test`,
@@ -1686,7 +1924,7 @@ impl Shape {
                     b.child.spans(ray, out);
                 }
             }
-            Shape::Csg(c) => out.extend(c.spans(ray)),
+            Shape::Csg(c) => c.spans(ray, out),
             Shape::Surfaced(s) => {
                 let first = out.len();
                 s.child.spans(ray, out);
@@ -1699,27 +1937,62 @@ impl Shape {
     }
 }
 
+thread_local! {
+    /// Reusable span buffers for CSG evaluation. Every ray that reaches
+    /// a `Csg` node needs a few short-lived span lists (one per operand,
+    /// at every level of nesting); taking them from a per-thread pool
+    /// instead of allocating each one keeps `malloc`/`free` out of the
+    /// hot path. Buffers keep their capacity between uses.
+    static SPAN_POOL: std::cell::RefCell<Vec<Vec<Span>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `f` with an empty span buffer from the pool, returning the
+/// buffer afterwards. Nesting is fine: each call takes its own buffer,
+/// and the pool is only borrowed while taking or returning one.
+fn with_span_buffer<R>(f: impl FnOnce(&mut Vec<Span>) -> R) -> R {
+    let mut buf = SPAN_POOL.with(|pool| pool.borrow_mut().pop()).unwrap_or_default();
+    buf.clear();
+    let result = f(&mut buf);
+    SPAN_POOL.with(|pool| pool.borrow_mut().push(buf));
+    result
+}
+
 impl Csg {
-    /// This node's spans along `ray`: the operands' span lists
-    /// combined by the node's set operation.
-    fn spans(&self, ray: &Vector) -> Vec<Span> {
-        let mut a = Vec::new();
-        self.a.spans(ray, &mut a);
-        // Both operations are empty wherever `a` is, so a ray that
-        // misses `a` needn't evaluate `b` at all.
-        if a.is_empty() {
-            return a;
+    /// Append this node's spans along `ray` to `out`: the operands'
+    /// span lists combined by the node's set operation.
+    fn spans(&self, ray: &Vector, out: &mut Vec<Span>) {
+        if self.op == CsgOp::Merge {
+            // A union needs no scratch lists: append both operands'
+            // spans and normalize.
+            let first = out.len();
+            self.a.spans(ray, out);
+            self.b.spans(ray, out);
+            normalize_union_tail(out, first);
+            return;
         }
-        let mut b = Vec::new();
-        self.b.spans(ray, &mut b);
-        match self.op {
-            CsgOp::Difference => span_difference(&a, &b),
-            CsgOp::Intersection => span_intersection(&a, &b),
-        }
+        with_span_buffer(|a| {
+            self.a.spans(ray, a);
+            // Both operations are empty wherever `a` is, so a ray that
+            // misses `a` needn't evaluate `b` at all.
+            if a.is_empty() {
+                return;
+            }
+            with_span_buffer(|b| {
+                self.b.spans(ray, b);
+                match self.op {
+                    CsgOp::Difference => span_difference_into(a, b, out),
+                    CsgOp::Intersection => span_intersection_into(a, b, out),
+                    CsgOp::Merge => unreachable!("handled above"),
+                }
+            })
+        })
     }
 
     fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
-        first_span_hit(&self.spans(ray), ray)
+        with_span_buffer(|spans| {
+            self.spans(ray, spans);
+            first_span_hit(spans, ray)
+        })
     }
 }
 
@@ -1746,28 +2019,36 @@ pub fn first_span_hit(spans: &[Span], ray: &Vector) -> Option<RayHit> {
     None
 }
 
-/// Union of an arbitrary collection of spans (any order, possibly
-/// overlapping) as a sorted, non-overlapping list. Touching spans
-/// coalesce, so the shared face between two abutting solids disappears.
-fn span_union_of(mut spans: Vec<Span>) -> Vec<Span> {
-    spans.sort_by(|a, b| a.enter.t.total_cmp(&b.enter.t));
-    let mut result: Vec<Span> = Vec::with_capacity(spans.len());
-    for span in spans {
-        match result.last_mut() {
-            Some(last) if span.enter.t <= last.exit.t => {
-                if span.exit.t > last.exit.t {
-                    last.exit = span.exit;
-                }
+/// Normalize `out[first..]` in place into the union of its spans: sorted
+/// and non-overlapping. The spans may arrive in any order and overlap.
+/// Touching spans coalesce, so the shared face between two abutting
+/// solids disappears.
+fn normalize_union_tail(out: &mut Vec<Span>, first: usize) {
+    let tail = &mut out[first..];
+    if tail.len() < 2 {
+        return;
+    }
+    tail.sort_unstable_by(|a, b| a.enter.t.total_cmp(&b.enter.t));
+    // Coalesce in place: `w` is the last span written so far.
+    let mut w = 0;
+    for i in 1..tail.len() {
+        if tail[i].enter.t <= tail[w].exit.t {
+            if tail[i].exit.t > tail[w].exit.t {
+                tail[w].exit = tail[i].exit;
             }
-            _ => result.push(span),
+        } else {
+            w += 1;
+            tail[w] = tail[i];
         }
     }
-    result
+    out.truncate(first + w + 1);
 }
 
 /// Union of two sorted, non-overlapping span lists.
 pub fn span_union(a: &[Span], b: &[Span]) -> Vec<Span> {
-    span_union_of(a.iter().chain(b.iter()).copied().collect())
+    let mut out: Vec<Span> = a.iter().chain(b.iter()).copied().collect();
+    normalize_union_tail(&mut out, 0);
+    out
 }
 
 /// Intersection of two sorted, non-overlapping span lists: the ranges
@@ -1776,6 +2057,12 @@ pub fn span_union(a: &[Span], b: &[Span]) -> Vec<Span> {
 /// so it carries the right solid's normal and surface.
 pub fn span_intersection(a: &[Span], b: &[Span]) -> Vec<Span> {
     let mut result = Vec::new();
+    span_intersection_into(a, b, &mut result);
+    result
+}
+
+/// `span_intersection`, appending to `result` instead of allocating.
+fn span_intersection_into(a: &[Span], b: &[Span], result: &mut Vec<Span>) {
     let (mut i, mut j) = (0, 0);
     while i < a.len() && j < b.len() {
         let enter = if a[i].enter.t >= b[j].enter.t { a[i].enter } else { b[j].enter };
@@ -1791,7 +2078,6 @@ pub fn span_intersection(a: &[Span], b: &[Span]) -> Vec<Span> {
             j += 1;
         }
     }
-    result
 }
 
 /// Difference of two sorted, non-overlapping span lists: the ranges
@@ -1799,6 +2085,12 @@ pub fn span_intersection(a: &[Span], b: &[Span]) -> Vec<Span> {
 /// flipped (see `SpanEnd::flipped`) and keep `b`'s surface.
 pub fn span_difference(a: &[Span], b: &[Span]) -> Vec<Span> {
     let mut result = Vec::new();
+    span_difference_into(a, b, &mut result);
+    result
+}
+
+/// `span_difference`, appending to `result` instead of allocating.
+fn span_difference_into(a: &[Span], b: &[Span], result: &mut Vec<Span>) {
     // `j` skips `b` spans that end before the current `a` span starts.
     // It never skips past a `b` span that might still overlap a later
     // `a` span, since both lists are sorted.
@@ -1823,7 +2115,6 @@ pub fn span_difference(a: &[Span], b: &[Span]) -> Vec<Span> {
             result.push(Span { enter, exit: span.exit });
         }
     }
-    result
 }
 
 impl Sphere {
@@ -2124,6 +2415,10 @@ mod span_tests {
         Shape::Cone(Cone { p0, p1, r, surface: None })
     }
 
+    fn torus(center: Point, axis: Point, major: f64, minor: f64) -> Shape {
+        Shape::Torus(Torus { center, axis: normalizep(axis), major, minor, surface: None })
+    }
+
     fn assert_single_span(spans: &[Span], t0: f64, n0: Point, t1: f64, n1: Point) {
         assert_eq!(spans.len(), 1, "expected one span, got {:?}", spans);
         let s = spans[0];
@@ -2193,6 +2488,72 @@ mod span_tests {
         // Above the apex: the second nappe of the double cone must not
         // show up.
         assert!(spans_of(&c, &ray([-5.0, 0.0, 1.5], [1.0, 0.0, 0.0])).is_empty());
+    }
+
+    #[test]
+    fn torus_across_the_ring_has_two_spans() {
+        // Major 2, minor 0.5, axis +y: a ray along x through the center
+        // crosses the tube twice.
+        let t = torus([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], 2.0, 0.5);
+        let spans = spans_of(&t, &ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
+        assert_eq!(spans.len(), 2, "{:?}", spans);
+        assert!(close(spans[0].enter.t, 2.5) && close(spans[0].exit.t, 3.5));
+        assert!(close(spans[1].enter.t, 6.5) && close(spans[1].exit.t, 7.5));
+        // Leaving the first tube section toward the hole, the outward
+        // normal points into the hole (+x).
+        assert!(close_p(spans[0].enter.normal, [-1.0, 0.0, 0.0]));
+        assert!(close_p(spans[0].exit.normal, [1.0, 0.0, 0.0]));
+        assert!(close_p(spans[1].enter.normal, [-1.0, 0.0, 0.0]));
+        assert!(close_p(spans[1].exit.normal, [1.0, 0.0, 0.0]));
+        // hit_test sees the nearest crossing.
+        let hit = t.hit_test(&ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0])).unwrap();
+        assert!(close(hit.distance, 2.5));
+    }
+
+    #[test]
+    fn torus_through_the_tube_the_hole_and_from_inside() {
+        let t = torus([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], 2.0, 0.5);
+        // Straight down through the tube at x = 2.
+        let spans = spans_of(&t, &ray([2.0, 5.0, 0.0], [0.0, -1.0, 0.0]));
+        assert_single_span(&spans, 4.5, [0.0, 1.0, 0.0], 5.5, [0.0, -1.0, 0.0]);
+        // Down the axis, through the hole: nothing.
+        assert!(spans_of(&t, &ray([0.0, 5.0, 0.0], [0.0, -1.0, 0.0])).is_empty());
+        assert!(t.hit_test(&ray([0.0, 5.0, 0.0], [0.0, -1.0, 0.0])).is_none());
+        // From inside the tube: the span starts behind the origin.
+        let spans = spans_of(&t, &ray([2.0, 0.0, 0.0], [0.0, 1.0, 0.0]));
+        assert_single_span(&spans, -0.5, [0.0, -1.0, 0.0], 0.5, [0.0, 1.0, 0.0]);
+        // Tilted axis and offset center: the same torus stood on its
+        // side (axis +z) at [1, 1, 1], crossed along y through its
+        // center plane.
+        let side = torus([1.0, 1.0, 1.0], [0.0, 0.0, 1.0], 2.0, 0.5);
+        let spans = spans_of(&side, &ray([1.0, -5.0, 1.0], [0.0, 1.0, 0.0]));
+        assert_eq!(spans.len(), 2);
+        assert!(close(spans[0].enter.t, 3.5) && close(spans[1].exit.t, 8.5));
+        assert!(close_p(spans[0].enter.normal, [0.0, -1.0, 0.0]));
+    }
+
+    #[test]
+    fn torus_bounds_are_tight() {
+        let t = torus([1.0, 2.0, 3.0], [0.0, 1.0, 0.0], 2.0, 0.5);
+        let b = t.bounds().unwrap();
+        assert!(close_p(b.min, [-1.5, 1.5, 0.5]));
+        assert!(close_p(b.max, [3.5, 2.5, 5.5]));
+    }
+
+    #[test]
+    fn torus_as_a_csg_operand() {
+        // A disk with a ring-shaped groove cut into its top face, like
+        // the base of the POV xmastree's stand: a cylinder minus a torus
+        // lying in its top plane.
+        let base = difference(cylinder([0.0, 0.0, 0.0], [0.0, 0.5, 0.0], 4.0),
+                              torus([0.0, 0.5, 0.0], [0.0, 1.0, 0.0], 3.5, 0.125));
+        // Straight down into the groove at its deepest point.
+        let hit = base.hit_test(&ray([3.5, 5.0, 0.0], [0.0, -1.0, 0.0])).unwrap();
+        assert!(close(hit.distance, 4.625));
+        assert!(close_p(hit.normal, [0.0, 1.0, 0.0]));
+        // Beside the groove: the flat top.
+        let hit = base.hit_test(&ray([2.0, 5.0, 0.0], [0.0, -1.0, 0.0])).unwrap();
+        assert!(close(hit.distance, 4.5));
     }
 
     #[test]
@@ -2339,6 +2700,7 @@ mod span_tests {
             ("cuboid", cuboid([0.2, 0.1, -0.3], [2.0, 1.0, 3.0])),
             ("cylinder", cylinder([-1.0, -0.5, 0.0], [1.0, 1.0, 0.5], 0.8)),
             ("cone", cone([0.0, -1.0, 0.0], [0.5, 1.5, 0.3], 1.2)),
+            ("torus", torus([0.2, -0.1, 0.3], [0.3, 1.0, -0.2], 1.5, 0.4)),
         ]
     }
 
@@ -2567,6 +2929,52 @@ mod span_tests {
         // Beside it: the body's inherited surface.
         let hit = s.hit_test(&ray([-5.0, 0.8, 0.0], [1.0, 0.0, 0.0])).unwrap();
         assert_eq!(hit.surface, Some(body));
+    }
+
+    #[test]
+    fn merge_hides_internal_faces() {
+        // Two overlapping spheres along x. A ray starting inside the
+        // left one, as a transmitted ray would after entering it:
+        let a = sphere([-0.5, 0.0, 0.0], 1.0);
+        let b = sphere([0.5, 0.0, 0.0], 1.0);
+        let r = ray([-1.2, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        // A group reports the right sphere's buried surface...
+        let hit = group(vec![a.clone(), b.clone()]).hit_test(&r).unwrap();
+        assert!(close(hit.distance, 0.7));
+        // ...a merge goes straight through to the far side.
+        let m = merge(a, b);
+        let hit = m.hit_test(&r).unwrap();
+        assert!(close(hit.distance, 2.7));
+        assert!(close_p(hit.normal, [1.0, 0.0, 0.0]));
+        // From outside, both see the same first surface.
+        let hit = m.hit_test(&ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0])).unwrap();
+        assert!(close(hit.distance, 3.5));
+        // Bounds are the union; a half-space makes it unbounded.
+        assert_eq!(m.bounds().unwrap().min, [-1.5, -1.0, -1.0]);
+        assert_eq!(m.bounds().unwrap().max, [1.5, 1.0, 1.0]);
+        assert!(merge(sphere([0.0; 3], 1.0), plane([0.0, 0.0, 1.0], [0.0; 3])).bounds().is_none());
+    }
+
+    #[test]
+    fn csg_operands_are_auto_bounded() {
+        // Compound operands get a Bounded wrapper; leaf primitives
+        // don't. Hits are unaffected either way (checked by the other
+        // tests); this pins down the structure.
+        let d = difference(sphere([0.0; 3], 1.0),
+                           group(vec![sphere([1.0, 0.0, 0.0], 0.5), sphere([-1.0, 0.0, 0.0], 0.5)]));
+        match d {
+            Shape::Csg(c) => {
+                assert!(matches!(c.a, Shape::Sphere(_)));
+                assert!(matches!(c.b, Shape::Bounded(_)));
+            }
+            _ => panic!("expected a Csg node"),
+        }
+        // An unbounded compound operand stays unwrapped.
+        let d = difference(sphere([0.0; 3], 1.0), group(vec![plane([0.0, 0.0, 1.0], [0.0; 3])]));
+        match d {
+            Shape::Csg(c) => assert!(matches!(c.b, Shape::Group(_))),
+            _ => panic!("expected a Csg node"),
+        }
     }
 
     #[test]

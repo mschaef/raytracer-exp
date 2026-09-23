@@ -334,6 +334,8 @@ fn csg_rejects_bad_operands() {
     let cases: Vec<(String, &str, &str)> = vec![
         (format!("(difference {})", ball), "at least 2", "difference: one operand"),
         ("(intersection)".to_string(), "at least 2", "intersection: no operands"),
+        (format!("(merge {})", ball), "at least 2", "merge: one operand"),
+        (format!("(merge {} {})", ball, tri), "operand 2", "merge: triangle operand"),
         (format!("(difference {} {})", ball, tri), "operand 2", "difference: triangle operand"),
         (format!("(intersection {} {})", tri, ball), "operand 1", "intersection: triangle operand"),
         (format!("(difference {} (translate [1 0 0] (group [{} {}])))", ball, ball, tri),
@@ -360,6 +362,34 @@ fn csg_rejects_bad_operands() {
             source,
             expected,
             message
+        );
+    }
+}
+
+/// `torus` rejects parameters that don't describe a ring torus.
+#[test]
+fn torus_rejects_bad_parameters() {
+    // (source, text the error must contain, description)
+    let cases: &[(&str, &str, &str)] = &[
+        ("(torus {:major 1 :minor 1})", "0 < :minor < :major", "minor == major"),
+        ("(torus {:major 1 :minor 2})", "0 < :minor < :major", "minor > major"),
+        ("(torus {:major 1 :minor 0})", "0 < :minor < :major", "zero minor"),
+        ("(torus {:major 1 :minor 0.5 :axis [0 0 0]})", ":axis", "zero axis"),
+        ("(torus {:minor 0.5})", "major", "missing major"),
+    ];
+    for &(source, expected, what) in cases.iter() {
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(source, "torus_bad.lisp", &env);
+        }));
+        let message = match result {
+            Ok(_) => panic!("must reject {}: {}", what, source),
+            Err(p) => p.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        assert!(
+            message.contains(expected),
+            "error for {} ({}) should mention {:?}, got: {}",
+            what, source, expected, message
         );
     }
 }
@@ -643,6 +673,11 @@ fn spotlight_test_scene_loads() {
 #[test]
 fn transparency_test_scene_loads() {
     assert_scene_loads("transparency_test.lisp", "transparency-test-scene");
+}
+
+#[test]
+fn torus_test_scene_loads() {
+    assert_scene_loads("torus_test.lisp", "torus-test-scene");
 }
 
 #[test]

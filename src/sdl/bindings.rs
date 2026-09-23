@@ -41,9 +41,9 @@ use crate::render::geometry::{Point, lenp, normalizep, EPSILON};
 use crate::render::mesh::load_obj;
 use crate::render::render;
 use crate::render::shapes::{
-    bounded, bounded_with, difference, group, intersection, rotate_axis,
+    bounded, bounded_with, difference, group, intersection, merge, rotate_axis,
     rotate_x, rotate_y, rotate_z, scale, surfaced, transform, translate, AABB,
-    Cone, Cuboid, Cylinder, Plane, Shape, Sphere, Triangle,
+    Cone, Cuboid, Cylinder, Plane, Shape, Sphere, Torus, Triangle,
 };
 use crate::render::transform::Affine;
 use crate::render::{Camera, HeatmapTargets, Light, Scene, Surface, ViewMode};
@@ -84,6 +84,7 @@ pub fn install(env: &EnvRef) {
     define_native(env, "triangle", builtin_triangle);
     define_native(env, "cylinder", builtin_cylinder);
     define_native(env, "cone", builtin_cone);
+    define_native(env, "torus", builtin_torus);
 
     // Mesh loading (Phase 7).
     define_native(env, "load-obj", builtin_load_obj);
@@ -104,6 +105,7 @@ pub fn install(env: &EnvRef) {
     // Constructive solid geometry.
     define_native(env, "difference", builtin_difference);
     define_native(env, "intersection", builtin_intersection);
+    define_native(env, "merge", builtin_merge);
 
     // Affine transform constructors. Mirror the methods on
     // `Affine` so `transform` can be used directly from script.
@@ -847,6 +849,40 @@ fn builtin_cone(args: &[Value], pos: &Position) -> Value {
     Value::Shape(Rc::new(Shape::Cone(Cone { p0, p1, r, surface })))
 }
 
+/// `(torus {:major R :minor r :center [..] :axis [..] :surface S})` — a
+/// solid torus: the points within `:minor` of a circle of radius
+/// `:major` around `:center`, in the plane perpendicular to `:axis`.
+/// `:center` defaults to the origin and `:axis` to +y, which together
+/// are POV-Ray's `torus { R, r }`. `:axis` is normalized here. Requires
+/// `0 < minor < major`.
+fn builtin_torus(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 1, "torus", pos);
+    let map = require_map(&args[0], "torus", pos);
+    let major = require_key_number(&map, "major", "torus", pos);
+    let minor = require_key_number(&map, "minor", "torus", pos);
+    let center = maybe_key_point(&map, "center", "torus", pos).unwrap_or([0.0, 0.0, 0.0]);
+    let axis = maybe_key_point(&map, "axis", "torus", pos).unwrap_or([0.0, 1.0, 0.0]);
+    let surface = maybe_key_surface(&map, "surface", "torus", pos);
+    if lenp(axis) < EPSILON {
+        sdl_panic!(pos.clone(), "torus :axis must be non-zero (got {:?})", axis);
+    }
+    if !(minor > 0.0 && minor < major) {
+        sdl_panic!(
+            pos.clone(),
+            "torus needs 0 < :minor < :major (got :major {} :minor {})",
+            major,
+            minor
+        );
+    }
+    Value::Shape(Rc::new(Shape::Torus(Torus {
+        center,
+        axis: normalizep(axis),
+        major,
+        minor,
+        surface,
+    })))
+}
+
 /// `(load-obj <path-string>)` or `(load-obj <path-string> <surface>)`
 /// — load a Wavefront OBJ file from disk and return it as a
 /// `Shape::Group` of triangles.
@@ -1081,6 +1117,24 @@ fn builtin_intersection(args: &[Value], pos: &Position) -> Value {
     let first = iter.next().unwrap();
     let result = iter.fold(first, intersection);
     Value::Shape(Rc::new(result))
+}
+
+/// `(merge a b c ...)` — the points inside any operand, as one solid
+/// with no internal faces. Unlike `group`, where every operand keeps
+/// its whole surface, the parts of each operand's surface that lie
+/// inside another operand are removed, which matters for transparent
+/// solids (POV-Ray's `merge`). Built like `difference`: the operands
+/// after the first are grouped and merged with it in one step.
+fn builtin_merge(args: &[Value], pos: &Position) -> Value {
+    let mut operands = require_csg_operands(args, "merge", pos);
+    let rest = operands.split_off(1);
+    let a = operands.pop().unwrap();
+    let b = if rest.len() == 1 {
+        rest.into_iter().next().unwrap()
+    } else {
+        group(rest)
+    };
+    Value::Shape(Rc::new(merge(a, b)))
 }
 
 // ---------------------------------------------------------------------------

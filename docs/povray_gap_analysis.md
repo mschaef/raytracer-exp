@@ -30,6 +30,8 @@ plans.
     `rotate` angles port unchanged.
   - The black-background reference GIFs were rendered without the
     white backdrop plane that the newest `texaco.pov` adds.
+- **Torus: done** (X2), including as a CSG operand; see CLAUDE.md
+  entry 42. `merge` also landed.
 - **Next on the list:** xmastree (§5).
 
 ## 1. Summary

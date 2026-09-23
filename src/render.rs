@@ -15,6 +15,7 @@ pub mod shapes;
 pub mod mesh;
 pub mod output;
 pub mod sampler;
+pub mod poly;
 
 use std::cell::Cell;
 use std::convert::TryFrom;

@@ -270,6 +270,7 @@ impl fmt::Display for Value {
                 Shape::Triangle(_)  => f.write_str("#<shape triangle>"),
                 Shape::Cylinder(_)  => f.write_str("#<shape cylinder>"),
                 Shape::Cone(_)      => f.write_str("#<shape cone>"),
+                Shape::Torus(_)     => f.write_str("#<shape torus>"),
                 Shape::Group(_)     => f.write_str("#<shape group>"),
                 Shape::Transform(_) => f.write_str("#<shape transform>"),
                 Shape::Bounded(_)   => f.write_str("#<shape bounded>"),
@@ -277,6 +278,7 @@ impl fmt::Display for Value {
                 Shape::Csg(c) => match c.op {
                     CsgOp::Difference   => f.write_str("#<shape difference>"),
                     CsgOp::Intersection => f.write_str("#<shape intersection>"),
+                    CsgOp::Merge        => f.write_str("#<shape merge>"),
                 },
                 Shape::Light(_)     => f.write_str("#<shape light>"),
             },

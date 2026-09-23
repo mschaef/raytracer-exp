@@ -1,4 +1,5 @@
-; Leaf shape bindings: sphere, plane, cuboid, triangle, cylinder, cone.
+; Leaf shape bindings: sphere, plane, cuboid, triangle, cylinder, cone,
+; torus.
 
 (def red (surface {:color [1.0 0.0 0.0] :ambient 0.2 :specular 0.5 :light 0.6}))
 (def green (surface {:color [0.0 1.0 0.0] :ambient 0.2 :specular 0.5 :light 0.6}))
@@ -58,6 +59,27 @@
 
 ; A cone and a cylinder with the same p0/p1/r/surface are distinct shapes.
 (assert (not= co cy))
+
+; Torus. :major is the ring radius, :minor the tube radius. :center
+; defaults to the origin and :axis to +y (POV-Ray's torus).
+(def to (torus {:major 2 :minor 0.5 :surface red}))
+(assert (shape? to))
+(assert= (str to) "#<shape torus>")
+(assert= to (torus {:major 2.0 :minor 0.5 :center [0 0 0] :axis [0 1 0] :surface red}))
+
+; :axis is normalized, so any positive multiple gives the same torus.
+(assert= (torus {:major 2 :minor 0.5 :axis [0 0 3]})
+         (torus {:major 2 :minor 0.5 :axis [0 0 1]}))
+
+; Each parameter matters.
+(assert (not= to (torus {:major 2.5 :minor 0.5 :surface red})))
+(assert (not= to (torus {:major 2 :minor 0.4 :surface red})))
+(assert (not= to (torus {:major 2 :minor 0.5 :center [1 0 0] :surface red})))
+(assert (not= to (torus {:major 2 :minor 0.5 :axis [1 0 0] :surface red})))
+
+; A torus is a solid, so it works as a CSG operand.
+(assert (shape? (difference (cylinder {:p0 [0 0 0] :p1 [0 0.5 0] :r 4})
+                            (torus {:center [0 0.5 0] :major 3.5 :minor 0.125}))))
 
 ; Negative checks.
 (assert (not (shape? nil)))

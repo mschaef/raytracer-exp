@@ -1,4 +1,5 @@
-; CSG bindings: (difference a b ...) and (intersection a b ...).
+; CSG bindings: (difference a b ...), (intersection a b ...) and
+; (merge a b ...).
 ;
 ; Construction, display, n-ary forms, composition with transforms and
 ; with-surface, nesting, and a small render through the CSG hit path.
@@ -37,6 +38,14 @@
 
 ; n-ary intersection folds left.
 (assert= (intersection ball cube rod) (intersection (intersection ball cube) rod))
+
+; merge is a union with no internal faces. Like difference, extra
+; operands are grouped.
+(def merged (merge ball cube))
+(assert (shape? merged))
+(assert= (str merged) "#<shape merge>")
+(assert (not= merged (group [ball cube])))
+(assert= (merge ball cube rod) (merge ball (group [cube rod])))
 
 ; Every solid primitive is a valid operand, including a plane (as a
 ; half-space) and a cone. Any operand can be transformed, surfaced,

@@ -59,6 +59,9 @@ src/
                          rotation_x/y/z, rotation_axis. Plus compose, inverse,
                          transform_point, transform_vector.
     render/shapes.rs     The Shape enum and everything related. See below.
+    render/poly.rs       Real roots of quadratics, cubics and quartics
+                         (closed form, with Newton polishing for the
+                         quartic). Used by the torus intersection.
     render/mesh.rs       Wavefront OBJ loader (`load_obj`). Returns a
                          `Shape::Group` of `Shape::Triangle`s, so loaded
                          meshes integrate with the rest of the scene tree
@@ -122,11 +125,12 @@ pub enum Shape {
     Triangle(Triangle),                // Möller–Trumbore, smooth normals
     Cylinder(Cylinder),                // closed cylinder, body + caps
     Cone(Cone),                        // closed cone, lateral surface + base cap
+    Torus(Torus),                      // solid ring torus (quartic)
     Group(Vec<Shape>),                 // hierarchical container
     Transform(Box<Transformed>),       // affine-transformed subtree
     Bounded(Box<Bounded>),             // AABB-accelerated subtree
     Surfaced(Box<SurfacedShape>),      // default surface for a subtree
-    Csg(Box<Csg>),                     // difference / intersection of solids
+    Csg(Box<Csg>),                     // difference / intersection / merge of solids
     Light(Light),                      // positioned light source (invisible)
 }
 ```
@@ -1841,6 +1845,69 @@ Approximate order of recent commits, oldest first:
       libraries, with 47 unit and 63 suite tests passing, and the
       renders and all 24 frames made with that build.
 
+42. **CSG phase 4: torus, performance, merge.**
+    - **Torus primitive.**
+      - `Torus { center, axis (unit), major, minor, surface }`: the
+        points within `minor` of a circle of radius `major` around
+        `center`, perpendicular to `axis`.
+      - The intersection is a quartic, solved by the new
+        `render::poly` module. That module has Cardano/trigonometric
+        cubics and a Ferrari quartic via the resolvent cubic
+        (Schwarze's Graphics Gems structure), with Newton polishing,
+        and its own unit tests, including 500 random four-root
+        quartics.
+      - To keep the quartic well conditioned, `Torus::local_roots`
+        moves the ray into the torus's frame, normalizes the direction,
+        and re-origins it where it enters the bounding sphere (radius
+        `major + minor`). A ray that misses that sphere can't hit the
+        torus.
+      - Spans come from the sorted roots. Each gap between consecutive
+        roots is classified by testing its midpoint against the implicit
+        equation, rather than pairing roots by position, so a tangent
+        ray's double root can't flip inside and outside. That gives up
+        to two spans.
+      - Normals point from the nearest point on the core circle.
+        `bounds()` is tight: `major * sqrt(1 - axis[i]²) + minor` per
+        axis.
+      - SDL: `(torus {:major R :minor r :center [..] :axis [..]
+        :surface S})`. `:center` defaults to the origin and `:axis` to
+        +y (POV's `torus { R, r }`). The axis is normalized, and the
+        binding requires `0 < minor < major`.
+      - Tests: unit tests for two-span crossings with exact `t` and
+        normals, the tube, the hole, starting inside, a tilted torus,
+        bounds, and the xmastree-style grooved stand as CSG. The torus
+        was also added to both 2,000-ray span-vs-`hit_test` agreement
+        checks. `bindings_shapes.lisp` gained torus cases, and there's
+        a new `torus_rejects_bad_parameters` Rust test.
+      - New `scenes/torus_test.lisp` (upright ring, grooved stand under
+        a gold ring, a ring with a quarter cut away) with a smoke test.
+    - **Performance.** Profiling Texaco under callgrind showed CSG span
+      evaluation at about 83% of render time, with about a quarter of
+      the total in `malloc`/`free`. Two changes, each timed:
+      - Span buffers come from a thread-local pool
+        (`with_span_buffer`). The set operations append into the
+        caller's buffer (`span_*_into`), and groups and tori normalize
+        their appended range in place (`normalize_union_tail`, which
+        replaces `span_union_of`). Texaco went from 3.8 s to 3.1 s.
+      - `csg()` wraps compound operands (group, transform, surfaced,
+        CSG) that have finite bounds in `Bounded`. Texaco then took
+        2.65 s.
+      - Output was byte-identical for texaco, torus_test and csg_test
+        after each change. Timings are single-threaded, from the
+        sequential `rayon` stand-in.
+    - **`merge`.** `CsgOp::Merge`: the union of the operands' spans.
+      Unlike a `Group`, whose `hit_test` still sees each child's buried
+      surface, a merge has no internal faces, which shows with glass.
+      Its bounds are the union of the operands' (none if either is
+      unbounded). SDL `(merge a b c …)` groups the extra operands, like
+      `difference`. New unit tests, `bindings_csg.lisp` cases, and
+      rejection cases.
+    - **Not done.** `inverse` was skipped (no ported scene uses it).
+      Back faces of transparent primitives were prototyped and reverted
+      pending a decision; see the CSG plan's Phase 4.
+    - **How it was verified.** As in entries 40–41: built against
+      stand-in libraries, with 59 unit and 65 suite tests passing.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -2697,26 +2764,29 @@ Done; see "Recent work history" entry 41. Summary:
 
 Surface tuning is deliberately left for later.
 
-### Phase 4 — Deferred
+### Phase 4 — Follow-ons
 
-None of these is needed for Texaco.
+Done except as noted; see "Recent work history" entry 42.
 
-- **Performance.** Span evaluation allocates `Vec`s per ray per CSG
-  node. If the heatmap shows it matters, reuse scratch buffers, or
-  wrap each operand in `bounded` so rays that miss it skip it. No new
-  dependency without a measured need.
-- **`merge`.** A union that removes internal faces. Only visible with
-  transparent operands.
-- **Torus spans.** They land with the torus primitive (xmastree), whose
-  base subtracts tori. It's the first case with more than one span per
-  ray.
-- **Back faces of transparent primitives.** Answering `hit_test` for
-  `Sphere`/`Cuboid` from spans (or otherwise returning the exit face)
-  would let transmitted rays see a glass sphere's back surface. That's
-  a real behavior change for `transparency_test` and friends, so it
-  needs its own before/after decision.
-- **`inverse`** (POV's complement of a solid), if a scene ever needs
-  it.
+- **Torus spans.** Done, with the torus primitive itself: the first
+  solid with more than one span per ray.
+- **Performance.** Done. CSG span lists come from a per-thread buffer
+  pool, and groups and tori normalize their spans in place. Compound
+  CSG operands are wrapped in `Bounded` automatically. Texaco renders
+  about 30% faster, byte-identically.
+- **`merge`.** Done: `CsgOp::Merge` and `(merge a b …)`.
+- **`inverse`.** Skipped: no ported scene uses it (a keyword scan of
+  every POV file found none), which was this item's condition.
+- **Back faces of transparent primitives.** Not done; waiting on a
+  decision. A prototype (`Sphere` / `Cuboid` `hit_test` falling back to
+  the exit crossing when the entry is behind the ray) was rendered
+  against `transparency_test` and reverted. The results:
+  - Glass spheres look denser, because the back face also blends in.
+  - Shadows darken, because the shadow walk now crosses two surfaces.
+  - A dark crescent appears where the far wall is seen from inside with
+    its outward normal, facing away from the light.
+  It probably wants to land together with normals that face the ray for
+  shading.
 
 ### Verification
 
@@ -2782,11 +2852,12 @@ SDL milestone.
 **CSG.** Planned — see "CSG: implementation plan" above. First
 step of the POV-Ray port (`docs/povray_gap_analysis.md`).
 
-**More primitives.** Torus is the obvious remaining one; sphere, plane,
-cuboid, triangle, cylinder, and cone are all in. Each new primitive is a
-struct + `Hittable` impl + a new `Shape` variant + `From` impl + match
-arms (`hit_test` dispatch, `bounds()`, `collect_lights` leaf-noop, and
-the SDL `value.rs` Display arm + a `bindings.rs` constructor).
+**More primitives.** Sphere, plane, cuboid, triangle, cylinder, cone and
+torus are all in. Each new primitive is a struct + `Hittable` impl + a
+new `Shape` variant + `From` impl + match arms (`hit_test` dispatch,
+`bounds()`, `spans()` for CSG, `is_solid()`, `validate_surfaces`,
+`collect_lights` leaf-noop, and the SDL `value.rs` Display arm + a
+`bindings.rs` constructor).
 
 **More mesh formats.** PLY would be a clean addition (fits academic
 test models like the Stanford bunny); the loader interface is already
