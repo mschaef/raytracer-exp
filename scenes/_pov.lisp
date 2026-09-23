@@ -40,8 +40,6 @@
                     (abs (- (y b) (y a)))
                     (abs (- (z b) (z a)))]}))
 
-(defn pov-length [v] (sqrt (+ (* (x v) (x v)) (* (y v) (y v)) (* (z v) (z v)))))
-
 ; The arrow from the POV projects' `makeArrow` macro: a cylinder shaft
 ; of radius `diameter` from `start`, ending in a cone head of radius
 ; 1.5 * diameter * arrow-scale and length 3 * diameter * arrow-scale
@@ -49,7 +47,7 @@
 (defn pov-arrow [start end diameter arrow-scale]
   (let [dir      (p- end start)
         head-len (* diameter arrow-scale 3)
-        mid      (p- end (p* dir (/ head-len (pov-length dir))))]
+        mid      (p- end (p* dir (/ head-len (magnitude dir))))]
     (group [(cylinder {:p0 start :p1 mid :r diameter})
             (cone     {:p0 mid :p1 end :r (* diameter arrow-scale 1.5)})])))
 

@@ -1908,6 +1908,70 @@ Approximate order of recent commits, oldest first:
     - **How it was verified.** As in entries 40–41: built against
       stand-in libraries, with 59 unit and 65 suite tests passing.
 
+43. **SDL groundwork for the POV ports (step 5 of the gap analysis's
+    work order).** Language features xmastree needs, all additive:
+    - **Math built-ins.** `floor`, `ceil`, `round` (a float stays a
+      float, an int is unchanged; `round` goes half away from zero),
+      `int` (truncates toward zero to an int), `float`, `pow`, `exp`,
+      `log`, `asin`, `acos`, `atan`, `atan2`.
+    - **Linear-time list building.** `concat` (with `nil` counting as
+      empty), `mapcat`, and `into`. They exist because `conj` copies
+      its vector each call; see Pitfalls.
+    - **`for` comprehension.** New sugar in `desugar.rs`:
+      `(for [pat coll … :when t :let [bs]] body)`.
+      - Each binding becomes `(mapcat (fn [pat] rest) coll)`, or `map`
+        for the last one. `:when` becomes `(if t rest [])`, and `:let`
+        becomes `let`.
+      - Patterns destructure like `fn` parameters.
+      - It takes exactly one body form.
+      - `recur` in the body would target a generated `fn`, so don't use
+        it there.
+      - Malformed forms are rejected with errors naming `for`.
+    - **Random numbers.** `(random seed k1 k2 …)` and
+      `(random-gaussian seed k1 k2 …)` are counter-based, not
+      stateful.
+      - They hash their integer arguments (splitmix64 mixing) into a
+        uniform `[0, 1)` float, or a standard normal (Box–Muller).
+      - The same arguments always give the same number, nothing is
+        mutated, and each value is independent of evaluation order.
+      - A scene picks keys that say what a number is for, e.g.
+        `(random-gaussian 700 layer branch bead axis)` for one bead's
+        jitter.
+      - This fits the functional style chosen for the ports and avoids
+        threading RNG state through `reduce`. It doesn't reproduce
+        POV-Ray's sequence (that was always a Could; see the gap
+        analysis).
+    - **Vector helpers** in `stdlib.lisp`: `dot`, `cross`, `magnitude`,
+      `normalize`, `p-lerp`. `_pov.lisp`'s private `pov-length` was
+      replaced by `magnitude`.
+    - **Affine application.** Host bindings
+      `(affine-apply a p)` (point, translation included) and
+      `(affine-apply-vector a v)` (linear part only), so scripts can
+      compute positions, for instance to place beads as plain spheres
+      rather than wrapping each one in transform nodes.
+    - **Measured.**
+      - The old `(reduce conj [] (range n))` takes 0.9 s at 5,000 items,
+        8.9 s at 20,000 and 36.6 s at 40,000.
+      - `map` building 40,000 spheres and grouping them takes 0.05 s.
+      - Xmastree's scale (7 layers × 10 branches × `29 + 70·layer`
+        beads = 16,730 spheres, each jittered with `random-gaussian`
+        and placed with `affine-apply`, built with `for`) evaluates in
+        0.17 s.
+    - **Tests.**
+      - New `tests/sdl/random.lisp`: determinism; sensitivity to seed,
+        keys and key order; range; uniform mean, variance and decile
+        counts; normal mean, variance and the one-sigma fraction;
+        neighbouring-key covariance; picking one of n.
+      - New `tests/sdl/for_comprehension.lisp`. It's named that way
+        because `for` is a Rust keyword and so can't be an `sdl_test!`
+        name.
+      - Additions to `math.lisp`, `points.lisp`, `hofs.lisp` and
+        `bindings_transforms.lisp`, and `for` cases in
+        `desugar_rejects_malformed_forms`.
+      - Both new scripts are in `DECLARED` and the `sdl_test!` list.
+    - **How it was verified.** Built against the stand-in libraries,
+      with 59 unit and 67 suite tests passing.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -1946,6 +2010,16 @@ smell test is "does the output look the same as before for cases that
 shouldn't have changed, and right for cases that should?" Render the
 same scene before and after the change and diff the outputs.
 
+**Build long vectors in one pass, not with `conj`.** `conj` copies its
+vector every call, so `(reduce conj [] xs)` is quadratic: about 9 s for
+20,000 items and 37 s for 40,000. Use `map`, `for`, `mapcat`, `concat`
+or `into`, which are linear (16,730 computed spheres build in about
+0.17 s).
+
+**No exponent literals in the SDL.** The reader doesn't accept `1e-12`;
+it reads as the number 1 followed by the symbol `e-12`. Write the
+decimal out.
+
 **Running a scene.** `cargo run --release -- scenes/<name>.lisp`. The
 binding is derived from the filename: `<stem>-scene` with `_` → `-`.
 `SIZE=N` or `SIZE=WxH` overrides the default 1024×1024 (the teapot at
@@ -1981,8 +2055,8 @@ The language is a small Clojure-subset Lisp:
   as enumerated `Value` variants. No seq abstraction, no full numeric
   tower (auto-promotion in arithmetic only), no rationals or bignums.
 - **Special forms:** `def`, `let`, `fn`, `if`, `do`, `quote`, `recur`.
-  Syntactic sugar (`defn`, `when`, `when-not`, `cond`, `->`, `->>`)
-  is rewritten into these by the desugaring pass in
+  Syntactic sugar (`defn`, `when`, `when-not`, `cond`, `->`, `->>`,
+  `for`) is rewritten into these by the desugaring pass in
   `src/sdl/desugar.rs` before evaluation.
 - **Evaluation:** eager, single-threaded, downward closures only via
   parent-linked `Rc<RefCell<Environment>>`.

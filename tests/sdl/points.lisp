@@ -50,3 +50,22 @@
 (defn midpoint [a b] (p* (p+ a b) 0.5))
 (assert= (midpoint [0 0 0] [4 4 4]) [2.0 2.0 2.0])
 (assert= (midpoint [-1 -1 -1] [1 1 1]) [0.0 0.0 0.0])
+
+;; --------------------------------------------------------------------
+;; dot, cross, magnitude, normalize, p-lerp.
+;; --------------------------------------------------------------------
+
+(assert= (dot [1 2 3] [4 5 6]) 32)
+(assert= (dot [1 0 0] [0 1 0]) 0)
+(assert= (cross [1 0 0] [0 1 0]) [0 0 1])
+(assert= (cross [0 1 0] [1 0 0]) [0 0 -1])
+; The cross product is perpendicular to both inputs.
+(def c (cross [1 2 3] [-2 0.5 4]))
+(assert= (dot c [1 2 3]) 0.0)
+(assert= (dot c [-2 0.5 4]) 0.0)
+(assert= (magnitude [3 4 0]) 5.0)
+(assert= (normalize [0 0 5]) [0.0 0.0 1.0])
+(assert (< (abs (- (magnitude (normalize [1 2 3])) 1.0)) 0.000000000001))
+(assert= (p-lerp [0 0 0] [2 4 6] 0.5) [1.0 2.0 3.0])
+(assert= (p-lerp [1 1 1] [3 3 3] 0) [1.0 1.0 1.0])
+(assert= (p-lerp [1 1 1] [3 3 3] 1) [3.0 3.0 3.0])

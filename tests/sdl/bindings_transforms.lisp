@@ -75,6 +75,17 @@
 (def box2 (aabb [-1 -1 -1] [1 1 1]))
 (assert= box box2)
 
+; affine-apply transforms a point, translation included;
+; affine-apply-vector ignores the translation.
+(def turn-then-shift (affine-compose (affine-translation [1 0 0]) (affine-rotation-z (/ pi 2))))
+(def moved (affine-apply turn-then-shift [1 0 0]))
+(assert (< (magnitude (p- moved [1 1 0])) 0.000000000001))
+(assert= (affine-apply (affine-translation [1 2 3]) [0 0 0]) [1.0 2.0 3.0])
+(assert= (affine-apply-vector (affine-translation [1 2 3]) [1 0 0]) [1.0 0.0 0.0])
+(assert= (affine-apply-vector (affine-scale [2 3 4]) [1 1 1]) [2.0 3.0 4.0])
+; An affine and its inverse cancel.
+(assert (< (magnitude (p- (affine-apply (affine-inverse turn-then-shift) moved) [1 0 0])) 0.000000000001))
+
 ; Negative checks.
 (assert (not (affine? sp)))     ; shape, not affine
 (assert (not (aabb? sp)))       ; shape, not aabb

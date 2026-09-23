@@ -32,7 +32,13 @@ plans.
     white backdrop plane that the newest `texaco.pov` adds.
 - **Torus: done** (X2), including as a CSG operand; see CLAUDE.md
   entry 42. `merge` also landed.
-- **Next on the list:** xmastree (§5).
+- **Step 5, SDL groundwork: done.** `random` / `random-gaussian`
+  (counter-based, not POV's sequence), `floor` / `int` and friends,
+  vector helpers, `affine-apply`, and `concat` / `mapcat` / `into` /
+  `for`. Xmastree-scale bead generation evaluates in about 0.17 s. See
+  CLAUDE.md entry 43.
+- **Next on the list:** the BVH builder (step 7), then the xmastree
+  port (§5).
 
 ## 1. Summary
 

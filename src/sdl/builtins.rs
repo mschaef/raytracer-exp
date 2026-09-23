@@ -107,6 +107,27 @@ pub fn install(env: &EnvRef) {
     define_native(env, "sin", builtin_sin);
     define_native(env, "cos", builtin_cos);
     define_native(env, "tan", builtin_tan);
+    define_native(env, "asin", builtin_asin);
+    define_native(env, "acos", builtin_acos);
+    define_native(env, "atan", builtin_atan);
+    define_native(env, "atan2", builtin_atan2);
+    define_native(env, "pow", builtin_pow);
+    define_native(env, "exp", builtin_exp);
+    define_native(env, "log", builtin_log);
+    define_native(env, "floor", builtin_floor);
+    define_native(env, "ceil", builtin_ceil);
+    define_native(env, "round", builtin_round);
+    define_native(env, "int", builtin_int);
+    define_native(env, "float", builtin_float);
+
+    // Building vectors in linear time.
+    define_native(env, "concat", builtin_concat);
+    define_native(env, "mapcat", builtin_mapcat);
+    define_native(env, "into", builtin_into);
+
+    // Deterministic, stateless random numbers.
+    define_native(env, "random", builtin_random);
+    define_native(env, "random-gaussian", builtin_random_gaussian);
 }
 
 fn define_native(env: &EnvRef, name: &'static str, func: NativeFn) {
@@ -1096,4 +1117,211 @@ fn builtin_tan(args: &[Value], pos: &Position) -> Value {
         sdl_panic!(pos.clone(), "tan takes 1 argument (got {})", args.len());
     }
     Value::Float(require_number(&args[0], "tan", pos).tan())
+}
+
+
+// ---------------------------------------------------------------------------
+// More math
+// ---------------------------------------------------------------------------
+
+fn require_arity(args: &[Value], n: usize, name: &str, pos: &Position) {
+    if args.len() != n {
+        sdl_panic!(
+            pos.clone(),
+            "{} takes {} argument{} (got {})",
+            name,
+            n,
+            if n == 1 { "" } else { "s" },
+            args.len()
+        );
+    }
+}
+
+/// A one-argument float function: coerces its argument to a float and
+/// always returns a float, like `sqrt` and the trigonometric functions.
+fn float_fn(args: &[Value], name: &str, pos: &Position, f: fn(f64) -> f64) -> Value {
+    require_arity(args, 1, name, pos);
+    Value::Float(f(require_number(&args[0], name, pos)))
+}
+
+fn builtin_asin(args: &[Value], pos: &Position) -> Value { float_fn(args, "asin", pos, f64::asin) }
+fn builtin_acos(args: &[Value], pos: &Position) -> Value { float_fn(args, "acos", pos, f64::acos) }
+fn builtin_atan(args: &[Value], pos: &Position) -> Value { float_fn(args, "atan", pos, f64::atan) }
+fn builtin_exp(args: &[Value], pos: &Position) -> Value { float_fn(args, "exp", pos, f64::exp) }
+/// Natural logarithm. Like `sqrt`, a domain error gives NaN (or -inf
+/// at zero) rather than an error.
+fn builtin_log(args: &[Value], pos: &Position) -> Value { float_fn(args, "log", pos, f64::ln) }
+
+/// `(atan2 y x)` — the angle of the point (x, y) from the +x axis, in
+/// radians, in (-π, π].
+fn builtin_atan2(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 2, "atan2", pos);
+    let y = require_number(&args[0], "atan2", pos);
+    let x = require_number(&args[1], "atan2", pos);
+    Value::Float(y.atan2(x))
+}
+
+/// `(pow base exponent)` — always a float.
+fn builtin_pow(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 2, "pow", pos);
+    let b = require_number(&args[0], "pow", pos);
+    let e = require_number(&args[1], "pow", pos);
+    Value::Float(b.powf(e))
+}
+
+/// A rounding function: an int is returned unchanged; a float is
+/// rounded and stays a float (as in Clojure's `Math/floor`). Use `int`
+/// to get an integer.
+fn round_fn(args: &[Value], name: &str, pos: &Position, f: fn(f64) -> f64) -> Value {
+    require_arity(args, 1, name, pos);
+    match &args[0] {
+        Value::Int(i) => Value::Int(*i),
+        Value::Float(x) => Value::Float(f(*x)),
+        other => sdl_panic!(pos.clone(), "{} expected a number (got {})", name, other.type_name()),
+    }
+}
+
+fn builtin_floor(args: &[Value], pos: &Position) -> Value { round_fn(args, "floor", pos, f64::floor) }
+fn builtin_ceil(args: &[Value], pos: &Position) -> Value { round_fn(args, "ceil", pos, f64::ceil) }
+/// Rounds half away from zero: `(round 2.5)` is 3.0, `(round -2.5)` is -3.0.
+fn builtin_round(args: &[Value], pos: &Position) -> Value { round_fn(args, "round", pos, f64::round) }
+
+/// `(int x)` — an integer, truncating a float toward zero (as in
+/// Clojure): `(int 2.7)` is 2, `(int -2.7)` is -2. Combine with `floor`
+/// for rounding down: `(int (floor x))`.
+fn builtin_int(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 1, "int", pos);
+    match &args[0] {
+        Value::Int(i) => Value::Int(*i),
+        Value::Float(x) if x.is_finite() => Value::Int(x.trunc() as i64),
+        Value::Float(x) => sdl_panic!(pos.clone(), "int can't convert {} to an integer", x),
+        other => sdl_panic!(pos.clone(), "int expected a number (got {})", other.type_name()),
+    }
+}
+
+/// `(float x)` — the number as a float.
+fn builtin_float(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 1, "float", pos);
+    Value::Float(require_number(&args[0], "float", pos))
+}
+
+// ---------------------------------------------------------------------------
+// Building vectors in linear time
+// ---------------------------------------------------------------------------
+//
+// `conj` copies its vector argument every call, so building a long
+// vector with `(reduce conj [] ...)` is quadratic: about 9 s for 20,000
+// items. These build their result in one pass.
+
+/// `(concat v1 v2 ...)` — one vector holding the elements of every
+/// argument in order. `nil` counts as empty.
+fn builtin_concat(args: &[Value], pos: &Position) -> Value {
+    let mut parts = Vec::with_capacity(args.len());
+    for a in args {
+        match a {
+            Value::Nil => {}
+            other => parts.push(require_vec(other, "concat", pos)),
+        }
+    }
+    let mut out = Vec::with_capacity(parts.iter().map(|p| p.len()).sum());
+    for p in &parts {
+        out.extend(p.iter().cloned());
+    }
+    Value::Vec(Rc::new(out))
+}
+
+/// `(mapcat f coll)` — `(apply concat (map f coll))`: `f` returns a
+/// vector (or nil) for each element, and the results are joined.
+fn builtin_mapcat(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 2, "mapcat", pos);
+    let f = require_fn(&args[0], "mapcat", pos);
+    let coll = require_vec(&args[1], "mapcat", pos);
+    let mut out = Vec::new();
+    for x in coll.iter() {
+        match eval::apply(f, std::slice::from_ref(x), pos) {
+            Value::Nil => {}
+            Value::Vec(items) => out.extend(items.iter().cloned()),
+            other => sdl_panic!(
+                pos.clone(),
+                "mapcat: the function must return a vector (got {})",
+                other.type_name()
+            ),
+        }
+    }
+    Value::Vec(Rc::new(out))
+}
+
+/// `(into to from)` — `to` with every element of `from` appended, in
+/// one copy. `(into [] xs)` copies a vector; `(into acc more)` is the
+/// linear-time replacement for `(apply conj acc more)`.
+fn builtin_into(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 2, "into", pos);
+    builtin_concat(args, pos)
+}
+
+// ---------------------------------------------------------------------------
+// Random numbers
+// ---------------------------------------------------------------------------
+//
+// Counter-based rather than stateful: `(random seed k1 k2 ...)` hashes
+// its integer arguments into a number in [0, 1), so the same arguments
+// always give the same number and nothing is mutated. A scene gets as
+// many independent streams as it needs by choosing keys that identify
+// what the number is for, e.g. `(random 700 layer branch bead 0)` for
+// the x jitter of one bead. This keeps scene code functional (no state
+// to thread through `reduce`) and makes each random value independent
+// of evaluation order, so adding a bead doesn't reshuffle every other
+// one.
+
+fn splitmix(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// Hash the seed and keys (all integers) into a 64-bit state.
+fn random_state(args: &[Value], name: &str, pos: &Position) -> u64 {
+    if args.is_empty() {
+        sdl_panic!(pos.clone(), "{} takes a seed and optional integer keys", name);
+    }
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    for (i, a) in args.iter().enumerate() {
+        let k = match a {
+            Value::Int(k) => *k as u64,
+            other => sdl_panic!(
+                pos.clone(),
+                "{} {} must be an integer (got {} {})",
+                name,
+                if i == 0 { "seed".to_string() } else { format!("key {}", i) },
+                other,
+                other.type_name()
+            ),
+        };
+        state = splitmix(state ^ splitmix(k.wrapping_add(0x632b_e59b_d9b4_e019)));
+    }
+    state
+}
+
+/// The top 53 bits of `z` as a float in [0, 1).
+fn unit_float(z: u64) -> f64 {
+    (z >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// `(random seed k1 k2 ...)` — a float in [0, 1), uniformly
+/// distributed, determined entirely by the (integer) arguments.
+fn builtin_random(args: &[Value], pos: &Position) -> Value {
+    Value::Float(unit_float(random_state(args, "random", pos)))
+}
+
+/// `(random-gaussian seed k1 k2 ...)` — a normally distributed float
+/// with mean 0 and standard deviation 1, determined entirely by the
+/// arguments (Box–Muller on two uniforms derived from them). Scale and
+/// shift for other distributions: `(+ mean (* sd (random-gaussian ...)))`.
+fn builtin_random_gaussian(args: &[Value], pos: &Position) -> Value {
+    let state = random_state(args, "random-gaussian", pos);
+    let u1 = unit_float(splitmix(state ^ 0x1));
+    let u2 = unit_float(splitmix(state ^ 0x2));
+    // 1 - u1 is in (0, 1], so the log is finite.
+    let r = (-2.0 * (1.0 - u1).ln()).sqrt();
+    Value::Float(r * (std::f64::consts::TAU * u2).cos())
 }

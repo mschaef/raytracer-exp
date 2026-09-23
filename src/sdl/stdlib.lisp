@@ -59,3 +59,23 @@
   [(* (x a) s)
    (* (y a) s)
    (* (z a) s)])
+
+; Dot and cross products.
+(defn dot [a b]
+  (+ (* (x a) (x b)) (* (y a) (y b)) (* (z a) (z b))))
+
+(defn cross [a b]
+  [(- (* (y a) (z b)) (* (z a) (y b)))
+   (- (* (z a) (x b)) (* (x a) (z b)))
+   (- (* (x a) (y b)) (* (y a) (x b)))])
+
+; Length of a vector, and the unit vector in its direction. `normalize`
+; of a zero vector divides by zero (NaN components), like the host's
+; `normalizep`.
+(defn magnitude [a] (sqrt (dot a a)))
+
+(defn normalize [a] (p* a (/ 1.0 (magnitude a))))
+
+; Linear interpolation between points: `a` at t = 0, `b` at t = 1.
+(defn p-lerp [a b t]
+  (p+ (p* a (- 1.0 t)) (p* b t)))

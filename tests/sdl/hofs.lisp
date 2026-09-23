@@ -89,3 +89,20 @@
 (defn add-n [n] (fn [x] (+ x n)))
 (assert= (map (add-n 10) [1 2 3]) [11 12 13])
 (assert= (filter (fn [x] (> x 5)) (map (add-n 4) [1 2 3 4 5])) [6 7 8 9])
+
+;; --------------------------------------------------------------------
+;; concat, mapcat, into: building vectors in one pass.
+;; --------------------------------------------------------------------
+
+(assert= (concat) [])
+(assert= (concat [1 2] [3] [] [4 5]) [1 2 3 4 5])
+(assert= (concat [1] nil [2]) [1 2])
+(assert= (mapcat (fn [x] [x (* 10 x)]) [1 2 3]) [1 10 2 20 3 30])
+(assert= (mapcat (fn [x] (if (= 1 (mod x 2)) [x] nil)) [1 2 3]) [1 3])
+(assert= (mapcat (fn [x] []) [1 2 3]) [])
+(assert= (into [0] [1 2]) [0 1 2])
+(assert= (into [] (range 3)) [0 1 2])
+
+; Linear time: this would take seconds with (reduce conj ...).
+(assert= (count (mapcat (fn [i] [i i]) (range 20000))) 40000)
+(assert= (count (apply concat (map (fn [i] [i]) (range 20000)))) 20000)

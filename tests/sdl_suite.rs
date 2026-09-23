@@ -70,6 +70,7 @@ const DECLARED: &[&str] = &[
     "defn",
     "destructuring",
     "fn_form",
+    "for_comprehension",
     "hofs",
     "lights_in_objects",
     "literals",
@@ -81,6 +82,7 @@ const DECLARED: &[&str] = &[
     "points",
     "predicates",
     "quote",
+    "random",
     "recur",
     "render_dispatch",
     "strings",
@@ -132,6 +134,7 @@ sdl_test!(def_let);
 sdl_test!(defn);
 sdl_test!(destructuring);
 sdl_test!(fn_form);
+sdl_test!(for_comprehension);
 sdl_test!(hofs);
 sdl_test!(lights_in_objects);
 sdl_test!(literals);
@@ -143,6 +146,7 @@ sdl_test!(math);
 sdl_test!(points);
 sdl_test!(predicates);
 sdl_test!(quote);
+sdl_test!(random);
 sdl_test!(recur);
 sdl_test!(render_dispatch);
 sdl_test!(strings);
@@ -293,6 +297,15 @@ fn desugar_rejects_malformed_forms() {
         ("(->>)", "->>", "->>: missing value"),
         ("(-> 1 ())", "->", "->: empty-list step"),
         ("(->> 1 ())", "->>", "->>: empty-list step"),
+        ("(for)", "for", "for: missing bindings"),
+        ("(for x x)", "for", "for: non-vector bindings"),
+        ("(for [])", "for", "for: missing body"),
+        ("(for [] 1)", "for", "for: no bindings"),
+        ("(for [x] x)", "for", "for: odd binding forms"),
+        ("(for [x [1]] x x)", "for", "for: several body forms"),
+        ("(for [x [1] :when] x)", "for", "for: :when without a test"),
+        ("(for [x [1] :let x] x)", "for", "for: :let without a vector"),
+        ("(for [x [1] :while true] x)", "for", "for: unknown modifier"),
     ];
     for &(source, expected, what) in cases.iter() {
         let env = sdl::default_env();

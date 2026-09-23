@@ -118,6 +118,8 @@ pub fn install(env: &EnvRef) {
     define_native(env, "affine-rotation-axis", builtin_affine_rotation_axis);
     define_native(env, "affine-compose", builtin_affine_compose);
     define_native(env, "affine-inverse", builtin_affine_inverse);
+    define_native(env, "affine-apply", builtin_affine_apply);
+    define_native(env, "affine-apply-vector", builtin_affine_apply_vector);
 
     // Axis-aligned bounding boxes. Useful with `bounded-with`.
     define_native(env, "aabb", builtin_aabb);
@@ -1196,6 +1198,30 @@ fn builtin_affine_inverse(args: &[Value], pos: &Position) -> Value {
     require_arity(args, 1, "affine-inverse", pos);
     let a = require_affine(&args[0], "affine-inverse", pos);
     Value::Affine(a.inverse())
+}
+
+fn point_value(p: Point) -> Value {
+    Value::Vec(Rc::new(vec![Value::Float(p[0]), Value::Float(p[1]), Value::Float(p[2])]))
+}
+
+/// `(affine-apply a p)` — the point `p` transformed by `a`
+/// (translation included). Lets a script compute where something ends
+/// up, e.g. placing thousands of beads as plain spheres at computed
+/// centres instead of wrapping each one in transform nodes.
+fn builtin_affine_apply(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 2, "affine-apply", pos);
+    let a = require_affine(&args[0], "affine-apply", pos);
+    let p = require_point(&args[1], "affine-apply point", pos);
+    point_value(a.transform_point(p))
+}
+
+/// `(affine-apply-vector a v)` — the direction `v` transformed by the
+/// linear part of `a` only (no translation). Not renormalized.
+fn builtin_affine_apply_vector(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 2, "affine-apply-vector", pos);
+    let a = require_affine(&args[0], "affine-apply-vector", pos);
+    let v = require_point(&args[1], "affine-apply-vector vector", pos);
+    point_value(a.transform_vector(v))
 }
 
 // ---------------------------------------------------------------------------

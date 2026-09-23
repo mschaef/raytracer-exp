@@ -28,6 +28,8 @@
 //!   `(cond)` → `nil`
 //! - `(-> x f (g a))` → `(g (f x) a)` (thread first)
 //! - `(->> x f (g a))` → `(g a (f x))` (thread last)
+//! - `(for [x xs y ys :when t :let [z e]] body)` → nested `mapcat` /
+//!   `map` over `fn`s (see [`expand_for`])
 //!
 //! This is deliberately the same shape as macroexpansion: walk the
 //! tree, look up the head symbol in a table of transformers, rewrite,
@@ -95,6 +97,7 @@ fn desugar_list(items: &[Form], form: &Form) -> Form {
             "cond" => expand_cond(items, &form.pos),
             "->" => expand_thread(items, &form.pos, true),
             "->>" => expand_thread(items, &form.pos, false),
+            "for" => expand_for(items, &form.pos),
             _ => {
                 return Form::new(
                     FormKind::List(items.iter().map(desugar).collect()),
@@ -292,4 +295,82 @@ fn expand_thread(items: &[Form], pos: &Position, first: bool) -> Form {
         };
     }
     acc
+}
+
+/// `(for [bindings...] body)` — a list comprehension, as in Clojure,
+/// producing a vector.
+///
+/// Bindings are `pattern coll` pairs, nested left to right (the last
+/// one varies fastest), and patterns can destructure like `fn`
+/// parameters. Two modifiers can appear after any pair:
+/// `:when test` keeps only the combinations where `test` is truthy, and
+/// `:let [bindings]` binds names for the rest of the comprehension.
+///
+/// Expansion, clause by clause, where `rest` is the expansion of the
+/// remaining clauses:
+///
+/// - `pattern coll` → `(mapcat (fn [pattern] rest) coll)`, or
+///   `(map (fn [pattern] body) coll)` when it's the last clause
+/// - `:when test` → `(if test rest [])`
+/// - `:let [bs]` → `(let [bs] rest)`
+/// - no clauses left → `[body]`
+///
+/// Every level builds its result in one pass, so a comprehension over
+/// thousands of items is linear, unlike `(reduce conj ...)`. Because
+/// the body runs inside generated `fn`s, `recur` in the body recurs
+/// into the innermost generated function; don't use it there.
+fn expand_for(items: &[Form], pos: &Position) -> Form {
+    let bindings = match items.get(1) {
+        Some(Form { kind: FormKind::Vector(b), .. }) => b,
+        Some(_) => sdl_panic!(pos, "for requires a binding vector"),
+        None => sdl_panic!(pos, "for requires a binding vector and a body"),
+    };
+    let body = match &items[2..] {
+        [body] => body,
+        [] => sdl_panic!(pos, "for requires a body"),
+        _ => sdl_panic!(pos, "for takes a single body expression (wrap several in do)"),
+    };
+    if bindings.is_empty() {
+        sdl_panic!(pos, "for requires at least one binding");
+    }
+    for_clauses(bindings, body, pos)
+}
+
+fn for_clauses(clauses: &[Form], body: &Form, pos: &Position) -> Form {
+    let head_pos = pos;
+    match clauses {
+        [] => Form::new(FormKind::Vector(vec![body.clone()]), pos.clone()),
+        [Form { kind: FormKind::Keyword(k), .. }, rest @ ..] => {
+            let arg = match rest.first() {
+                Some(a) => a.clone(),
+                None => sdl_panic!(pos, "for: :{} needs a value", k),
+            };
+            let inner = for_clauses(&rest[1..], body, pos);
+            match k.as_str() {
+                "when" => list(
+                    vec![sym("if", head_pos), arg, inner, Form::new(FormKind::Vector(vec![]), pos.clone())],
+                    pos,
+                ),
+                "let" => {
+                    if !matches!(arg.kind, FormKind::Vector(_)) {
+                        sdl_panic!(pos, "for: :let needs a binding vector");
+                    }
+                    list(vec![sym("let", head_pos), arg, inner], pos)
+                }
+                other => sdl_panic!(pos, "for: unknown modifier :{} (expected :when or :let)", other),
+            }
+        }
+        [pattern, coll, rest @ ..] => {
+            let params = Form::new(FormKind::Vector(vec![pattern.clone()]), pattern.pos.clone());
+            if rest.is_empty() {
+                let f = list(vec![sym("fn", head_pos), params, body.clone()], pos);
+                list(vec![sym("map", head_pos), f, coll.clone()], pos)
+            } else {
+                let inner = for_clauses(rest, body, pos);
+                let f = list(vec![sym("fn", head_pos), params, inner], pos);
+                list(vec![sym("mapcat", head_pos), f, coll.clone()], pos)
+            }
+        }
+        [_] => sdl_panic!(pos, "for: binding vector needs an even number of forms"),
+    }
 }

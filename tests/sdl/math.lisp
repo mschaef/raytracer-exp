@@ -127,3 +127,48 @@
 ; assert can't catch panics here. The grid generator in
 ; scenes/sphere_surface_test.lisp is the smoke test that exercises
 ; mod + quot end-to-end against real iteration.
+
+;; --------------------------------------------------------------------
+;; Rounding and conversion.
+;; --------------------------------------------------------------------
+
+; floor / ceil / round keep a float a float and leave ints alone.
+(assert= (floor 2.7) 2.0)
+(assert= (floor -2.2) -3.0)
+(assert= (ceil 2.1) 3.0)
+(assert= (ceil -2.7) -2.0)
+(assert= (round 2.5) 3.0)
+(assert= (round -2.5) -3.0)
+(assert= (round 2.4) 2.0)
+(assert= (floor 7) 7)
+(assert (int? (floor 7)))
+(assert (float? (floor 7.0)))
+
+; int truncates toward zero and returns an int; float converts.
+(assert= (int 2.7) 2)
+(assert= (int -2.7) -2)
+(assert= (int 5) 5)
+(assert (int? (int 2.7)))
+(assert= (int (floor -2.2)) -3)
+(assert= (float 3) 3.0)
+(assert (float? (float 3)))
+
+; Picking one of n choices from a number in [0, 1).
+(assert= (int (* 21 0.999)) 20)
+(assert= (int (* 21 0.0)) 0)
+
+;; --------------------------------------------------------------------
+;; Powers, logs and inverse trig. All return floats.
+;; --------------------------------------------------------------------
+
+(assert= (pow 2 10) 1024.0)
+(assert= (pow 4 0.5) 2.0)
+(assert= (exp 0) 1.0)
+(assert= (log 1) 0.0)
+(assert (< (abs (- (log (exp 2.5)) 2.5)) 0.000000000001))
+(assert= (asin 1) (/ pi 2))
+(assert= (acos 1) 0.0)
+(assert= (atan 1) (/ pi 4))
+(assert= (atan2 1 1) (/ pi 4))
+(assert= (atan2 1 -1) (* 3 (/ pi 4)))
+(assert= (atan2 -1 0) (- (/ pi 2)))
