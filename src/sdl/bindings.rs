@@ -41,7 +41,7 @@ use crate::render::geometry::{Point, lenp, normalizep, EPSILON};
 use crate::render::mesh::load_obj;
 use crate::render::render;
 use crate::render::shapes::{
-    bounded, bounded_with, difference, group, intersection, merge, rotate_axis,
+    bounded, bounded_with, bvh, difference, group, intersection, merge, rotate_axis,
     rotate_x, rotate_y, rotate_z, scale, surfaced, transform, translate, AABB,
     Cone, Cuboid, Cylinder, Plane, Shape, Sphere, Torus, Triangle,
 };
@@ -91,6 +91,7 @@ pub fn install(env: &EnvRef) {
 
     // Composite / transformed shapes.
     define_native(env, "group", builtin_group);
+    define_native(env, "bvh", builtin_bvh);
     define_native(env, "transform", builtin_transform);
     define_native(env, "translate", builtin_translate);
     define_native(env, "scale", builtin_scale);
@@ -966,6 +967,21 @@ fn builtin_group(args: &[Value], pos: &Position) -> Value {
         .map(|v| require_shape_value(v, "group child", pos))
         .collect();
     Value::Shape(Rc::new(group(children)))
+}
+
+/// `(bvh [shape1 shape2 ...])` — like `group`, but organizes the shapes
+/// into a bounding-volume hierarchy so a ray only tests the few whose
+/// boxes it passes through. Use it for large collections (a mesh's worth
+/// of spheres, a forest of ornaments). Nested groups are flattened into
+/// the tree; shapes without finite bounds (planes) are kept alongside it.
+fn builtin_bvh(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 1, "bvh", pos);
+    let items = require_vec(&args[0], "bvh", pos);
+    let children: Vec<Shape> = items
+        .iter()
+        .map(|v| require_shape_value(v, "bvh child", pos))
+        .collect();
+    Value::Shape(Rc::new(bvh(children)))
 }
 
 /// `(transform affine shape)` — wraps `shape` in an arbitrary affine.

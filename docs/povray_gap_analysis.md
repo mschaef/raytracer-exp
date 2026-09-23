@@ -37,8 +37,9 @@ plans.
   vector helpers, `affine-apply`, and `concat` / `mapcat` / `into` /
   `for`. Xmastree-scale bead generation evaluates in about 0.17 s. See
   CLAUDE.md entry 43.
-- **Next on the list:** the BVH builder (step 7), then the xmastree
-  port (§5).
+- **Step 7, BVH builder: done.** `(bvh [...])`. Xmastree's 16,730 beads
+  render about 240× faster than as a plain group (CLAUDE.md entry 44).
+- **Next on the list:** porting xmastree with stand-ins (step 8, §5).
 
 ## 1. Summary
 

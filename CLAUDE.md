@@ -1972,6 +1972,59 @@ Approximate order of recent commits, oldest first:
     - **How it was verified.** Built against the stand-in libraries,
       with 59 unit and 67 suite tests passing.
 
+44. **BVH builder (step 7 of the gap analysis's work order).**
+    - **Builder.** New `bvh(children: Vec<Shape>) -> Shape` in
+      `shapes.rs`, and SDL `(bvh [shape ...])`, which takes a vector
+      like `group` and renders exactly like one.
+      - Nested plain `Group`s are flattened first, which is harmless
+        since a group is a union. Other wrappers (`Transform`,
+        `Surfaced`, `Bounded`, `Csg`) stay whole, as one item each.
+      - Items without finite bounds (planes) sit in a top-level group
+        beside the tree.
+      - Each item's bounds are computed once. The split is a median
+        split on the axis where the box centres are most spread out,
+        down to leaves of at most `BVH_LEAF_SIZE` = 4. Nodes are
+        `Bounded(Group(...))`, so spans, CSG, lights and validation
+        all work unchanged.
+    - **Nearer-first traversal.** `Shape::hit_test` on a group of
+      exactly two `Bounded` children (every interior BVH node) goes
+      through `nearer_first_hit`. It visits the box the ray enters
+      first, and skips the other when the hit already found is closer
+      than that box's entry point. New `AABB::entry(ray)` gives the
+      entry `t`, clamped to 0 inside; `AABB::intersects` is now
+      `entry(ray).is_some()`, unchanged in behaviour. Results are the
+      same as `nearest_hit`, except that the winner between two hits at
+      exactly equal distances could differ.
+    - **Measured** (single-threaded, from the stand-in `rayon`):
+      - 16,730 jittered beads (xmastree's count) at 160×120: 115 s as a
+        `group`, 0.83 s as a `bvh`, and 0.48 s with nearer-first
+        traversal. The renders are byte-identical.
+      - Texaco and the torus test are unchanged (checked by alternating
+        builds).
+      - `scenes/teapot.lisp` now uses `(bvh [(load-obj ...)])` inside
+        its transforms instead of a single `bounded` around the mesh.
+        At 256² it goes from 3.4 s to 0.25 s, byte-identical. The
+        committed model is 664 faces, or 1,166 triangles after
+        triangulation, not the ~6,000 mentioned in earlier entries.
+    - **Tests.**
+      - Unit tests: hits over 3,000 rays through a 500-sphere cloud
+        match a plain group exactly (distance and normal). Spans match
+        too, except for spans entirely behind the origin, which the
+        boxes skip harmlessly.
+      - The tree is balanced (1,000 items give depth 8–10, leaves of at
+        most 4), and the root bound equals the group's.
+      - Group flattening, unbounded children kept beside the tree,
+        transforms kept whole, the degenerate inputs, and
+        `AABB::entry`.
+      - New `tests/sdl/bindings_bvh.lisp`, registered in `DECLARED` and
+        the `sdl_test!` list.
+      - New `bvh_render_equivalence` Rust test, which renders a few
+        hundred random spheres with reflections, shadows and a plane,
+        as a `group` and as a `bvh`, and requires byte-equal output.
+    - **How it was verified.** Built against the stand-in libraries,
+      with 63 unit and 69 suite tests passing. `teapot_scene_loads` ran
+      for real this time, with the model staged from this machine.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -3062,21 +3115,12 @@ problems, each with its own fix:
 The README's own "Potential Futures" list overlaps these but is now somewhat
 out of date.
 
-**Performance: real BVH (bounding-volume hierarchy).** Phases 1 and 3 of
-BVH support are in: `Shape::Bounded` is the wrapper that does a ray-AABB
-test before recursing, `bounded(...)` auto-computes the bound, and
-`Shape::Transform` correctly bounds itself by transforming the child's
-eight AABB corners. What's missing is a BVH *builder*: a
-`bvh(children: Vec<Shape>) -> Shape` function that recursively splits a
-flat list of children into a balanced tree of `Bounded(Group(...))`
-nodes. Standard splitting heuristic is "median split along the longest
-axis" — find the axis with the largest spread of centroid positions,
-sort by centroid on that axis, split at the median, recurse until
-leaves are small enough (typically 4–8 items). That turns the teapot
-from O(n) per ray into O(log n), which is what makes large meshes
-pleasant to render. Manual annotation (wrapping a known mesh in
-`bounded(...)`) is the workaround until then; for the kinds of models
-this codebase deals with, that's tractable.
+**Performance: BVH.** Done: `bvh(children)` / `(bvh [...])` builds a
+median-split tree of `Bounded(Group(...))` nodes, traversed nearer-box
+first (see "Recent work history" entry 44). Possible follow-ons, if a
+scene ever needs them: a surface-area-heuristic (SAH) split for
+unevenly distributed geometry, and a flatter node layout to cut the
+per-node `Box` indirection.
 
 **Transform collapsing.** A nested `translate(rotate(scale(leaf)))` produces
 three separate `Transform` nodes, each doing its own ray-transform on the way

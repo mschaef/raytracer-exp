@@ -204,6 +204,13 @@ impl AABB {
     /// question we need to answer here is "should the renderer recurse
     /// into this subtree?"
     pub fn intersects(&self, ray: &Vector) -> bool {
+        self.entry(ray).is_some()
+    }
+
+    /// Where the ray enters the box: `Some(t)` with `t` clamped to 0
+    /// when the origin is already inside, `None` when `intersects` would
+    /// say false. Used to visit the nearer of two boxes first.
+    pub fn entry(&self, ray: &Vector) -> Option<f64> {
         let mut t_enter = f64::NEG_INFINITY;
         let mut t_exit = f64::INFINITY;
 
@@ -216,7 +223,7 @@ impl AABB {
                 // outside the slab, otherwise this axis doesn't constrain
                 // the t range.
                 if origin < self.min[i] || origin > self.max[i] {
-                    return false;
+                    return None;
                 }
                 continue;
             }
@@ -237,13 +244,13 @@ impl AABB {
             }
 
             if t_enter > t_exit {
-                return false;
+                return None;
             }
         }
 
         // Box is in front of the ray, or contains the ray's origin.
         // (t_exit < 0 means box is entirely behind the ray.)
-        t_exit > 0.0
+        if t_exit > 0.0 { Some(t_enter.max(0.0)) } else { None }
     }
 
     /// Convert the AABB into a renderable `Cuboid` carrying the supplied
@@ -447,7 +454,11 @@ impl Hittable for Shape {
             Shape::Cylinder(c)      => c.hit_test(ray),
             Shape::Cone(c)          => c.hit_test(ray),
             Shape::Torus(t)         => t.hit_test(ray),
-            Shape::Group(children)  => nearest_hit(ray, children),
+            Shape::Group(children)  => match children.as_slice() {
+                // Interior BVH nodes are a group of two bounded subtrees.
+                [Shape::Bounded(a), Shape::Bounded(b)] => nearer_first_hit(ray, a, b),
+                _ => nearest_hit(ray, children),
+            },
             Shape::Transform(t)     => t.hit_test(ray),
             Shape::Bounded(b)       => b.hit_test(ray),
             Shape::Surfaced(s)      => s.hit_test(ray),
@@ -998,6 +1009,30 @@ impl Hittable for Triangle {
     }
 }
 
+/// Nearest hit in two bounded subtrees, visiting the one whose box the
+/// ray enters first and skipping the other when the hit already found is
+/// nearer than where the ray enters its box. Same result as
+/// `nearest_hit` over the pair (ties between exactly equal distances
+/// aside), but a ray through a BVH usually descends one branch per level
+/// instead of both.
+fn nearer_first_hit(ray: &Vector, a: &Bounded, b: &Bounded) -> Option<RayHit> {
+    let (ta, tb) = match (a.bounds.entry(ray), b.bounds.entry(ray)) {
+        (None, None) => return None,
+        (Some(_), None) => return a.child.hit_test(ray),
+        (None, Some(_)) => return b.child.hit_test(ray),
+        (Some(ta), Some(tb)) => (ta, tb),
+    };
+    let ((near, _), (far, t_far)) = if ta <= tb { ((a, ta), (b, tb)) } else { ((b, tb), (a, ta)) };
+    let first = near.child.hit_test(ray);
+    if let Some(h) = &first {
+        if h.distance < t_far {
+            return first;
+        }
+    }
+    let second = far.child.hit_test(ray);
+    if second > first { second } else { first }
+}
+
 /// Returns the closest hit (smallest positive `distance`) among `objects`,
 /// or `None` if none of them were hit. Shared between the scene-level
 /// traversal in `render` and the recursive case for `Shape::Group`.
@@ -1053,6 +1088,83 @@ pub fn bounded(child: impl Into<Shape>) -> Shape {
 /// performance and is otherwise harmless.
 pub fn bounded_with(bounds: AABB, child: impl Into<Shape>) -> Shape {
     Shape::Bounded(Box::new(Bounded { bounds, child: child.into() }))
+}
+
+/// Most children a BVH leaf holds before it is split further.
+const BVH_LEAF_SIZE: usize = 4;
+
+/// Build a bounding-volume hierarchy over `children`: a balanced tree of
+/// `Bounded(Group(...))` nodes, so a ray tests O(log n) boxes instead of
+/// every child. Behaves exactly like `group(children)`, only faster.
+///
+/// - Nested plain `Group`s among the children are flattened first (a
+///   group is just a union, so this changes nothing visible), which lets
+///   the builder see every primitive. Other wrappers (`Transform`,
+///   `Surfaced`, `Bounded`, `Csg`) are kept whole and treated as one item
+///   each, using their own bounds.
+/// - Children with no finite bounds (planes, or anything containing one)
+///   can't go in the tree; they stay alongside it at the top level.
+/// - Splitting is the classic median split: take the axis along which
+///   the children's box centres are most spread out, sort by centre on
+///   that axis, split in half, recurse, and stop at `BVH_LEAF_SIZE`
+///   children.
+pub fn bvh(children: Vec<Shape>) -> Shape {
+    let mut flat = Vec::with_capacity(children.len());
+    flatten_groups(children, &mut flat);
+
+    let mut items: Vec<(AABB, Shape)> = Vec::with_capacity(flat.len());
+    let mut unbounded: Vec<Shape> = Vec::new();
+    for child in flat {
+        match child.bounds() {
+            Some(b) => items.push((b, child)),
+            None => unbounded.push(child),
+        }
+    }
+
+    let tree = if items.is_empty() { None } else { Some(bvh_node(items)) };
+    match (tree, unbounded.is_empty()) {
+        (Some(t), true) => t,
+        (Some(t), false) => {
+            unbounded.push(t);
+            Shape::Group(unbounded)
+        }
+        (None, _) => Shape::Group(unbounded),
+    }
+}
+
+fn flatten_groups(shapes: Vec<Shape>, out: &mut Vec<Shape>) {
+    for shape in shapes {
+        match shape {
+            Shape::Group(children) => flatten_groups(children, out),
+            other => out.push(other),
+        }
+    }
+}
+
+fn bvh_node(mut items: Vec<(AABB, Shape)>) -> Shape {
+    let bounds = items[1..].iter().fold(items[0].0, |acc, (b, _)| acc.union(b));
+    if items.len() <= BVH_LEAF_SIZE {
+        let children = items.into_iter().map(|(_, s)| s).collect();
+        return Shape::Bounded(Box::new(Bounded { bounds, child: Shape::Group(children) }));
+    }
+
+    let centre = |b: &AABB, i: usize| b.min[i] + b.max[i];
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for (b, _) in &items {
+        for i in 0..3 {
+            lo[i] = lo[i].min(centre(b, i));
+            hi[i] = hi[i].max(centre(b, i));
+        }
+    }
+    let axis = (0..3)
+        .max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b])))
+        .unwrap();
+
+    items.sort_by(|(a, _), (b, _)| centre(a, axis).total_cmp(&centre(b, axis)));
+    let right = items.split_off(items.len() / 2);
+    let children = vec![bvh_node(items), bvh_node(right)];
+    Shape::Bounded(Box::new(Bounded { bounds, child: Shape::Group(children) }))
 }
 
 /// Wrap a child in a `Shape::Surfaced` node carrying a default
@@ -2554,6 +2666,117 @@ mod span_tests {
         // Beside the groove: the flat top.
         let hit = base.hit_test(&ray([2.0, 5.0, 0.0], [0.0, -1.0, 0.0])).unwrap();
         assert!(close(hit.distance, 4.5));
+    }
+
+    // --- BVH ----------------------------------------------------------
+
+    /// Deterministic cloud of `n` small spheres in a 20-unit cube.
+    fn sphere_cloud(n: usize, seed: u64) -> Vec<Shape> {
+        let mut rng = Rng(seed);
+        (0..n)
+            .map(|_| sphere([rng.in_range(-10.0, 10.0), rng.in_range(-10.0, 10.0), rng.in_range(-10.0, 10.0)],
+                            rng.in_range(0.05, 0.6)))
+            .collect()
+    }
+
+    /// Depth of the tree and the size of its largest leaf group.
+    fn bvh_shape(s: &Shape) -> (usize, usize) {
+        match s {
+            Shape::Bounded(b) => match &b.child {
+                Shape::Group(children) if children.iter().all(|c| matches!(c, Shape::Bounded(_))) && children.len() == 2 => {
+                    let (d0, l0) = bvh_shape(&children[0]);
+                    let (d1, l1) = bvh_shape(&children[1]);
+                    (1 + d0.max(d1), l0.max(l1))
+                }
+                Shape::Group(children) => (1, children.len()),
+                _ => (1, 1),
+            },
+            _ => (0, 1),
+        }
+    }
+
+    #[test]
+    fn bvh_hits_match_a_plain_group() {
+        let cloud = sphere_cloud(500, 0xb7);
+        let tree = bvh(cloud.clone());
+        let flat = group(cloud);
+        let mut rng = Rng(0x7ee);
+        let mut hits = 0;
+        for _ in 0..3000 {
+            let start = [rng.in_range(-15.0, 15.0), rng.in_range(-15.0, 15.0), rng.in_range(-15.0, 15.0)];
+            let dir = normalizep([rng.in_range(-1.0, 1.0), rng.in_range(-1.0, 1.0), rng.in_range(-1.0, 1.0)]);
+            let r = ray(start, dir);
+            let (a, b) = (flat.hit_test(&r), tree.hit_test(&r));
+            match (&a, &b) {
+                (None, None) => {}
+                (Some(x), Some(y)) => {
+                    hits += 1;
+                    assert_eq!(x.distance, y.distance);
+                    assert_eq!(x.normal, y.normal);
+                }
+                _ => panic!("group {:?} vs bvh {:?}", a.map(|h| h.distance), b.map(|h| h.distance)),
+            }
+            // Spans (for CSG) agree too, apart from spans entirely
+            // behind the origin: the tree's boxes skip those, which is
+            // harmless because they can't affect anything in front of
+            // the ray (see the `Bounded` arm of `Shape::spans`).
+            let ahead = |v: Vec<Span>| v.into_iter().filter(|s| s.exit.t > 0.0).collect::<Vec<_>>();
+            assert_eq!(ahead(spans_of(&flat, &r)), ahead(spans_of(&tree, &r)));
+        }
+        assert!(hits > 300, "too few hits ({}) for a meaningful check", hits);
+    }
+
+    #[test]
+    fn bvh_is_balanced_with_small_leaves() {
+        let tree = bvh(sphere_cloud(1000, 1));
+        let (depth, leaf) = bvh_shape(&tree);
+        // 1000 items in leaves of at most 4, median split: 8 levels of
+        // splitting plus the leaf level.
+        assert!(leaf <= BVH_LEAF_SIZE, "leaf of {}", leaf);
+        assert!((8..=10).contains(&depth), "depth {}", depth);
+        // The root box encloses everything.
+        let all = group(sphere_cloud(1000, 1)).bounds().unwrap();
+        assert_eq!(tree.bounds().unwrap(), all);
+    }
+
+    #[test]
+    fn bvh_flattens_groups_and_keeps_unbounded_children() {
+        // Nested groups are flattened: 40 spheres in 4 groups of 10
+        // build the same tree as the 40 spheres directly.
+        let cloud = sphere_cloud(40, 9);
+        let nested: Vec<Shape> = cloud.chunks(10).map(|c| group(c.to_vec())).collect();
+        assert_eq!(bvh(nested), bvh(cloud.clone()));
+
+        // A plane can't be bounded, so it sits beside the tree.
+        let mut with_plane = cloud.clone();
+        with_plane.push(plane([0.0, 1.0, 0.0], [0.0, -20.0, 0.0]));
+        match bvh(with_plane) {
+            Shape::Group(top) => {
+                assert_eq!(top.len(), 2);
+                assert!(matches!(top[0], Shape::Plane(_)));
+                assert!(matches!(top[1], Shape::Bounded(_)));
+            }
+            other => panic!("expected a group, got {:?}", other),
+        }
+
+        // Transforms and surfaced subtrees are kept whole.
+        let t = translate([1.0, 0.0, 0.0], group(sphere_cloud(10, 3)));
+        let tree = bvh(vec![t.clone(), sphere([0.0; 3], 1.0)]);
+        let (_, leaf) = bvh_shape(&tree);
+        assert_eq!(leaf, 2);
+
+        // Degenerate inputs.
+        assert_eq!(bvh(vec![]), Shape::Group(vec![]));
+        assert!(matches!(bvh(vec![sphere([0.0; 3], 1.0)]), Shape::Bounded(_)));
+    }
+
+    #[test]
+    fn aabb_entry() {
+        let b = AABB::new([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]);
+        assert_eq!(b.entry(&ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0])), Some(4.0));
+        assert_eq!(b.entry(&ray([0.0, 0.0, 0.0], [1.0, 0.0, 0.0])), Some(0.0));
+        assert_eq!(b.entry(&ray([5.0, 0.0, 0.0], [1.0, 0.0, 0.0])), None);
+        assert_eq!(b.entry(&ray([-5.0, 5.0, 0.0], [1.0, 0.0, 0.0])), None);
     }
 
     #[test]

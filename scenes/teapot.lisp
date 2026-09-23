@@ -33,15 +33,11 @@
       ;; Reflective checkered ground.
       (plane {:normal [0 0 1] :p0 [0 0 -2] :surface surface-white-c})
 
-      ;; Loaded mesh, scaled and positioned to sit on the ground, with
-      ;; the bounding box wrapped *outside* the transforms.
-      ;; Shape::Transform::bounds() (BVH phase 3) computes a world-space
-      ;; AABB by transforming the eight corners of the child's
-      ;; local-space bound, so this composes correctly and is slightly
-      ;; cheaper than wrapping inside the transforms — rays that miss
-      ;; the world-space AABB don't even pay for the per-Transform ray
-      ;; inverse-transform before the test happens.
-      (bounded
-        (translate [0 0 -2]
-          (scale [0.5 0.5 0.5]
-            (load-obj "../models/utah_teapot.obj" surface-blue))))]}))
+      ;; Loaded mesh, scaled and positioned to sit on the ground. The
+      ;; mesh's triangles go into a BVH, inside the transforms so the
+      ;; tree is built once in model space. A plain `bounded` around the
+      ;; whole mesh only skips rays that miss the teapot entirely; the
+      ;; BVH also narrows each hitting ray down to a few triangles.
+      (translate [0 0 -2]
+        (scale [0.5 0.5 0.5]
+          (bvh [(load-obj "../models/utah_teapot.obj" surface-blue)])))]}))

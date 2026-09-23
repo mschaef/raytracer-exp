@@ -55,6 +55,7 @@ use raytracer::sdl::value::Value;
 /// catches drift.
 const DECLARED: &[&str] = &[
     "arithmetic",
+    "bindings_bvh",
     "bindings_camera",
     "bindings_csg",
     "bindings_lights",
@@ -119,6 +120,7 @@ macro_rules! sdl_test {
 }
 
 sdl_test!(arithmetic);
+sdl_test!(bindings_bvh);
 sdl_test!(bindings_camera);
 sdl_test!(bindings_csg);
 sdl_test!(bindings_lights);
@@ -405,6 +407,56 @@ fn torus_rejects_bad_parameters() {
             what, source, expected, message
         );
     }
+}
+
+/// A scene built with `(bvh ...)` must render byte-identically to the
+/// same shapes in a `(group ...)`: the BVH is purely an acceleration
+/// structure. Uses a few hundred jittered spheres (so the tree is several
+/// levels deep), a plane (kept outside the tree), reflection (so
+/// secondary rays traverse it too) and shadows.
+#[test]
+fn bvh_render_equivalence() {
+    let env = sdl::default_env();
+    let pid = std::process::id();
+    let path_a = std::env::temp_dir().join(format!("sdl_bvh_eq_a_{}.png", pid));
+    let path_b = std::env::temp_dir().join(format!("sdl_bvh_eq_b_{}.png", pid));
+    let _ = fs::remove_file(&path_a);
+    let _ = fs::remove_file(&path_b);
+    env.borrow_mut().define("PATH-A", Value::String(Rc::new(path_a.to_string_lossy().to_string())));
+    env.borrow_mut().define("PATH-B", Value::String(Rc::new(path_b.to_string_lossy().to_string())));
+
+    let source = r#"
+(def shiny (surface {:color [0.9 0.3 0.2] :ambient 0.2 :specular 0.5 :light 0.6 :reflection 0.3}))
+(def floor-s (surface {:color [0.2 0.2 0.2] :ambient 0.2 :specular 0.5 :light 0.6 :checked true}))
+(def balls
+  (for [i (range 12) j (range 12) :when (< (random 3 i j) 0.8)]
+    (sphere {:center [(- i 6) (- j 6) (* 0.3 (random-gaussian 3 i j))]
+             :r (+ 0.15 (* 0.3 (random 4 i j)))})))
+(defn make-scene [name shapes]
+  (scene {:name name
+          :camera (camera-looking-at [0 -14 8] [0 0 0] [0 0 1] 1.0)
+          :background [0 0 0]
+          :reflect-limit 2
+          :min-samples 1
+          :max-samples 1
+          :objects [(light-white [5 -5 10])
+                    (with-surface shiny shapes)
+                    (plane {:normal [0 0 1] :p0 [0 0 -1] :surface floor-s})]}))
+(def t-a (png-target 48 48))
+(render (make-scene "bvh-eq-group" (group balls)) t-a 48 48)
+(save-png t-a PATH-A)
+(def t-b (png-target 48 48))
+(render (make-scene "bvh-eq-bvh" (bvh balls)) t-b 48 48)
+(save-png t-b PATH-B)
+"#;
+    sdl::eval_source(source, "bvh_render_equivalence.lisp", &env);
+
+    let a = image::open(&path_a).unwrap_or_else(|e| panic!("decode PATH-A: {}", e)).to_rgb8();
+    let b = image::open(&path_b).unwrap_or_else(|e| panic!("decode PATH-B: {}", e)).to_rgb8();
+    assert!(a.as_raw().iter().any(|&c| c > 0), "the group render is all black");
+    assert_eq!(a.as_raw(), b.as_raw(), "bvh and group renders differ");
+    let _ = fs::remove_file(&path_a);
+    let _ = fs::remove_file(&path_b);
 }
 
 /// Lights-as-shapes affine equivalence: a scene with a bare
