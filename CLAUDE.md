@@ -2777,16 +2777,16 @@ Done except as noted; see "Recent work history" entry 42.
 - **`merge`.** Done: `CsgOp::Merge` and `(merge a b …)`.
 - **`inverse`.** Skipped: no ported scene uses it (a keyword scan of
   every POV file found none), which was this item's condition.
-- **Back faces of transparent primitives.** Not done; waiting on a
-  decision. A prototype (`Sphere` / `Cuboid` `hit_test` falling back to
+- **Back faces of transparent primitives.** Not done here; planned
+  separately in "Back faces: implementation plan". A prototype (`Sphere` / `Cuboid` `hit_test` falling back to
   the exit crossing when the entry is behind the ray) was rendered
   against `transparency_test` and reverted. The results:
   - Glass spheres look denser, because the back face also blends in.
   - Shadows darken, because the shadow walk now crosses two surfaces.
   - A dark crescent appears where the far wall is seen from inside with
     its outward normal, facing away from the light.
-  It probably wants to land together with normals that face the ray for
-  shading.
+  The back-faces plan handles all three: face-forward shading for the
+  crescent, and an entry-only transparency policy for the other two.
 
 ### Verification
 
@@ -2815,6 +2815,173 @@ Done except as noted; see "Recent work history" entry 42.
 - **Exit-hit normal orientation.** Keep outward-of-solid, matching the
   primitives, unless the transparency work wants to revisit it for
   every primitive at once.
+
+## Back faces: implementation plan
+
+Lets rays see the inside of solids, which is correct physics and a
+prerequisite for refraction, without changing how existing scenes look.
+It came out of the CSG plan's Phase 4, where a quick prototype (spheres
+and boxes returning their exit crossing) was rendered against
+`transparency_test` and reverted. That prototype showed two separate
+problems, each with its own fix:
+
+1. **A dark crescent from the normal.** An exit hit was shaded with the
+   solid's outward normal, which faces away from both the viewer and
+   the light, so Lambert and specular dropped to zero and only ambient
+   was left.
+2. **Denser glass and darker shadows from double counting.**
+   `transparency` works per surface: `shade_pixel` blends
+   `lerp(opaque, beyond, T)` at every hit, and `shadow_ray_walk`
+   multiplies by `T` at every occluder. A ray through a glass sphere now
+   crossed two surfaces, so it was blended and attenuated twice.
+
+### Current state
+
+- **Rays starting inside.** `Sphere` and `Cuboid` treat a ray that
+  starts inside them as a miss. `Cylinder`, `Cone`, `Torus` and every
+  `Csg` node already report the exit crossing.
+- **Normals.** `Plane` and `Triangle` return the same normal from either
+  side. No part of shading checks which side was hit.
+- **Visible symptoms.** CSG glass shows faint seams and dark back walls
+  (see the group vs merge demo in the CSG work), and a POV-style
+  `hollow` sphere around the scene, with the camera inside it, is
+  invisible. Xmastree has one: radius 2000, white.
+
+### The model
+
+- **Entering vs exiting.** A hit is *entering* when the geometric
+  normal faces the ray (`dot(normal, ray.delta) < 0`). This works
+  because every solid's normals point outward, including CSG cut faces,
+  which are flipped. Triangles have no inside, so they always count as
+  entering. A plane counts as a half-space, consistent with its CSG
+  spans.
+- **Face-forward shading.** Shading always uses the normal turned
+  toward the incoming ray. A wall seen from inside is lit like any
+  surface facing the viewer. The reflection vector is unaffected,
+  because the formula uses the normal twice and the sign cancels.
+- **A transparent surface's appearance applies once, on entry.**
+  - When a primary, reflection or transmission ray *exits* a transparent
+    surface, it continues in the same direction from the hit point: no
+    blend, no specular, no reflection.
+  - For a closed object that reproduces today's single
+    `lerp(opaque, beyond, T)`.
+  - These pass-throughs don't consume `transmit_limit` (otherwise N
+    stacked glass objects would hit the cap twice as fast), but they
+    get their own hard cap (for example 64) against degenerate
+    geometry.
+- **Opaque surfaces are shaded from either side.** An opaque exit hit
+  (a camera or reflection ray starting inside a solid) is shaded
+  normally with the face-forward normal. That's what makes a POV
+  `hollow` enclosing sphere visible.
+- **Shadow rays ignore exits entirely**, opaque or transparent.
+  - They attenuate only on entering crossings: `T` for transparent,
+    zero for opaque.
+  - For a transparent object between light and point, that's one factor
+    of `T`, as today.
+  - It also preserves the common idiom of a light sitting inside a
+    small marker sphere or a lamp shade: the light escapes, as it does
+    today, instead of being blocked by the inside of its own marker.
+
+### Phase 1 — Entering flag and face-forward shading
+
+- `RayHit` gains `entering: bool`. Set it wherever a `RayHit` is built:
+  - Primitives compare the geometric normal with the ray direction.
+    `Triangle` is always `true`.
+  - `Transformed::hit_test` recomputes it from the world-space normal
+    and the world ray (or carries it through: a transform can't change
+    which side a ray is on, but recomputing is simplest to trust).
+  - `first_span_hit` sets it from whether the endpoint is an `enter` or
+    an `exit`.
+- `shade_pixel` computes a shading normal `n` that is `hit.normal`
+  flipped toward the ray when needed, and uses it for Lambert,
+  specular, and the path-tracing hemisphere. The reflection vector can
+  keep `hit.normal`.
+- **Expected visible changes, and only these:**
+  - Planes and triangles seen from their back side are now lit instead
+    of ambient-only. Check `transform_test`, `moravian_star`, the
+    teapot, and any plane seen from below.
+  - The back walls of CSG glass lose their dark crescent. Their
+    double blend remains until Phase 2.
+- **Tests.**
+  - Unit tests for `entering` on each primitive, from outside and
+    inside, through a non-uniform `Transform`, and for CSG enter and
+    exit endpoints.
+  - The byte-pinned tests in `tests/sdl_suite.rs` must pass unchanged:
+    they're opaque and everything is seen from the front.
+
+### Phase 2 — Exit policy for transparency and shadows
+
+- **Pass-through.** In `shade_pixel` (or at the top of `ray_color`
+  after the hit), when `!hit.entering` and the surface is transparent
+  and not metallic, return the color of the continued ray, cast from
+  the hit point in the same direction. This needs a new `Depth` counter
+  and hard cap; `transmit` is left alone.
+- **Shadow walk.** `shadow_ray_walk` steps past exiting hits without
+  touching transmittance, and only entering hits attenuate.
+- **Expected visible changes.**
+  - Glass cylinders, cones, tori and CSG glass stop double-blending, so
+    CSG glass matches primitive glass.
+  - Sphere and cuboid glass is unchanged, because they still don't
+    report exits.
+- **Tests.**
+  - A unit-level check that a ray through a glass cylinder, and one
+    through an equivalent glass CSG shape, gives the same color as the
+    old single blend.
+  - A shadow-transmittance check through a glass cylinder.
+
+### Phase 3 — Spheres and cuboids report back faces
+
+- `Sphere::hit_test` falls back to the far root when the near one is at
+  or behind `EPSILON`.
+- `Cuboid::hit_test` falls back to `t_exit`, with the exit-face normal
+  tracked the way `Cuboid::span` already does. Every solid then agrees
+  with its own spans (the span tests can assert that for rays from
+  inside, too).
+- **Expected visible changes.**
+  - Opaque spheres and boxes seen from inside become visible, which is
+    the POV `hollow` case. Worth a new test scene: a camera inside a
+    large sphere, plus a glass sphere, to show the enclosure and that
+    glass is unchanged.
+  - Scenes where the camera already sits inside a sphere or box, if
+    there are any, will change. The diff below finds them.
+- **Acceptance test.** Render every scene in `scenes/` before and after
+  (a small script: same `SIZE`, fixed samples, then a per-pixel diff).
+  - Opaque scenes should be identical.
+  - Transparent scenes should differ by at most a level or two per
+    channel. The continued ray now starts at the back face, which moves
+    the last floating-point bits.
+  - Anything larger gets looked at.
+
+### Deferred
+
+- **Refraction** (see "Future directions"). The exit crossing is where
+  the ray bends back out with the inverse IOR, and where total internal
+  reflection happens, so the pass-through rule is its placeholder.
+- **Absorption along the path** (Beer–Lambert) as the physical
+  replacement for a per-surface `transparency`, with colored glass
+  falling out of it. It would also fix the known limitation below.
+- **Internal reflections** at exit faces (light bouncing inside glass).
+
+### Known limitations
+
+- A camera or light *inside* a glass object isn't attenuated by it,
+  because the object's appearance applies on entry, and a ray that
+  starts inside never enters. Absorption along the path fixes this.
+- A transparent `Plane` seen from its back side counts as an exit (the
+  half-space rule) and so disappears. A transparent pane should be a
+  thin cuboid instead.
+
+### Decisions still open
+
+- **Shading normal for smooth-shaded triangles.** Flip the
+  interpolated normal toward the ray, or decide the flip from the
+  geometric face normal. The geometric one avoids odd results at
+  silhouettes, where the interpolated normal and the face disagree.
+- **The pass-through cap value**, and whether hitting it returns the
+  background or black.
+- **Where the pass-through check lives:** `ray_color`, before
+  `shade_pixel`, or the top of `shade_pixel`. It should come before any
+  lighting work, so exits cost nothing.
 
 ## Future directions
 
