@@ -96,3 +96,45 @@
 ; F_MetalE, "very highly polished & reflective".
 (defn pov-metal-e [color]
   (surface {:color color :ambient 0.1 :light 0.7 :specular 0.8 :reflection 0.8}))
+
+;; --------------------------------------------------------------------
+;; The compass (makeCompass)
+;; --------------------------------------------------------------------
+
+; The red/green/blue arrow compass from the POV projects (xmastree,
+; braids, train): a black ball at the origin with arrows along +x (red),
+; +y (green) and +z (blue), each running from -1 to 1.
+(defn pov-compass-arrow [start end color]
+  (with-surface (pov-plain-specular color 0.3) (pov-arrow start end 0.05 1.5)))
+
+(def pov-compass
+  (group [(sphere {:center [0 0 0] :r 0.1 :surface (pov-plain-specular pov-black 0.3)})
+          (pov-compass-arrow [-1 0 0] [1 0 0] pov-red)
+          (pov-compass-arrow [0 -1 0] [0 1 0] pov-green)
+          (pov-compass-arrow [0 0 -1] [0 0 1] pov-blue)]))
+
+;; --------------------------------------------------------------------
+;; The xmastree harness
+;; --------------------------------------------------------------------
+;
+; xmastree.pov, braids.pov and train.pov share their lights and
+; backdrop: they began as copies of one file.
+
+; The two lights: a shadowless Gray60 fill light overhead, and a
+; White*1.5 spotlight at <0,5,0> + 30 aimed at <0,5,0>, radius 20° and
+; falloff 45° (both half-angles). At gDetail > 1 the spotlight is also a
+; 6x6 area light (POV's area_light <6,0,0>, <0,6,0>, which lies in the
+; xy plane whatever the spotlight's direction); pass `area?` for that.
+(defn xmas-lights [area?]
+  (let [spot {:location    [30 35 30]
+              :point-at    [0 5 0]
+              :inner-angle (deg->rad 20)
+              :outer-angle (deg->rad 45)
+              :intensity   1.5}]
+    [(light {:location [0 100 0] :color [0.6 0.6 0.6] :shadowless true})
+     (light (if area? (assoc spot :area-u [6 0 0] :area-v [0 6 0]) spot))]))
+
+; The white ground plane. The white sky_sphere and the white hollow
+; sphere of radius 2000 around everything become a white :background.
+(def xmas-ground
+  (plane {:normal [0 1 0] :p0 [0 0 0] :surface (pov-plain pov-white)}))

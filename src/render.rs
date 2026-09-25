@@ -1489,8 +1489,25 @@ fn shade_pixel(
     let mut light: LinearColor = [0.0, 0.0, 0.0];
     for l in lights {
         if let Some((lv, transmittance)) = light_vector(&hit.hit_point, scene, l, light_coord) {
-            let kspecular = f64::powf(dotp(hit.normal, normalizep(addp(ray.delta, lv.delta))), 50.0);
             let lambert = dotp(hit.normal, negp(lv.delta));
+            // A light behind the surface contributes nothing. Without
+            // this check the Lambert factor goes negative and darkens
+            // the surface below its ambient level, and the specular
+            // power of a negative dot product comes out positive and
+            // adds a spurious highlight. Closed objects mostly hide
+            // this, because a point facing away from a light is usually
+            // in its own object's shadow and never gets here; a plane
+            // or an open mesh lit from behind doesn't.
+            if lambert <= 0.0 {
+                continue;
+            }
+            // Blinn-Phong: the half vector between the directions toward
+            // the viewer and toward the light is the negation of
+            // `normalize(ray.delta + lv.delta)`, since both of those point
+            // *away from* the light and viewer. The even exponent used to
+            // hide the sign; clamping needs it the right way round.
+            let half_dot = -dotp(hit.normal, normalizep(addp(ray.delta, lv.delta)));
+            let kspecular = f64::powf(half_dot.max(0.0), 50.0);
 
             // Per-light tint that scales every contribution by this
             // light's color and intensity.

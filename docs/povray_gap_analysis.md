@@ -46,8 +46,10 @@ plans.
   shadowless lights, quad area lights, and area lights with spot cones,
   all through `(light {...})`. Xmastree now uses its original lights;
   its only stand-ins are flat wood and the white background.
-- **Next:** braids, train and redball (step 10 and the calibration
-  port), then procedural pigments (step 12) with the ornament port
+- **Braids, train and redball: ported** (step 10; CLAUDE.md entry 47).
+  Redball exposed a renderer bug: lights behind a surface darkened it.
+  That's fixed, with a regression test.
+- **Next:** procedural pigments (step 12) with the ornament port
   (step 11).
 
 ## 1. Summary

@@ -496,6 +496,54 @@ fn light_rejects_bad_keys() {
     }
 }
 
+/// A light behind a surface contributes nothing: a plane lit only from
+/// behind (with a specular term, so a spurious highlight would show)
+/// must render exactly like the same plane with no light at all. Found
+/// porting redball.pov, whose self-lit backdrop is lit from behind: the
+/// unclamped Lambert term went negative and darkened it, and the even
+/// specular exponent turned a negative half-vector dot product into a
+/// highlight. Closed objects mostly hide this because a point facing
+/// away from a light is in its own object's shadow; shadowless lights
+/// and open surfaces don't.
+#[test]
+fn back_lit_surfaces_get_no_light() {
+    let env = sdl::default_env();
+    let pid = std::process::id();
+    let path_a = std::env::temp_dir().join(format!("sdl_backlit_a_{}.png", pid));
+    let path_b = std::env::temp_dir().join(format!("sdl_backlit_b_{}.png", pid));
+    let _ = fs::remove_file(&path_a);
+    let _ = fs::remove_file(&path_b);
+    env.borrow_mut().define("PATH-A", Value::String(Rc::new(path_a.to_string_lossy().to_string())));
+    env.borrow_mut().define("PATH-B", Value::String(Rc::new(path_b.to_string_lossy().to_string())));
+
+    let source = r#"
+(def wall (plane {:normal [0 0 1] :p0 [0 0 10]
+                  :surface (surface {:color [0.5 0.5 0.5] :ambient 0.6 :light 0.8 :specular 1.0})}))
+(defn make-scene [lights]
+  (scene {:name "backlit"
+          :camera (camera-looking-at [0 0 -3] [0 0 0] [0 1 0] 1.0)
+          :background [0 0 0]
+          :min-samples 1
+          :max-samples 1
+          :objects (conj lights wall)}))
+(def t-a (png-target 24 24))
+(render (make-scene [(light-white [4 4 -4])
+                     (light {:location [-2 1 -1] :shadowless true})]) t-a 24 24)
+(save-png t-a PATH-A)
+(def t-b (png-target 24 24))
+(render (make-scene []) t-b 24 24)
+(save-png t-b PATH-B)
+"#;
+    sdl::eval_source(source, "back_lit_surfaces.lisp", &env);
+
+    let a = image::open(&path_a).unwrap_or_else(|e| panic!("decode PATH-A: {}", e)).to_rgb8();
+    let b = image::open(&path_b).unwrap_or_else(|e| panic!("decode PATH-B: {}", e)).to_rgb8();
+    assert!(b.as_raw().iter().any(|&c| c > 0), "the unlit render is all black");
+    assert_eq!(a.as_raw(), b.as_raw(), "lights behind the wall changed its shading");
+    let _ = fs::remove_file(&path_a);
+    let _ = fs::remove_file(&path_b);
+}
+
 /// Lights-as-shapes affine equivalence: a scene with a bare
 /// `(light-white [5 5 5])` in `:objects` must render byte-identically
 /// to a scene where the same light is positioned by wrapping a
@@ -700,6 +748,21 @@ fn pov_compass_scene_loads() {
 #[test]
 fn xmastree_scene_loads() {
     assert_scene_loads("xmastree.lisp", "xmastree-scene");
+}
+
+#[test]
+fn braids_scene_loads() {
+    assert_scene_loads("braids.lisp", "braids-scene");
+}
+
+#[test]
+fn train_scene_loads() {
+    assert_scene_loads("train.lisp", "train-scene");
+}
+
+#[test]
+fn redball_scene_loads() {
+    assert_scene_loads("redball.lisp", "redball-scene");
 }
 
 #[test]

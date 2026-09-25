@@ -2148,6 +2148,60 @@ Approximate order of recent commits, oldest first:
       - New `light_rejects_bad_keys` Rust test with 13 cases.
       - 68 unit and 71 suite tests pass (stand-in libraries).
 
+47. **Braids, train and redball ported (step 10 and the calibration
+    port), and a back-lit shading bug fixed.**
+    - **`_pov.lisp`.**
+      - `pov-compass` (with `pov-compass-arrow`) moved here from
+        `pov_compass.lisp`.
+      - New "xmastree harness", shared by the three files that began as
+        copies of one POV file. `(xmas-lights area?)` gives the
+        shadowless `Gray60` fill light and the 20°/45° spotlight at
+        `<30,35,30>`, which is a 6×6 quad area light when `area?`
+        (gDetail > 1). `xmas-ground` is the white ground plane.
+      - `xmastree.lisp` uses both. It renders byte-identically to
+        before that refactor.
+    - **`scenes/braids.lisp`.** Six ropes of eight bead strands,
+      200 rows high: 9,600 spheres placed with `affine-apply` in one
+      `for`, in a `bvh`. It uses gAngle 2's camera and the area
+      spotlight, at 16–64 samples. 640×480 takes 8 s single-threaded
+      (stand-in `rayon`).
+    - **`scenes/train.lisp`.** Despite its name, only the compass at
+      `<0,2,0>` seen from `<10,10,10>`. gDetail 0, so the spotlight has
+      no area light and the shadows are hard.
+    - **`scenes/redball.lisp`.** A green sphere (the file name says red)
+      in front of an `ambient 1` white backdrop at z = 10, with the
+      default camera. Brilliance, roughness and POV's `metallic` have
+      no equivalent here and are left out, per the porting conventions.
+    - **Bug fix: back-lit surfaces.** Redball's backdrop is lit from
+      behind, and it rendered grey instead of white, with a white patch
+      where the ball shadowed it. `shade_pixel` never clamped the
+      Lambert term, so a surface facing away from a light got negative
+      diffuse, darker than its ambient.
+      - Now a light with `lambert <= 0` is skipped entirely, and the
+        specular uses the correctly signed Blinn-Phong half vector,
+        clamped at 0 (see Pitfalls).
+      - The first attempt clamped the un-negated dot and removed every
+        real highlight. A whole-scene diff caught it.
+    - **Whole-scene diff after the fix** (96×72, every scene against the
+      pre-fix build):
+      - Changed: `redball`, as intended.
+      - Small changes from lights behind open or unshadowed surfaces:
+        `xmastree`, `braids` and `train` (their shadowless fill light
+        lit bead and arm undersides negatively; max 18 levels),
+        `teapot` (open mesh, max 22), `csg_test` and
+        `transparency_test` (glass, max 68 and 35).
+      - At most 6 levels: `texaco`, `cornell_box`, `cylinder_test`,
+        `torus_test`.
+      - Every other scene is byte-identical, including all the light
+        tests and `one_sphere`.
+    - **Tests.**
+      - New `back_lit_surfaces_get_no_light`: a plane lit only from
+        behind, by a normal and a shadowless light and with specular 1,
+        must render byte-identically to the same plane with no lights.
+        It was confirmed to fail on the old shading code.
+      - New smoke tests for braids, train and redball.
+      - 68 unit and 75 suite tests pass (stand-in libraries).
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -2195,6 +2249,17 @@ or `into`, which are linear (16,730 computed spheres build in about
 **No exponent literals in the SDL.** The reader doesn't accept `1e-12`;
 it reads as the number 1 followed by the symbol `e-12`. Write the
 decimal out.
+
+**Lights behind a surface contribute nothing; mind the half vector's
+sign.** `shade_pixel` skips a light when `dot(normal, toward light) <= 0`.
+Before entry 47 it didn't, and it relied on closed objects shadowing
+their own far side, which hides the problem on spheres lit by ordinary
+lights. Shadowless lights, planes and open meshes exposed it as negative
+diffuse. The Blinn-Phong half vector is `-normalize(ray.delta +
+lv.delta)`, because both deltas point *away* from the viewer and the
+light. The old code dotted the un-negated sum and let the even exponent
+(50) hide the sign. Clamping the un-negated dot deletes every real
+highlight, which happened once during entry 47.
 
 **Running a scene.** `cargo run --release -- scenes/<name>.lisp`. The
 binding is derived from the filename: `<stem>-scene` with `_` → `-`.

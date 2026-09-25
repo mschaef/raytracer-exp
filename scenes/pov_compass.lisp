@@ -6,20 +6,10 @@
 ; camera in front of the origin at -z. In POV-Ray this renders with red
 ; pointing right, green pointing up, and blue pointing away from the
 ; camera. If this scene renders the same way, POV coordinates and
-; rotations can be ported unchanged (see _pov.lisp).
+; rotations can be ported unchanged (see _pov.lisp). The compass
+; itself is `pov-compass` in _pov.lisp.
 
 (load "_pov.lisp")
-
-(def compass-surface-black (pov-plain-specular pov-black 0.3))
-
-(defn compass-arrow [start end color]
-  (with-surface (pov-plain-specular color 0.3) (pov-arrow start end 0.05 1.5)))
-
-(def pov-compass
-  (group [(sphere {:center [0 0 0] :r 0.1 :surface compass-surface-black})
-          (compass-arrow [-1 0 0] [1 0 0] pov-red)
-          (compass-arrow [0 -1 0] [0 1 0] pov-green)
-          (compass-arrow [0 0 -1] [0 0 1] pov-blue)]))
 
 (def pov-compass-scene
   (scene
