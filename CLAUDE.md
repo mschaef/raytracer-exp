@@ -2335,6 +2335,129 @@ Approximate order of recent commits, oldest first:
       - nba and cpot smoke tests.
       - 82 unit and 80 suite tests pass (stand-in libraries).
 
+50. **Area-light samples on R2; exponent literals.**
+    - **Area-light sampling.**
+      - The problem: the area-light coordinate came from Halton on
+        bases 11 and 13. For sample indices below 11 that is exactly
+        `(i/11, i/13)`, a line along the square's diagonal. So a pixel
+        that stopped after a few samples had sampled a line across the
+        light, not its area. On `soft_shadow_test` this showed as black
+        speckles in the penumbra and on the sphere, where every early
+        sample fell on the shadowed part of that line.
+      - The fix: `sampler::area_sample(i)` is now the R2 sequence
+        (`(0.5 + i/g, 0.5 + i/g²) mod 1`, where g is the plastic
+        number). Every prefix of R2 is spread out. It replaces
+        `halton_area`, keeping the same Cranley-Patterson rotation.
+      - Measured on `soft_shadow_test` at 200×200 with its own settings
+        (4–128 samples), against a 1024-sample reference: RMS error
+        fell from 2.98 to 1.00 (in 8-bit levels), bias from 0.89 to
+        0.22, and the speckles are gone, for 5% more samples.
+      - Measured on `xmastree` at 320×240: neutral at its 16–64
+        settings (2.06 before, 2.26 after, both close to the noise
+        floor). At 4–64 samples: 3.92 before, 2.96 after. The scene
+        keeps 16–64.
+      - Why xmastree is slow: nearly every lit pixel runs to its
+        maximum samples. The direction to the sampled light point
+        varies across the 6×6 quad, so Lambert shading varies by more
+        than the 0.005 threshold.
+      - Tried and rejected: shading from the light's centre while
+        sampling only the shadow ray. On xmastree it saved a third of
+        the samples at the same error. On soft_shadow_test (a large
+        light, close to the scene) it biased the image by about 5
+        levels. It isn't adopted. A per-light opt-in is possible if
+        render time matters.
+      - Only scenes with area lights changed: area_light_test, braids,
+        cornell_box, gi_test, soft_shadow_test and xmastree. Every
+        other scene renders byte-identically, including the texaco
+        frames.
+      - Not changed, with the same weakness: the lens sample (Halton
+        bases 5 and 7, whose first four points lie on a line) and the
+        indirect sample (bases 17 and 19). Moving them to R2 variants
+        would change DOF and GI renders.
+    - **Exponent literals.** The reader accepts `1e-12`, `2.5E3` and
+      `1e+2`. An exponent needs at least one digit after the `e` and
+      its optional sign, and it makes the number a float, as in
+      Clojure. `_smokestack.lisp` keeps its written-out decimals.
+    - **Tests.**
+      - `area_sample_known_values`, `area_sample_prefixes_are_spread`
+        (the first four points are in four different quadrants, which
+        the old pair fails) and `area_sample_in_unit_square` replace the
+        `halton_area` tests.
+      - Exponent cases in `literals.lisp`.
+      - 83 unit and 80 suite tests pass (stand-in libraries).
+
+51. **Lens samples scrambled.** This is the same fix as entry 50, for
+    the depth-of-field aperture.
+    - **The problem:** `halton_lens` was plain Halton on bases 5 and 7.
+      Its first four points are `(i/5, i/7)`, a line across the lens.
+    - **The fix:** `halton_lens` is the same bases, with each digit
+      permuted by Faure's permutations (`[0 3 2 1 4]` and
+      `[0 2 5 3 1 4 6]`, via a new `scrambled_radical_inverse`).
+      Scrambling keeps Halton's stratification. The lens and sub-pixel
+      coordinates together are still the 4D Halton sequence.
+    - **Why not R2, as for area lights:** each pixel's lens point would
+      then be its light point shifted by a fixed offset, so a scene with
+      both depth of field and an area light never samples most
+      (lens, light) combinations.
+      - Measured on `soft_shadow_test` with a depth-of-field camera: R2
+        for the lens gave RMS error 1.65, against 1.48 for scrambled
+        Halton.
+      - Its 1024-sample render also differed from the scrambled one by
+        up to 10 levels, which is consistent with converging to a
+        different image.
+    - **Other candidates:** dimensions 3 and 4 of the R4 sequence scored
+      3.69, against 3.34 for scrambled Halton.
+    - **Measured** on `depth_of_field_test` at 200×200 with its own
+      settings (4–32 samples), against a 1024-sample reference:
+      - RMS error fell from 4.09 to 3.34, bias from 1.62 to 1.24, and
+        the diagonal grain along blurred edges is gone.
+      - Samples went from 15.9 to 16.8 per pixel.
+    - **Byte-identity:** only `depth_of_field_test` changed. Every other
+      scene renders byte-identically, including the texaco frames.
+    - **Still unchanged:** the indirect (path-tracing) sample, Halton on
+      bases 17 and 19. It has the same early-line weakness, worse at 17
+      points, and would take the same scrambling if GI renders need it.
+    - **Tests:** `halton_lens_known_values` is updated for the
+      permutation, and a new `halton_lens_prefix_is_not_a_line` checks
+      that the first four points aren't collinear and that the first
+      five fall in five different leading-digit strata. 84 unit and 80
+      suite tests pass (stand-in libraries).
+
+52. **Indirect (path-tracing) samples scrambled.** This is the same
+    fix as entry 51, for the bounce direction.
+    - **The fix:** `halton_indirect` keeps bases 17 and 19 and permutes
+      digits with Faure's permutations (`FAURE_17`, `FAURE_19`).
+    - **The problem it fixes:** unscrambled, the first 16 points are
+      `(i/17, i/19)`, a line. Every pixel that took 16 or fewer samples
+      bounced its indirect rays along a line of directions.
+    - **Why Faure again:** alternatives (negating or reversing the base-19
+      permutation, a few random permutations) scored about the same on
+      periodic L2 discrepancy. Faure matches the lens and has a
+      construction the tests can check.
+    - **Measured** against high-sample references (`gi_test` at 96×96,
+      reference 4096; `cornell_box` at 64×64, reference 8192):
+      - At low samples (4–16 for gi_test, 16–64 for cornell_box), RMS
+        error fell from 2.94 to 1.69 and from 7.91 to 5.92. The
+        speckle is visibly lower.
+      - At the scenes' own settings (16–256 and the gi defaults), both
+        were already near converged: 0.30 to 0.29, and 1.12 to 1.08.
+      - Sample counts are unchanged.
+    - **Byte-identity:** only `gi_test` and `cornell_box` changed. Every
+      other scene renders byte-identically.
+    - **Not changed:** every bounce of a pixel sample still reuses the
+      same `indirect_coord`, so bounce 2 goes the same local direction
+      as bounce 1 (see the comment in `shade_pixel`). A per-bounce
+      coordinate would mean threading sampler state through the
+      recursion.
+    - **Tests:**
+      - `halton_indirect_known_values`, updated.
+      - `faure_tables_match_the_construction`, which rebuilds all four
+        tables from Faure's recursion.
+      - `halton_indirect_prefix_is_spread`: the first 16 points are
+        uncorrelated (|r| < 0.3, against 1.0 unscrambled), with 2–6 per
+        quadrant.
+      - 86 unit and 80 suite tests pass (stand-in libraries).
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -2378,10 +2501,6 @@ vector every call, so `(reduce conj [] xs)` is quadratic: about 9 s for
 20,000 items and 37 s for 40,000. Use `map`, `for`, `mapcat`, `concat`
 or `into`, which are linear (16,730 computed spheres build in about
 0.17 s).
-
-**No exponent literals in the SDL.** The reader doesn't accept `1e-12`;
-it reads as the number 1 followed by the symbol `e-12`. Write the
-decimal out.
 
 **`vec` is `vector`, not Clojure's `vec`.** `(vec xs)` wraps `xs` in a
 one-element vector rather than converting it. `map`, `mapcat` and `for`

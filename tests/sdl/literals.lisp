@@ -8,6 +8,17 @@
 (assert= 3.14 3.14)
 (assert= -2.5 -2.5)
 
+; Exponent notation, as in POV-Ray and mesh files. An exponent makes a
+; float even without a decimal point.
+(assert= 1e3 1000.0)
+(assert (float? 1e3))
+(assert= 2.5E2 250.0)
+(assert= 1e+2 100.0)
+(assert= 1.5e-3 0.0015)
+(assert= -4e-2 -0.04)
+(assert (< 0.0 1e-12 0.000001))
+(assert= [1e1 -1e1] [10.0 -10.0])
+
 (assert= true true)
 (assert= false false)
 (assert= nil nil)

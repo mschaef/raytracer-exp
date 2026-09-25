@@ -22,8 +22,9 @@
 //! - Vectors: `[ ... ]`.
 //! - Maps: `{ ... }` with an even number of forms.
 //! - Strings: `"..."` with `\n`, `\t`, `\r`, `\\`, `\"` escapes.
-//! - Numbers: optional `-`, decimal digits, optional `.<digits>` for
-//!   floats. No `e` exponent notation in Phase 1 (easy to add later).
+//! - Numbers: optional `-`, decimal digits, optional `.<digits>`, and
+//!   an optional exponent (`e` or `E`, an optional sign, digits). A
+//!   `.` or an exponent makes a float: `1e3` is `1000.0`.
 //! - Keywords: `:foo` — stored without the leading `:`.
 //! - Symbols: anything else that isn't whitespace or a delimiter.
 //! - `nil`, `true`, `false`: read as their respective literal forms.
@@ -352,6 +353,28 @@ impl<'a> Reader<'a> {
                 break;
             } else {
                 break;
+            }
+        }
+        // An exponent, as in `1e-12` or `2.5E3`, makes the number a
+        // float. It needs at least one digit after the `e` (and its
+        // optional sign); otherwise the `e` isn't part of the number.
+        if let Some(b'e') | Some(b'E') = self.peek() {
+            let digits_at = match self.peek_at(1) {
+                Some(b'+') | Some(b'-') => 2,
+                _ => 1,
+            };
+            if self.peek_at(digits_at).map_or(false, |c| c.is_ascii_digit()) {
+                is_float = true;
+                for _ in 0..digits_at {
+                    s.push(self.advance().unwrap() as char);
+                }
+                while let Some(c) = self.peek() {
+                    if !c.is_ascii_digit() {
+                        break;
+                    }
+                    s.push(c as char);
+                    self.advance();
+                }
             }
         }
         if is_float {

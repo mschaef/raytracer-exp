@@ -61,6 +61,10 @@ plans.
     ior).
   - Both scenes come out brighter than POV's renders (nba is compared
     with `magic/nba.tga`), which is left for tuning.
+- **Loose ends done** (CLAUDE.md entry 50):
+  - Area-light samples now use the R2 sequence, which clears the
+    speckled penumbrae at low sample counts.
+  - The SDL reader accepts exponent literals (`1e-12`).
 - **Next:** snowman. Before that, optionally: layered textures, and a
   tuning pass over the ported scenes.
 
