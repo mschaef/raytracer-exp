@@ -52,8 +52,9 @@ pub enum Wave {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Pigment {
     pub pattern: Pattern,
-    /// Turbulence amplitude; 0 is none.
-    pub turbulence: f64,
+    /// Turbulence amplitude per axis (POV-Ray's `turbulence <x, y, z>`;
+    /// a single number is the same on all three). Zero is none.
+    pub turbulence: [f64; 3],
     pub octaves: Octaves,
     /// Applied to continuous patterns (wood); ignored for the checker.
     pub wave: Wave,
@@ -67,6 +68,10 @@ pub struct Pigment {
 }
 
 impl Pigment {
+    fn has_turbulence(&self) -> bool {
+        self.turbulence.iter().any(|a| *a != 0.0)
+    }
+
     /// The pigment's colour at `p`, a point in texture space.
     pub fn color_at(&self, p: Point) -> LinearColor {
         let q = self.from_texture.transform_point(p);
@@ -75,21 +80,19 @@ impl Pigment {
                 // POV-Ray's wood: turbulence displaces x and y through a
                 // sine, then the value is the distance from the z axis.
                 let (mut x, mut y) = (q[0], q[1]);
-                if self.turbulence > 0.0 {
+                if self.has_turbulence() {
                     let t = turbulence(q, self.octaves);
-                    x += ((x + t[0]) * self.turbulence * std::f64::consts::TAU).sin();
-                    y += ((y + t[1]) * self.turbulence * std::f64::consts::TAU).sin();
+                    let [tx, ty, _] = self.turbulence;
+                    x += ((x + t[0]) * tx * std::f64::consts::TAU).sin();
+                    y += ((y + t[1]) * ty * std::f64::consts::TAU).sin();
                 }
                 apply_wave((x * x + y * y).sqrt(), self.wave)
             }
             Pattern::Checker => {
-                let q = if self.turbulence > 0.0 {
+                let q = if self.has_turbulence() {
                     let t = turbulence(q, self.octaves);
-                    [
-                        q[0] + self.turbulence * t[0],
-                        q[1] + self.turbulence * t[1],
-                        q[2] + self.turbulence * t[2],
-                    ]
+                    let a = self.turbulence;
+                    [q[0] + a[0] * t[0], q[1] + a[1] * t[1], q[2] + a[2] * t[2]]
                 } else {
                     q
                 };
@@ -153,7 +156,7 @@ mod tests {
     fn pigment(pattern: Pattern, map: Vec<(f64, LinearColor)>) -> Pigment {
         Pigment {
             pattern,
-            turbulence: 0.0,
+            turbulence: [0.0; 3],
             octaves: Octaves::default(),
             wave: Wave::Triangle,
             color_map: map,
@@ -222,7 +225,7 @@ mod tests {
     #[test]
     fn turbulence_perturbs_but_stays_in_the_map() {
         let mut wood = pigment(Pattern::Wood, vec![(0.0, BLACK), (1.0, WHITE)]);
-        wood.turbulence = 0.3;
+        wood.turbulence = [0.3; 3];
         let mut differs = false;
         for i in 0..200 {
             let p = [0.05 * i as f64, 0.37, 0.11 * i as f64];
@@ -232,5 +235,24 @@ mod tests {
             differs |= (c[0] - plain[0]).abs() > 1e-6;
         }
         assert!(differs);
+    }
+
+    #[test]
+    fn wood_turbulence_is_per_axis() {
+        // Turbulence only in y leaves points on the x axis' y = 0 line
+        // perturbed in y alone; turbulence only in z (which wood ignores)
+        // changes nothing.
+        let plain = pigment(Pattern::Wood, vec![(0.0, BLACK), (1.0, WHITE)]);
+        let mut z_only = plain.clone();
+        z_only.turbulence = [0.0, 0.0, 1000.0];
+        let mut y_only = plain.clone();
+        y_only.turbulence = [0.0, 0.3, 0.0];
+        let mut y_differs = false;
+        for i in 0..100 {
+            let p = [0.013 * i as f64 + 0.2, 0.31, 0.07 * i as f64];
+            assert_eq!(z_only.color_at(p), plain.color_at(p));
+            y_differs |= y_only.color_at(p) != plain.color_at(p);
+        }
+        assert!(y_differs);
     }
 }

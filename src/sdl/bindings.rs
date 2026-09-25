@@ -598,7 +598,7 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
 /// - `:color-map` — `[[value [r g b]] ...]`, ascending values in
 ///   `[0, 1]`; repeat a value for a hard edge. For a checker,
 ///   `:colors [a b]` is the shorthand POV uses.
-/// - `:turbulence` (default 0), with `:octaves` (6), `:omega` (0.5) and
+/// - `:turbulence` (default 0; a number, or `[x y z]` per axis), with `:octaves` (6), `:omega` (0.5) and
 ///   `:lambda` (2.0), as in POV-Ray.
 /// - `:wave` — `:triangle` (the default, and POV's for wood), `:ramp`
 ///   or `:sine`. Ignored by the checker.
@@ -694,10 +694,17 @@ fn build_pigment(v: &Value, pos: &Position) -> &'static Pigment {
         .get("transform")
         .map(|v| require_affine(v, "pigment :transform", pos))
         .unwrap_or_else(Affine::identity);
+    // A number, or a vector for per-axis amounts (POV's
+    // `turbulence <0.05, 0.08, 1000>`).
+    let turbulence = match map.get("turbulence") {
+        None => [0.0; 3],
+        Some(v @ Value::Vec(_)) => require_point(v, "pigment :turbulence", pos),
+        Some(v) => [require_number(v, "pigment :turbulence", pos); 3],
+    };
 
     Box::leak(Box::new(Pigment {
         pattern,
-        turbulence: maybe_key_number(&map, "turbulence", "pigment", pos).unwrap_or(0.0),
+        turbulence,
         octaves,
         wave,
         color_map,

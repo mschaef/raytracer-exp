@@ -95,6 +95,78 @@
      :color-map  [[0.0 a] [0.25 b] [0.40 c] [0.50 d] [0.70 e] [0.98 f] [1.0 a]]
      :transform  (affine-scale [0.05 0.05 1])}))
 
+;; POV colour maps are lists of two-colour entries, [v0 v1 c0 c1]: the
+;; colour runs from c0 at v0 to c1 at v1. Where one entry's c1 differs
+;; from the next entry's c0 the map steps, which a repeated value
+;; reproduces here.
+(defn pov-color-map [entries]
+  (mapcat (fn [[v0 v1 c0 c1]] [[v0 c0] [v1 c1]]) entries))
+
+;; More of woods.inc, bottom layers only, as for T_Wood25 above.
+
+; P_WoodGrain1A: the grain under most of the T_Wood textures.
+(defn pov-wood-grain-1a [color-map]
+  {:pattern    :wood
+   :turbulence 0.04
+   :octaves    3
+   :color-map  color-map
+   :transform  (affine-scale [0.05 0.05 1])})
+
+; M_Wood7A, which woodmaps.inc repeats as M_Wood13A: yellow pine.
+(def pov-m-wood-7a
+  (let [a [0.60 0.35 0.20]
+        b [0.90 0.65 0.30]]
+    (pov-color-map [[0.0 0.1 a a] [0.1 0.9 a b] [0.9 1.0 b a]])))
+
+; M_Wood18A: orange, with dark late-wood bands.
+(def pov-m-wood-18a
+  (let [o50 [1.0 0.50 0.0]
+        o45 [1.0 0.45 0.0]
+        o40 [1.0 0.40 0.0]
+        o36 [1.0 0.36 0.0]]
+    (pov-color-map [[0.00 0.15 o50 (p* o50 0.5)]
+                    [0.15 0.25 (p* o50 0.5) (p* o45 0.7)]
+                    [0.25 0.28 (p* o45 0.8) (p* o36 0.3)]
+                    [0.28 0.40 (p* o36 0.3) (p* o40 0.4)]
+                    [0.40 0.50 (p* o40 0.4) (p* o40 0.6)]
+                    [0.50 0.70 (p* o50 0.6) (p* o50 0.7)]
+                    [0.70 0.98 (p* o45 0.7) (p* o45 0.5)]
+                    [0.98 1.00 (p* o45 0.5) o50]])))
+
+; T_Wood7 (yellow pine, ragged grain): P_WoodGrain7A, whose turbulence
+; differs per axis, with M_Wood7A.
+(def pov-t-wood7-pigment
+  {:pattern    :wood
+   :turbulence [0.05 0.08 1000]
+   :octaves    4
+   :color-map  pov-m-wood-7a
+   :transform  (affine-scale [0.15 0.15 1])})
+
+(def pov-t-wood23-pigment (pov-wood-grain-1a pov-m-wood-7a))    ; M_Wood13A
+(def pov-t-wood28-pigment (pov-wood-grain-1a pov-m-wood-18a))
+
+; textures.inc's Dark_Wood: coarse (unscaled) rings with a hard step.
+(def pov-dark-wood-pigment
+  {:pattern    :wood
+   :turbulence 0.2
+   :color-map  [[0.8 [0.43 0.24 0.05]] [0.8 [0.40 0.33 0.06]] [1.0 [0.20 0.03 0.03]]]})
+
+; textures.inc's Chrome_Texture: grey, ambient 0.3, diffuse 0.7,
+; reflection 0.15, specular 0.8.
+(def pov-chrome
+  (surface {:color [0.658824 0.658824 0.658824]
+            :ambient 0.3 :light 0.7 :specular 0.8 :reflection 0.15}))
+
+; glass_old.inc's T_Glass4: rgbf <0.98, 1, 0.99, 0.75> with F_Glass4
+; (ambient 0.1, diffuse 0.1, reflection 0.25, specular 1). POV's filter
+; tints what shows through, and this renderer's transparency doesn't,
+; but at this near-white colour the difference is slight. With no
+; interior (no ior) POV doesn't refract it either.
+(def pov-glass4
+  (surface {:color [0.98 1.0 0.99]
+            :ambient 0.1 :light 0.1 :specular 1.0 :reflection 0.25
+            :transparency 0.75}))
+
 ; A plain POV pigment with POV's default finish (ambient 0.1, diffuse
 ; 0.6, no highlight), plus an optional specular strength.
 (defn pov-plain

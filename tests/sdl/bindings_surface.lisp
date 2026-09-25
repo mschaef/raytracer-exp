@@ -117,6 +117,10 @@
 (assert= wood-s (surface {:pigment pine :ambient 0.1 :light 0.6}))
 (assert (not= wood-s (surface {:pigment (assoc pine :turbulence 0.1) :ambient 0.1 :light 0.6})))
 (assert (not= wood-s (surface {:pigment (assoc pine :wave :ramp) :ambient 0.1 :light 0.6})))
+
+; Turbulence can be per axis; a number means the same on every axis.
+(assert= wood-s (surface {:pigment (assoc pine :turbulence [0.05 0.05 0.05]) :ambient 0.1 :light 0.6}))
+(assert (not= wood-s (surface {:pigment (assoc pine :turbulence [0.05 0.08 1000]) :ambient 0.1 :light 0.6})))
 (assert (not= wood-s (surface {:color [0.5 0.5 0.5] :ambient 0.1 :light 0.6})))
 
 ; A checker takes two colours; every optional key is accepted.

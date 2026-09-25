@@ -53,8 +53,16 @@ plans.
   entry 48). There are wood and checker patterns with turbulence, colour
   maps and pigment transforms, evaluated in object space. Xmastree's
   wood stand-ins are gone.
-- **Next:** nba and cpot (they need layered textures and glass,
-  respectively, to look their best), then snowman.
+- **Nba and cpot: ported** (CLAUDE.md entry 49). Pigment turbulence
+  can now vary per axis, as `T_Wood7` needs. Remaining stand-ins:
+  - nba: the woods are bottom layers only (no layered textures), and the
+    middle block's clear pink layer is folded into its colour map.
+  - cpot: the glass doesn't refract, which matches the original (no
+    ior).
+  - Both scenes come out brighter than POV's renders (nba is compared
+    with `magic/nba.tga`), which is left for tuning.
+- **Next:** snowman. Before that, optionally: layered textures, and a
+  tuning pass over the ported scenes.
 
 ## 1. Summary
 
@@ -445,6 +453,7 @@ way as the earlier CLAUDE.md plans.
 11. **Mesh conversion script → port ornament.**
 12. **Procedural pigments** (object-space coordinates, noise, wood,
     colour maps). Re-render ornament, xmastree and nba, and port cpot.
+    *(Done, with per-axis turbulence for nba.)*
 13. **Snowman**, in whatever order its features earn their keep:
     truncated cone and gradient sky first, then filter transparency,
     normals, blob, height field, refraction.

@@ -563,6 +563,8 @@ fn pigment_rejects_bad_keys() {
         (format!("(surface {{:pigment {} :wave :square}}}})", wood), "unknown :wave", "unknown wave"),
         (format!("(surface {{:pigment {} :octaves 0}}}})", wood), "between 1 and 10", "zero octaves"),
         (format!("(surface {{:pigment {} :scale 2}}}})", wood), "unknown key :scale", "typo"),
+        (format!("(surface {{:pigment {} :turbulence [1 2]}}}})", wood), "turbulence", "two-component turbulence"),
+        (format!("(surface {{:pigment {} :turbulence :lots}}}})", wood), "turbulence", "keyword turbulence"),
         (format!("(surface {{:pigment {} :transform [1 2 3]}}}})", wood), "transform", "non-affine transform"),
     ];
     for (source, expected, what) in cases.iter() {
@@ -811,6 +813,16 @@ fn pigment_test_scene_loads() {
 #[test]
 fn ornament_scene_loads() {
     assert_scene_loads("ornament.lisp", "ornament-scene");
+}
+
+#[test]
+fn nba_scene_loads() {
+    assert_scene_loads("nba.lisp", "nba-scene");
+}
+
+#[test]
+fn cpot_scene_loads() {
+    assert_scene_loads("cpot.lisp", "cpot-scene");
 }
 
 #[test]

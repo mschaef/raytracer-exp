@@ -2291,6 +2291,50 @@ Approximate order of recent commits, oldest first:
         tests for the ornament and pigment test scenes.
       - 81 unit and 78 suite tests pass (stand-in libraries).
 
+49. **Nba and cpot ported; per-axis turbulence.**
+    - **Per-axis turbulence.** `Pigment::turbulence` is now `[f64; 3]`,
+      for `P_WoodGrain7A`'s `turbulence <0.05, 0.08, 1000>`. Wood uses
+      the x and y amounts (z is ignored, as in POV), and the checker
+      uses all three. In the SDL, `:turbulence` takes a number (the same
+      on every axis) or `[x y z]`. Pigmented scenes render
+      byte-identically to entry 48.
+    - **`_pov.lisp`.**
+      - `pov-color-map` converts POV's two-colour entries
+        (`[v0 v1 c0 c1]`) into this renderer's colour maps. A step
+        between entries becomes a repeated value.
+      - From woods.inc and woodmaps.inc: `pov-wood-grain-1a`,
+        `pov-m-wood-7a` (also M_Wood13A), `pov-m-wood-18a`,
+        `pov-t-wood7-pigment`, `pov-t-wood23-pigment` and
+        `pov-t-wood28-pigment`. These are bottom layers only.
+      - From textures.inc: `pov-dark-wood-pigment`.
+      - Surfaces: `pov-chrome` (Chrome_Texture) and `pov-glass4`
+        (T_Glass4, as transparency 0.75 without the filter tint).
+    - **`scenes/nba.lisp`.**
+      - Three wooden blocks seen from straight above, with POV's
+        degenerate look_at resolved as right = +x, up = +z.
+      - The middle block's 90%-clear pink layer is folded into its
+        colour map as a 10% blend.
+      - The white sphere of radius 5000 is left out.
+      - Geometry and framing match `magic/nba.tga`. The colours come out
+        paler, and the grain weaker: four lights saturate this
+        renderer's diffuse sum, and the woods' top layers are missing.
+        This is left for tuning.
+    - **`scenes/cpot.lisp`.**
+      - The coffee pot's CSG, written out as in the POV file.
+      - `coffee-cup` is a value, and `place-cup` scales, turns and
+        places it.
+      - Glass is non-refractive. The original has no ior either.
+      - Renders at 800×600 in about 2 minutes (stand-in rayon, so
+        sequential).
+      - The chrome reads as white ceramic under two lights, for the
+        same saturation reason. This is left for tuning.
+    - **Tests.**
+      - A `wood_turbulence_is_per_axis` unit test.
+      - Vector-turbulence cases in `bindings_surface.lisp`, plus two
+        more `pigment_rejects_bad_keys` cases.
+      - nba and cpot smoke tests.
+      - 82 unit and 80 suite tests pass (stand-in libraries).
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -2338,6 +2382,10 @@ or `into`, which are linear (16,730 computed spheres build in about
 **No exponent literals in the SDL.** The reader doesn't accept `1e-12`;
 it reads as the number 1 followed by the symbol `e-12`. Write the
 decimal out.
+
+**`vec` is `vector`, not Clojure's `vec`.** `(vec xs)` wraps `xs` in a
+one-element vector rather than converting it. `map`, `mapcat` and `for`
+already return vectors, so no conversion is needed.
 
 **Lights behind a surface contribute nothing; mind the half vector's
 sign.** `shade_pixel` skips a light when `dot(normal, toward light) <= 0`.
