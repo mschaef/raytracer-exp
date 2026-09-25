@@ -3662,6 +3662,213 @@ problems, each with its own fix:
   `shade_pixel`, or the top of `shade_pixel`. It should come before any
   lighting work, so exits cost nothing.
 
+## View transform (tone mapping): implementation plan
+
+How the renderer turns its linear, unbounded pixel values into an 8-bit
+image. Today that step is a hard per-channel clip inside
+`linear_to_srgb`. That silently shifts colours once levels go over 1,
+and nothing reports that it happened. This plan makes the step explicit,
+visible and selectable, and keeps every existing render byte-identical
+until a new default is chosen on purpose.
+
+### Current state
+
+- `render()` hands targets scene-linear `LinearColor` values, unclamped
+  (the `RenderTarget::submit_row` contract). That's the right boundary,
+  and this plan keeps it.
+- `PngTarget::submit_row` and `put_pixel` call
+  `color::to_png_color`, which runs each channel through
+  `linear_to_srgb`. That function clamps each channel to [0, 1] and
+  applies the sRGB curve. `rtview_receiver` has an f32 copy of both
+  functions. `StreamTarget` sends linear f32 values; the header's flags
+  word is 0, meaning "linear f32".
+- No exposure control, no tone curve, no clip statistics, and no
+  floating-point output.
+
+### The problem with a per-channel clip
+
+Clipping each channel on its own changes the ratios between them, so
+hue and saturation drift as brightness rises:
+
+- An orange of (1.8, 0.9, 0.3) comes out as (1.0, 0.9, 0.3), which is
+  yellow. Brighter still, it goes to white.
+- Saturated colours slide toward the nearest primary or secondary
+  (red, green, blue, cyan, magenta or yellow), then jump to white.
+- Highlight detail flattens: every clipped pixel gets the same value.
+
+POV-Ray 3.x did the same, so part of the POV references' look is clip
+artefacts. For example, nba's saturated yellow pine is partly a clipped
+orange (entries 53 and 54).
+
+### The model
+
+The output goes through two stages, kept separate:
+
+1. **View transform:** scene-linear (unbounded) to display-linear
+   ([0, 1]). This is exposure, then a curve. It's an artistic choice,
+   usually per scene.
+2. **Encoding:** display-linear to sRGB 8-bit. This is the standard
+   sRGB curve and quantisation, the same for every image.
+
+Today's clip is stage 1 with the curve "clip each channel".
+
+```rust
+pub enum ToneCurve {
+    Clip,           // per channel: today's behaviour
+    HueClip,        // divide all three channels by the largest when it's over 1
+    Reinhard { white: f64 },   // luminance-based, extended with a white point
+    AgX,            // analytic AgX approximation (the default in Blender 4)
+}
+pub struct ViewTransform { pub exposure: f64 /* stops */, pub curve: ToneCurve }
+```
+
+- **Exposure:** the colour is multiplied by `2^exposure` before the
+  curve.
+- **`Clip`** reproduces today's output bit for bit at exposure 0.
+- **`HueClip`** keeps hue and saturation exactly but still flattens
+  highlights. It's the minimal fix.
+- **`Reinhard`** never clips, and colours reach white only at `white`.
+  It flattens contrast unless exposure is set.
+- **`AgX`** fades bright colours to white gradually without skewing
+  their hue: an inset matrix, a log2 encoding, a sigmoid and an outset
+  matrix. The analytic version, with a polynomial for the sigmoid,
+  needs no LUT.
+- **Maybe:** ACES "fitted" (Narkowicz or Hill), for comparison only.
+  It has known hue skews of its own (blues toward purple, reds toward
+  orange).
+
+**Where it lives:**
+
+- The transform belongs to the **scene** (`Scene::view`), because it's
+  tuned per scene like lighting.
+- `render()` tells the target at the start of a frame through a new
+  `RenderTarget::begin(&self, view: &ViewTransform)` hook. It defaults to
+  a no-op, like `finish`.
+- `PngTarget` stores the transform, and its encode becomes stage 1 then
+  stage 2.
+- `StreamTarget` applies stage 1 before sending, and sets a header flag
+  meaning "display-linear". Its receiver keeps encoding with sRGB, and
+  its clip becomes a no-op for curve output.
+- Floating-point outputs (phase 5) skip stage 1 and store scene-linear
+  values.
+- The heatmap targets aren't affected.
+
+### Phase 1: clip report and clip map (images unchanged)
+
+Make clipping visible before changing anything.
+
+- **Per-frame statistics:**
+  - Counted in `render_one_row` and gathered like the heatmaps: the
+    number of pixels with any channel over 1 (after exposure, once
+    phase 2 lands), the number per channel, and the largest value.
+  - `main.rs` prints one line after the render, e.g.
+    `clipped: 3.2% of pixels (R 3.1%, G 0.4%, B 0.0%), max 2.71`.
+  - The SDL gets them through `(render ...)`'s result or a
+    `(clip-stats target)` binding. Which one is decided when this lands.
+- **A clip map, `render-clip.png`,** alongside the other heatmaps: each
+  pixel's largest channel over 1, so the image shows where and how badly
+  a scene is over-lit. It uses the existing `HeatmapTarget` machinery
+  and can be switched off the same way.
+- **Tests:** a scene with a known over-bright background (e.g.
+  `[2 0 0]`) and a known unlit area checks the counts and the maximum.
+  Every render stays byte-identical.
+
+### Phase 2: `ViewTransform` plumbing, exposure and `Clip` (byte-identical)
+
+- Add `ViewTransform` and `ToneCurve::Clip`, `Scene::view`, and the
+  `begin` hook. `to_png_color` takes the transform.
+- `rtview_receiver` and the stream header change as described above.
+- **SDL:** `:view {:curve :clip :exposure 0.0}` on `scene`. Unknown keys
+  and curves are rejected, as elsewhere.
+- **Command line:** `RAYTRACER_CURVE` and `RAYTRACER_EXPOSURE`
+  environment variables override the scene's settings, for trying a
+  look without editing the scene. `RAYTRACER_VIEW` is already taken
+  (view modes).
+- **Default:** `:clip` at exposure 0, so every scene renders
+  byte-identically and the byte-pinned tests don't change.
+- **Tests:** exposure scales values as expected; `:clip` with exposure
+  0 matches the old encoder over a sweep of values; binding rejections.
+
+### Phase 3: `HueClip`
+
+- If the largest channel `m` is over 1, divide all three channels by
+  `m`.
+- **Tests:** hue and saturation stay exact (channel ratios are
+  preserved), and values under 1 pass through unchanged.
+
+### Phase 4: tone curves (`Reinhard`, `AgX`)
+
+- **`Reinhard`:** luminance `L` from the Rec. 709 weights, then
+  `L' = L (1 + L / white²) / (1 + L)`, and the colour is scaled by
+  `L' / L`, with `HueClip` as a backstop for channels that still go over
+  1.
+- **`AgX`:** the analytic form from Blender's AgX, in sRGB/Rec. 709
+  primaries, base look only. "Punchy" and similar looks are a later
+  option.
+- **Tests:** for each curve, 0 maps to 0, it's monotonic in brightness,
+  its output stays within [0, 1], and it's roughly neutral on greys.
+  Reinhard reaches exactly 1 at `white`. AgX changes the hue of
+  saturated test colours by no more than a few degrees at 1, 4 and 16
+  times brightness.
+
+### Phase 5: floating-point output
+
+- A PFM writer (a portable float map: a text header followed by f32
+  values; no crate needed) holding scene-linear values, before the view
+  transform.
+- `main.rs` writes `render.pfm` when `RAYTRACER_HDR` is set. The SDL
+  gets `(save-pfm target path)`, or a float target, as fits.
+- This allows grading or re-tone-mapping without rendering again, and
+  it's the reference for checking the curves. EXR, via the `exr` crate,
+  can come later if a tool needs it.
+
+### Phase 6: choosing the default (a decision point, with renders)
+
+- Render the POV ports, `cornell_box`, `gi_test` and a few test scenes
+  under `:clip`, `:hue-clip`, `:reinhard` and `:agx`, with the clip
+  report, as contact sheets. Pick the default by eye.
+- If the default changes, the byte-pinned tests are regenerated in the
+  same change, and it becomes a CLAUDE.md history entry. POV ports that
+  want POV's clipped look can then ask for `:clip` explicitly.
+
+### Decisions still open
+
+- **The default curve.** `:clip` until phase 6. After that, likely
+  `:agx`, subject to the renders.
+- **Per scene or per render:** should the transform be only a scene
+  setting, or also something `(render ...)` or the target can override
+  (e.g. rendering one scene with two looks)? The phase 2 environment
+  variables cover the command line either way.
+- **Which exposure the clip report uses.** Reporting after exposure
+  matches what the curve sees, but for `:clip` the pre-curve count is
+  the one that says "these pixels lost information".
+- **Adaptive sampling in display space.** The sampler's min/max spread
+  is measured on scene-linear values, so it keeps refining pixels whose
+  differences all clip away. Measuring the spread after the view
+  transform is more perceptual and would save samples in blown-out
+  areas. But it changes sample counts, and so images, for existing
+  scenes. It's deferred, and would be measured before adopting.
+
+### Deferred
+
+- Dithering before 8-bit quantisation (for banding in smooth gradients
+  under a strong curve).
+- 16-bit PNG output.
+- Wide-gamut or HDR display output.
+- Looks: contrast, saturation, "punchy" AgX.
+- The `* 256.0 as u8` quantisation in `to_png_color` is left as it is.
+  It maps [0, 1] onto 256 equal bins, which is fine; changing it would
+  shift every image by up to one level.
+
+### Verification
+
+- Byte-identity of every scene at each phase until phase 6, using the
+  same whole-scene diffs as the other plans. The texaco frames are
+  included.
+- Unit tests per curve as above.
+- The clip report checked against a hand-computed scene.
+- At phase 6, contact sheets of every candidate on the same scenes.
+
 ## Future directions
 
 The README's own "Potential Futures" list overlaps these but is now somewhat

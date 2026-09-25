@@ -73,6 +73,12 @@ plans.
 - **Next: the rest of the tuning pass, before snowman:** lighting
   balance and surfaces, judged by eye. Snowman waits until the current
   images look right.
+- **View transform plan written** (CLAUDE.md, "View transform (tone
+  mapping): implementation plan"). The output clips each channel on its
+  own, which shifts bright colours toward yellow, cyan and the like. Its
+  clip report (phase 1) should land before the lighting tuning, so
+  tuning can tell over-lit from vivid. The choice of default curve
+  (phase 6) affects how every port is tuned.
 
 ## 1. Summary
 
