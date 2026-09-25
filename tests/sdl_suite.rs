@@ -544,6 +544,44 @@ fn back_lit_surfaces_get_no_light() {
     let _ = fs::remove_file(&path_b);
 }
 
+/// A surface's `:pigment` map rejects malformed or contradictory keys.
+#[test]
+fn pigment_rejects_bad_keys() {
+    let wood = "{:pattern :wood :color-map [[0 [1 1 1]] [1 [0 0 0]]]";
+    // (source, text the error must contain, description)
+    let cases: Vec<(String, &str, &str)> = vec![
+        ("(surface {:pigment {:color-map [[0 [1 1 1]]]}})".to_string(), "missing :pattern", "no pattern"),
+        ("(surface {:pigment {:pattern :marble :color-map [[0 [1 1 1]]]}})".to_string(), "unknown :pattern", "unknown pattern"),
+        ("(surface {:pigment {:pattern \"wood\" :color-map [[0 [1 1 1]]]}})".to_string(), "must be a keyword", "string pattern"),
+        ("(surface {:pigment {:pattern :wood}})".to_string(), "needs :color-map", "no colours"),
+        ("(surface {:pigment {:pattern :wood :color-map []}})".to_string(), "empty", "empty map"),
+        ("(surface {:pigment {:pattern :wood :color-map [[1 [1 1 1]] [0 [0 0 0]]]}})".to_string(), "ascend", "descending map"),
+        ("(surface {:pigment {:pattern :wood :color-map [[0 [1 1 1] 2]]}})".to_string(), "[value [r g b]]", "bad entry"),
+        ("(surface {:pigment {:pattern :checker :colors [[1 1 1]]}})".to_string(), "two colours", "one checker colour"),
+        ("(surface {:pigment {:pattern :checker :colors [[1 1 1] [0 0 0]] :color-map [[0 [1 1 1]]]}})".to_string(),
+         "not both", "colors and color-map"),
+        (format!("(surface {{:pigment {} :wave :square}}}})", wood), "unknown :wave", "unknown wave"),
+        (format!("(surface {{:pigment {} :octaves 0}}}})", wood), "between 1 and 10", "zero octaves"),
+        (format!("(surface {{:pigment {} :scale 2}}}})", wood), "unknown key :scale", "typo"),
+        (format!("(surface {{:pigment {} :transform [1 2 3]}}}})", wood), "transform", "non-affine transform"),
+    ];
+    for (source, expected, what) in cases.iter() {
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(source, "pigment_bad.lisp", &env);
+        }));
+        let message = match result {
+            Ok(_) => panic!("must reject {}: {}", what, source),
+            Err(p) => p.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        assert!(
+            message.contains(expected),
+            "error for {} ({}) should mention {:?}, got: {}",
+            what, source, expected, message
+        );
+    }
+}
+
 /// Lights-as-shapes affine equivalence: a scene with a bare
 /// `(light-white [5 5 5])` in `:objects` must render byte-identically
 /// to a scene where the same light is positioned by wrapping a
@@ -763,6 +801,16 @@ fn train_scene_loads() {
 #[test]
 fn redball_scene_loads() {
     assert_scene_loads("redball.lisp", "redball-scene");
+}
+
+#[test]
+fn pigment_test_scene_loads() {
+    assert_scene_loads("pigment_test.lisp", "pigment-test-scene");
+}
+
+#[test]
+fn ornament_scene_loads() {
+    assert_scene_loads("ornament.lisp", "ornament-scene");
 }
 
 #[test]

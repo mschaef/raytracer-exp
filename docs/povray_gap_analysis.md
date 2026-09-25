@@ -49,8 +49,12 @@ plans.
 - **Braids, train and redball: ported** (step 10; CLAUDE.md entry 47).
   Redball exposed a renderer bug: lights behind a surface darkened it.
   That's fixed, with a regression test.
-- **Next:** procedural pigments (step 12) with the ornament port
-  (step 11).
+- **Procedural pigments and the ornament: done** (steps 11–12; CLAUDE.md
+  entry 48). There are wood and checker patterns with turbulence, colour
+  maps and pigment transforms, evaluated in object space. Xmastree's
+  wood stand-ins are gone.
+- **Next:** nba and cpot (they need layered textures and glass,
+  respectively, to look their best), then snowman.
 
 ## 1. Summary
 

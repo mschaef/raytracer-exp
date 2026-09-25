@@ -59,6 +59,10 @@ src/
                          rotation_x/y/z, rotation_axis. Plus compose, inverse,
                          transform_point, transform_vector.
     render/shapes.rs     The Shape enum and everything related. See below.
+    render/noise.rs      Improved Perlin noise, vector noise (scaled to
+                         POV-Ray's DNoise range) and octave turbulence.
+    render/pigment.rs    Procedural pigments: pattern (wood, checker),
+                         turbulence, wave, colour map, own transform.
     render/poly.rs       Real roots of quadratics, cubics and quartics
                          (closed form, with Newton polishing for the
                          quartic). Used by the torus intersection.
@@ -333,7 +337,20 @@ the future).
 ## Surface model
 
 `Surface { color, ambient, specular, light, checked, reflection, transparency,
-metallic }`.
+metallic, pigment }`.
+
+`pigment: Option<&'static Pigment>` (entry 48) replaces `color` and
+`checked` with a procedural colour, evaluated at `RayHit::texture_point`.
+That's the hit in the local space of whatever gave it its surface: the
+leaf, if it has its own surface, otherwise the nearest `Surfaced`
+wrapper. `Transformed::hit_test` and the `Transform` arm of
+`Shape::spans` keep it up to date: while the surface is still `None`
+they re-express the point at each level on the way out, and once it's
+set they leave it alone. So `(translate … (with-surface S shape))`
+moves the pattern with the shape, and `(with-surface S (translate …
+shape))` doesn't, much as POV's texture-before or texture-after
+transforms do. Pigments are leaked (`Box::leak`) to keep `Surface`
+small and `Copy`.
 Lighting is Lambertian diffuse + Phong specular (50-power), with ambient as a
 flat multiplier of the surface color and a single bounce of mirror reflection
 (recursion gated by `Scene::reflect_limit`). The `checked` flag enables a
@@ -2201,6 +2218,78 @@ Approximate order of recent commits, oldest first:
         It was confirmed to fail on the old shading code.
       - New smoke tests for braids, train and redball.
       - 68 unit and 75 suite tests pass (stand-in libraries).
+
+48. **Procedural pigments (step 12) and the ornament port (step 11).**
+    - **`render::noise`.**
+      - Ken Perlin's improved noise with the reference permutation.
+      - `vector_noise`: three decorrelated samples, halved to about
+        ±0.5, which is POV's `DNoise` range, so POV turbulence amounts
+        carry over.
+      - `turbulence`: POV's `DTurbulence` octave sum, with defaults of 6
+        octaves, omega 0.5 and lambda 2.
+    - **`render::pigment`.** `Pigment { pattern, turbulence, octaves,
+      wave, color_map, from_texture }`, evaluated POV's way: point →
+      pigment transform → pattern value → wave → colour map.
+      - `Wood` is POV's formula: turbulence displaces x and y through a
+        sine of `(x + turb) * amount`, then the value is the distance
+        from the z axis, with the triangle wave by default.
+      - `Checker` is unit cubes, 0 or 1, with turbulence as a
+        displacement.
+      - Colour maps interpolate, clamp at the ends, and treat repeated
+        values as hard edges.
+    - **Plumbing.**
+      - `Surface::pigment` (see "Surface model").
+      - `RayHit::texture_point` is set by every primitive and maintained
+        by `Transformed::hit_test`. `SpanEnd::point` does the same for
+        CSG, maintained by the `Transform` arm of `spans`.
+        `convex_span` and `Torus::end` now take the ray.
+      - `shade_pixel` uses the pigment's colour when there is one.
+      - Scenes without pigments rendered byte-identically to the step 10
+        build (every scene checked).
+    - **SDL.** `(surface {:pigment {...}})`, where `:color` becomes
+      optional:
+      - `:pattern :wood | :checker`.
+      - `:color-map [[v [r g b]] …]`, or `:colors [a b]` for a checker.
+      - `:turbulence`, `:octaves`, `:omega`, `:lambda`.
+      - `:wave :triangle | :ramp | :sine`.
+      - `:transform` (an affine).
+      - Pigment maps are plain SDL maps, so `assoc` makes variants.
+      - Unknown keys and bad values are rejected.
+    - **`_pov.lisp`.** `pov-pigmented`, and `pov-t-wood25-pigment`,
+      which is the bottom layer of `T_Wood25` (layered textures aren't
+      supported) with `M_Wood15A` flattened.
+    - **Ornament port.**
+      - New `scenes/_smokestack.lisp`: `smokestack.inc`'s 3,312
+        triangles, converted mechanically. The POV file's 276
+        exponent-notation numbers are written out as decimals, since
+        the SDL reader has no exponent literals. The triangles are in a
+        `bvh`: as a plain group, an 800×600 render ran for over 10
+        minutes, against 15 s now.
+      - The mesh carries its own white texture, as in POV, where it
+        beats the `black_wood` applied from outside.
+      - New `scenes/_trainorn.lisp`: `painted-wood`, the red, blue,
+        yellow and black woods, `make-frame`, and `train`, each part
+        painted where it's defined.
+      - New `scenes/ornament.lisp`: `orn.pov`'s frame and engine, the
+        backdrop plane with its normal normalized as POV does, and two
+        lights.
+      - New `scenes/pigment_test.lisp`: a turned wooden cube, a
+        turbulent wooden sphere, a CSG-cut cylinder in Dark_Wood's
+        colours with a hard edge, and a checker-pigment floor.
+    - **Xmastree.** The frame ornaments use `(make-frame yellow-wood)`
+      and the stand uses T_Wood25's grain. The frames are a few pixels
+      across in the full shot, so their rings average out, as they
+      would in POV. The only stand-in left is the white background.
+    - **Tests.**
+      - Unit tests for noise (lattice zeros, range, continuity,
+        octaves) and pigments (colour map, waves, wood rings, the
+        pigment transform, checker, turbulence).
+      - Texture points through transforms, `with-surface` inside and
+        outside, and CSG.
+      - `bindings_surface.lisp` pigment cases, a new
+        `pigment_rejects_bad_keys` Rust test (13 cases), and smoke
+        tests for the ornament and pigment test scenes.
+      - 81 unit and 78 suite tests pass (stand-in libraries).
 
 ## Pitfalls and conventions
 

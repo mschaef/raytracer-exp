@@ -955,9 +955,15 @@ impl Transformed {
             // magnitude.
             let world_normal = normalizep(mat3_apply(self.normal_xform, hit.normal));
 
+            // Texture space is the space of whatever gave the hit its
+            // surface. If the child already has one, its texture point is
+            // final; if not, an enclosing `Surfaced` will supply the
+            // surface, so express the point one level further out.
+            let texture_point = if hit.surface.is_some() { hit.texture_point } else { world_hit_point };
             RayHit {
                 distance: hit.distance,
                 hit_point: world_hit_point,
+                texture_point,
                 normal: world_normal,
                 surface: hit.surface,
             }
@@ -1027,6 +1033,7 @@ impl Hittable for Triangle {
         Some(RayHit {
             distance: t,
             hit_point: ray_location(ray, t),
+            texture_point: ray_location(ray, t),
             normal,
             surface: self.surface,
         })
@@ -1339,6 +1346,7 @@ impl Hittable for Sphere {
             Some(RayHit {
                 distance: t,
                 hit_point,
+                texture_point: hit_point,
                 normal: normalizep(subp(hit_point, self.center)),
                 surface: self.surface
             })
@@ -1364,6 +1372,7 @@ impl Hittable for Plane {
                 Some(RayHit {
                     distance: t,
                     hit_point,
+                    texture_point: hit_point,
                     normal: self.normal,
                     surface: self.surface
                 })
@@ -1460,6 +1469,7 @@ impl Hittable for Cuboid {
         Some(RayHit {
             distance: t_enter,
             hit_point,
+            texture_point: hit_point,
             normal,
             surface: self.surface,
         })
@@ -1592,6 +1602,7 @@ impl Hittable for Cylinder {
         best.map(|(t, normal)| RayHit {
             distance: t,
             hit_point: ray_location(ray, t),
+            texture_point: ray_location(ray, t),
             normal,
             surface: self.surface,
         })
@@ -1735,6 +1746,7 @@ impl Hittable for Cone {
         best.map(|(t, normal)| RayHit {
             distance: t,
             hit_point: ray_location(ray, t),
+            texture_point: ray_location(ray, t),
             normal,
             surface: self.surface,
         })
@@ -1855,8 +1867,8 @@ impl Torus {
         addp(addp(scalep(lr.u, local[0]), scalep(self.axis, local[1])), scalep(lr.w, local[2]))
     }
 
-    fn end(&self, lr: &TorusRay, t: f64) -> SpanEnd {
-        SpanEnd { t, normal: self.normal_at(lr, lr.point(t)), surface: self.surface }
+    fn end(&self, ray: &Vector, lr: &TorusRay, t: f64) -> SpanEnd {
+        SpanEnd { t, normal: self.normal_at(lr, lr.point(t)), surface: self.surface, point: ray_location(ray, t) }
     }
 
     /// The torus's spans along `ray`: zero, one or two. Rather than
@@ -1871,7 +1883,7 @@ impl Torus {
             roots
                 .windows(2)
                 .filter(|w| w[1] > w[0] && self.contains_local(lr.point(0.5 * (w[0] + w[1]))))
-                .map(|w| Span { enter: self.end(&lr, w[0]), exit: self.end(&lr, w[1]) }),
+                .map(|w| Span { enter: self.end(ray, &lr, w[0]), exit: self.end(ray, &lr, w[1]) }),
         );
         // Merge spans that meet at a repeated root.
         normalize_union_tail(out, first);
@@ -1891,6 +1903,7 @@ impl Hittable for Torus {
             .map(|t| RayHit {
                 distance: t,
                 hit_point: ray_location(ray, t),
+                texture_point: ray_location(ray, t),
                 normal: self.normal_at(&lr, lr.point(t)),
                 surface: self.surface,
             })
@@ -1927,6 +1940,9 @@ pub struct SpanEnd {
     pub t: f64,
     pub normal: Point,
     pub surface: Option<Surface>,
+    /// The crossing in texture space (see `RayHit::texture_point`).
+    /// Infinite for a half-space's infinite ends, which are never hits.
+    pub point: Point,
 }
 
 /// One interval `[enter.t, exit.t]` along a ray where the ray is inside
@@ -1957,7 +1973,7 @@ impl SpanEnd {
 /// crossings (in any order): the ray is inside between the smallest and
 /// largest crossing. Fewer than two distinct crossings — a miss, or a
 /// ray grazing an edge — gives no span.
-fn convex_span(candidates: &[(f64, Point)], surface: Option<Surface>) -> Option<Span> {
+fn convex_span(ray: &Vector, candidates: &[(f64, Point)], surface: Option<Surface>) -> Option<Span> {
     let mut lo: Option<(f64, Point)> = None;
     let mut hi: Option<(f64, Point)> = None;
     for &(t, n) in candidates {
@@ -1970,8 +1986,8 @@ fn convex_span(candidates: &[(f64, Point)], surface: Option<Surface>) -> Option<
     }
     match (lo, hi) {
         (Some((t0, n0)), Some((t1, n1))) if t0 < t1 => Some(Span {
-            enter: SpanEnd { t: t0, normal: n0, surface },
-            exit: SpanEnd { t: t1, normal: n1, surface },
+            enter: SpanEnd { t: t0, normal: n0, surface, point: ray_location(ray, t0) },
+            exit: SpanEnd { t: t1, normal: n1, surface, point: ray_location(ray, t1) },
         }),
         _ => None,
     }
@@ -2048,6 +2064,15 @@ impl Shape {
                 for span in &mut out[first..] {
                     span.enter.normal = normalizep(mat3_apply(t.normal_xform, span.enter.normal));
                     span.exit.normal = normalizep(mat3_apply(t.normal_xform, span.exit.normal));
+                    // As in `Transformed::hit_test`: a crossing that
+                    // already has its surface keeps its texture point;
+                    // one that doesn't moves out to this level.
+                    if span.enter.surface.is_none() {
+                        span.enter.point = ray_location(ray, span.enter.t);
+                    }
+                    if span.exit.surface.is_none() {
+                        span.exit.point = ray_location(ray, span.exit.t);
+                    }
                 }
             }
             Shape::Bounded(b) => {
@@ -2146,6 +2171,7 @@ pub fn first_span_hit(spans: &[Span], ray: &Vector) -> Option<RayHit> {
                 return Some(RayHit {
                     distance: end.t,
                     hit_point: ray_location(ray, end.t),
+                    texture_point: end.point,
                     normal: end.normal,
                     surface: end.surface,
                 });
@@ -2271,8 +2297,8 @@ impl Sphere {
         let t1 = (-b + sqrt_disc) / (2.0 * a);
         let normal_at = |t| normalizep(subp(ray_location(ray, t), self.center));
         Some(Span {
-            enter: SpanEnd { t: t0, normal: normal_at(t0), surface: self.surface },
-            exit: SpanEnd { t: t1, normal: normal_at(t1), surface: self.surface },
+            enter: SpanEnd { t: t0, normal: normal_at(t0), surface: self.surface, point: ray_location(ray, t0) },
+            exit: SpanEnd { t: t1, normal: normal_at(t1), surface: self.surface, point: ray_location(ray, t1) },
         })
     }
 }
@@ -2281,7 +2307,7 @@ impl Plane {
     fn span(&self, ray: &Vector) -> Option<Span> {
         // A plane is a half-space: the solid side is the one opposite
         // `normal`, i.e. the points where `(P - p0)·normal <= 0`.
-        let side = |t: f64| SpanEnd { t, normal: self.normal, surface: self.surface };
+        let side = |t: f64| SpanEnd { t, normal: self.normal, surface: self.surface, point: ray_location(ray, t) };
         let denom = dotp(self.normal, ray.delta);
         if denom.abs() < EPSILON {
             // Parallel to the plane: the ray is inside for its whole
@@ -2351,8 +2377,8 @@ impl Cuboid {
         // At least one axis constrains `t` (the direction is nonzero),
         // so both ends are finite here.
         (t_enter < t_exit).then_some(Span {
-            enter: SpanEnd { t: t_enter, normal: enter_normal, surface: self.surface },
-            exit: SpanEnd { t: t_exit, normal: exit_normal, surface: self.surface },
+            enter: SpanEnd { t: t_enter, normal: enter_normal, surface: self.surface, point: ray_location(ray, t_enter) },
+            exit: SpanEnd { t: t_exit, normal: exit_normal, surface: self.surface, point: ray_location(ray, t_exit) },
         })
     }
 }
@@ -2411,7 +2437,7 @@ impl Cylinder {
             }
         }
 
-        convex_span(&candidates, self.surface)
+        convex_span(ray, &candidates, self.surface)
     }
 }
 
@@ -2494,7 +2520,7 @@ impl Cone {
             }
         }
 
-        convex_span(&candidates, self.surface)
+        convex_span(ray, &candidates, self.surface)
     }
 }
 
@@ -2518,6 +2544,7 @@ mod span_tests {
             reflection: 0.0,
             transparency: 0.0,
             metallic: false,
+            pigment: None,
         }
     }
 
@@ -2803,6 +2830,59 @@ mod span_tests {
         assert_eq!(b.entry(&ray([-5.0, 5.0, 0.0], [1.0, 0.0, 0.0])), None);
     }
 
+    // --- Texture points ---------------------------------------------
+
+    fn close_to(a: Point, b: Point) -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() < 1e-9)
+    }
+
+    #[test]
+    fn texture_point_follows_the_surface_owner() {
+        let r = ray([5.0, 0.0, -10.0], [0.0, 0.0, 1.0]);
+        let s = surface(0.5);
+        // A leaf with its own surface, moved by a transform: the
+        // texture point stays in the leaf's space.
+        let leaf = translate([5.0, 0.0, 0.0], Shape::Sphere(Sphere { center: [0.0; 3], r: 1.0, surface: Some(s) }));
+        let hit = leaf.hit_test(&r).unwrap();
+        assert!(close_to(hit.hit_point, [5.0, 0.0, -1.0]));
+        assert!(close_to(hit.texture_point, [0.0, 0.0, -1.0]));
+        // A with-surface *inside* the transform: same, the pattern moves
+        // with the object.
+        let inside = translate([5.0, 0.0, 0.0], surfaced(s, sphere([0.0; 3], 1.0)));
+        assert!(close_to(inside.hit_test(&r).unwrap().texture_point, [0.0, 0.0, -1.0]));
+        // A with-surface *outside* the transform: the pattern stays put
+        // in the wrapper's space, which here is the world.
+        let outside = surfaced(s, translate([5.0, 0.0, 0.0], sphere([0.0; 3], 1.0)));
+        assert!(close_to(outside.hit_test(&r).unwrap().texture_point, [5.0, 0.0, -1.0]));
+        // Through two transforms, the point stops at the surfaced level.
+        let nested = translate([5.0, 0.0, 0.0],
+                               surfaced(s, scale([2.0, 2.0, 2.0], sphere([0.0; 3], 0.5))));
+        assert!(close_to(nested.hit_test(&r).unwrap().texture_point, [0.0, 0.0, -1.0]));
+    }
+
+    #[test]
+    fn texture_point_through_csg() {
+        let s = surface(0.5);
+        // A surfaced CSG shape, moved: its crossings report points in
+        // the CSG shape's own space.
+        let cut = translate([5.0, 0.0, 0.0], surfaced(s, difference(
+            cuboid([0.0; 3], [2.0, 2.0, 2.0]),
+            sphere([-1.0, 0.0, 0.0], 0.5),
+        )));
+        let hit = cut.hit_test(&ray([5.0, 0.0, -10.0], [0.0, 0.0, 1.0])).unwrap();
+        assert!(close_to(hit.hit_point, [5.0, 0.0, -1.0]));
+        assert!(close_to(hit.texture_point, [0.0, 0.0, -1.0]));
+        // The cut face (from the sphere, via a transform inside the CSG)
+        // is expressed in the same space.
+        let cut2 = translate([5.0, 0.0, 0.0], surfaced(s, difference(
+            cuboid([0.0; 3], [2.0, 2.0, 2.0]),
+            translate([-1.0, 0.0, 0.0], sphere([0.0; 3], 0.5)),
+        )));
+        let hit = cut2.hit_test(&ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0])).unwrap();
+        assert!(close_to(hit.hit_point, [4.5, 0.0, 0.0]));
+        assert!(close_to(hit.texture_point, [-0.5, 0.0, 0.0]));
+    }
+
     #[test]
     fn plane_is_a_half_space() {
         // Solid below z=0 (opposite the +z normal).
@@ -2975,8 +3055,8 @@ mod span_tests {
     /// the list they came from.
     fn mk(t0: f64, t1: f64, tag: f64) -> Span {
         Span {
-            enter: SpanEnd { t: t0, normal: [tag, 0.0, 0.0], surface: None },
-            exit: SpanEnd { t: t1, normal: [0.0, tag, 0.0], surface: None },
+            enter: SpanEnd { t: t0, normal: [tag, 0.0, 0.0], surface: None, point: [t0, 0.0, 0.0] },
+            exit: SpanEnd { t: t1, normal: [0.0, tag, 0.0], surface: None, point: [t1, 0.0, 0.0] },
         }
     }
 

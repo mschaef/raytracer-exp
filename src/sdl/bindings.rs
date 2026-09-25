@@ -46,6 +46,8 @@ use crate::render::shapes::{
     Cone, Cuboid, Cylinder, Plane, Shape, Sphere, Torus, Triangle,
 };
 use crate::render::transform::Affine;
+use crate::render::noise::Octaves;
+use crate::render::pigment::{Pattern, Pigment, Wave};
 use crate::render::{Camera, HeatmapTargets, Light, LightKind, Scene, SpotCone, Surface, ViewMode};
 
 use crate::sdl::env::EnvRef;
@@ -561,7 +563,13 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
     require_arity(args, 1, "surface", pos);
     let map = require_map(&args[0], "surface", pos);
 
-    let color: LinearColor = require_key_point(&map, "color", "surface", pos);
+    let pigment = map.get("pigment").map(|v| build_pigment(v, pos));
+    // With a pigment, :color is optional: the pigment gives the colour.
+    let color: LinearColor = if pigment.is_some() {
+        maybe_key_point(&map, "color", "surface", pos).unwrap_or([0.5, 0.5, 0.5])
+    } else {
+        require_key_point(&map, "color", "surface", pos)
+    };
     let ambient = maybe_key_number(&map, "ambient", "surface", pos).unwrap_or(0.0);
     let specular = maybe_key_number(&map, "specular", "surface", pos).unwrap_or(0.0);
     let light = maybe_key_number(&map, "light", "surface", pos).unwrap_or(1.0);
@@ -579,7 +587,122 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
         reflection,
         transparency,
         metallic,
+        pigment,
     })
+}
+
+/// Build a pigment from its SDL map (the `:pigment` key of `surface`):
+///
+/// - `:pattern` — `:wood` (concentric rings around the z axis) or
+///   `:checker` (unit cubes).
+/// - `:color-map` — `[[value [r g b]] ...]`, ascending values in
+///   `[0, 1]`; repeat a value for a hard edge. For a checker,
+///   `:colors [a b]` is the shorthand POV uses.
+/// - `:turbulence` (default 0), with `:octaves` (6), `:omega` (0.5) and
+///   `:lambda` (2.0), as in POV-Ray.
+/// - `:wave` — `:triangle` (the default, and POV's for wood), `:ramp`
+///   or `:sine`. Ignored by the checker.
+/// - `:transform` — an affine applied to the pattern, like POV's
+///   transforms inside a `pigment { }` (e.g. `(affine-scale [0.05 0.05
+///   0.05])` for rings 20 times finer).
+///
+/// The pigment is leaked to get the `'static` reference `Surface`
+/// holds (see `Surface::pigment`).
+fn build_pigment(v: &Value, pos: &Position) -> &'static Pigment {
+    let map = require_map(v, "surface :pigment", pos);
+    const KEYS: [&str; 9] = [
+        "pattern", "color-map", "colors", "turbulence", "octaves", "omega", "lambda", "wave", "transform",
+    ];
+    for k in map.keys() {
+        if !KEYS.contains(&k.as_str()) {
+            sdl_panic!(pos, "pigment: unknown key :{} (expected one of :{})", k, KEYS.join(" :"));
+        }
+    }
+    let keyword = |key: &str| -> Option<String> {
+        map.get(key).map(|v| match v {
+            Value::Keyword(k) => (**k).clone(),
+            other => sdl_panic!(pos, "pigment :{} must be a keyword (got {})", key, other),
+        })
+    };
+
+    let pattern = match keyword("pattern").as_deref() {
+        Some("wood") => Pattern::Wood,
+        Some("checker") => Pattern::Checker,
+        Some(other) => sdl_panic!(pos, "pigment: unknown :pattern :{} (expected :wood or :checker)", other),
+        None => sdl_panic!(pos, "pigment: missing :pattern"),
+    };
+    let wave = match keyword("wave").as_deref() {
+        None | Some("triangle") => Wave::Triangle,
+        Some("ramp") => Wave::Ramp,
+        Some("sine") => Wave::Sine,
+        Some(other) => sdl_panic!(pos, "pigment: unknown :wave :{} (expected :triangle, :ramp or :sine)", other),
+    };
+
+    let color_map: Vec<(f64, LinearColor)> = match (map.get("color-map"), map.get("colors")) {
+        (Some(_), Some(_)) => sdl_panic!(pos, "pigment: give :color-map or :colors, not both"),
+        (Some(cm), None) => {
+            let entries = require_vec(cm, "pigment :color-map", pos);
+            if entries.is_empty() {
+                sdl_panic!(pos, "pigment: :color-map is empty");
+            }
+            let mut out = Vec::with_capacity(entries.len());
+            for e in entries.iter() {
+                let pair = require_vec(e, "pigment :color-map entry", pos);
+                if pair.len() != 2 {
+                    sdl_panic!(pos, "pigment: each :color-map entry is [value [r g b]] (got {})", e);
+                }
+                let value = require_number(&pair[0], "pigment :color-map value", pos);
+                let color = require_point(&pair[1], "pigment :color-map colour", pos);
+                if let Some((last, _)) = out.last() {
+                    if value < *last {
+                        sdl_panic!(pos, "pigment: :color-map values must ascend ({} after {})", value, last);
+                    }
+                }
+                out.push((value, color));
+            }
+            out
+        }
+        (None, Some(cs)) => {
+            let colors = require_vec(cs, "pigment :colors", pos);
+            if colors.len() != 2 {
+                sdl_panic!(pos, "pigment: :colors takes two colours (got {})", colors.len());
+            }
+            vec![
+                (0.0, require_point(&colors[0], "pigment :colors", pos)),
+                (1.0, require_point(&colors[1], "pigment :colors", pos)),
+            ]
+        }
+        (None, None) => sdl_panic!(pos, "pigment: needs :color-map (or :colors for a checker)"),
+    };
+
+    let defaults = Octaves::default();
+    let octaves = Octaves {
+        octaves: match map.get("octaves") {
+            Some(v) => {
+                let n = require_int(v, "pigment :octaves", pos);
+                if !(1..=10).contains(&n) {
+                    sdl_panic!(pos, "pigment: :octaves must be between 1 and 10 (got {})", n);
+                }
+                n as u32
+            }
+            None => defaults.octaves,
+        },
+        omega: maybe_key_number(&map, "omega", "pigment", pos).unwrap_or(defaults.omega),
+        lambda: maybe_key_number(&map, "lambda", "pigment", pos).unwrap_or(defaults.lambda),
+    };
+    let transform = map
+        .get("transform")
+        .map(|v| require_affine(v, "pigment :transform", pos))
+        .unwrap_or_else(Affine::identity);
+
+    Box::leak(Box::new(Pigment {
+        pattern,
+        turbulence: maybe_key_number(&map, "turbulence", "pigment", pos).unwrap_or(0.0),
+        octaves,
+        wave,
+        color_map,
+        from_texture: transform.inverse(),
+    }))
 }
 
 // ---------------------------------------------------------------------------

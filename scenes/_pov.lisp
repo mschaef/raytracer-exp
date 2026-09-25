@@ -71,6 +71,30 @@
 ;; Surfaces
 ;; --------------------------------------------------------------------
 
+; A procedural pigment (see `surface`'s :pigment key) with POV's
+; default finish.
+(defn pov-pigmented [pigment]
+  (surface {:pigment pigment :ambient 0.1 :light 0.6 :specular 0.0}))
+
+;; woods.inc. T_Wood25 is two wood layers, the top one partly
+;; transparent (P_WoodGrain1A with M_Wood15A under P_WoodGrain1B with
+;; M_Wood15B). Layered textures aren't supported, so this is the bottom
+;; layer alone. The colour map is woodmaps.inc's M_Wood15A, whose
+;; two-colour entries join end to end, flattened to single colours.
+(def pov-t-wood25-pigment
+  (let [a (p* [0.504 0.310 0.078] 0.7)
+        b (p* [0.531 0.325 0.090] 0.8)
+        c (p* [0.547 0.333 0.090] 0.5)
+        d (p* [0.504 0.310 0.075] 0.6)
+        e (p* [0.559 0.322 0.102] 0.4)
+        f (p* [0.531 0.325 0.086] 0.4)]
+    ; P_WoodGrain1A: wood, turbulence 0.04, octaves 3, scale <0.05, 0.05, 1>.
+    {:pattern    :wood
+     :turbulence 0.04
+     :octaves    3
+     :color-map  [[0.0 a] [0.25 b] [0.40 c] [0.50 d] [0.70 e] [0.98 f] [1.0 a]]
+     :transform  (affine-scale [0.05 0.05 1])}))
+
 ; A plain POV pigment with POV's default finish (ambient 0.1, diffuse
 ; 0.6, no highlight), plus an optional specular strength.
 (defn pov-plain

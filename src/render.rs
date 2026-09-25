@@ -16,6 +16,8 @@ pub mod mesh;
 pub mod output;
 pub mod sampler;
 pub mod poly;
+pub mod noise;
+pub mod pigment;
 
 use std::cell::Cell;
 use std::convert::TryFrom;
@@ -24,6 +26,7 @@ use std::time::Instant;
 use shapes::Shape;
 use output::{RenderTarget, HeatmapTarget};
 use transform::Affine;
+use pigment::Pigment;
 
 use rayon::prelude::*;
 
@@ -84,6 +87,13 @@ pub struct Surface {
     /// drives body, reflection, and highlight. Rough/glossy metal
     /// (scattered reflections) is a deferred follow-on.
     pub metallic: bool,
+    /// A procedural pigment. When set, it replaces `color` (and the
+    /// `checked` pattern) as the surface colour, evaluated at the hit's
+    /// texture point. Pigments are built once, when a scene is
+    /// constructed, and leaked to get a `'static` reference, which keeps
+    /// `Surface` small and `Copy`; the leak is bounded by the number of
+    /// pigmented surfaces a script creates.
+    pub pigment: Option<&'static Pigment>,
 }
 
 /// Per-variant data for a light source. Phase 1 of the "Light types:
@@ -756,6 +766,15 @@ fn ray_location(ray: &Vector, t: f64) -> Point {
 pub struct RayHit {
     pub distance: f64,
     pub hit_point: Point,
+    /// The hit point in *texture space*: the local coordinates of
+    /// whatever gave the hit its surface, i.e. the leaf primitive if it
+    /// carries its own surface, otherwise the nearest enclosing
+    /// `Shape::Surfaced`. Pigments are evaluated here, so a pattern
+    /// moves, turns and scales with its object. `Transformed::hit_test`
+    /// maintains it: while the surface is still `None` the point is
+    /// re-expressed at each level on the way out; once a surface is
+    /// set, it's final.
+    pub texture_point: Point,
     pub normal: Point,
     /// `Option<Surface>` rather than `Surface` so a leaf primitive
     /// can return `None` to indicate "no explicit surface" — the
@@ -1252,6 +1271,7 @@ const MISSING_SURFACE: Surface = Surface {
     reflection: 0.0,
     transparency: 0.0,
     metallic: false,
+    pigment: None,
 };
 
 fn shade_pixel(
@@ -1271,7 +1291,9 @@ fn shade_pixel(
     // fields goes through this local rather than `hit.surface`.
     let surface = hit.surface.unwrap_or(MISSING_SURFACE);
 
-    let scolor = if surface.checked {
+    let scolor = if let Some(pigment) = surface.pigment {
+        pigment.color_at(hit.texture_point)
+    } else if surface.checked {
         let checkidx = (((hit.hit_point[0] + EPSILON).floor() +
                          (hit.hit_point[1] + EPSILON).floor() +
                          (hit.hit_point[2] + EPSILON).floor()) as i64 % 2).abs();
@@ -2137,6 +2159,7 @@ mod light_tests {
             reflection: 0.0,
             transparency: 0.0,
             metallic: false,
+            pigment: None,
         }
     }
 
