@@ -565,6 +565,10 @@ fn pigment_rejects_bad_keys() {
         (format!("(surface {{:pigment {} :scale 2}}}})", wood), "unknown key :scale", "typo"),
         (format!("(surface {{:pigment {} :turbulence [1 2]}}}})", wood), "turbulence", "two-component turbulence"),
         (format!("(surface {{:pigment {} :turbulence :lots}}}})", wood), "turbulence", "keyword turbulence"),
+        ("(surface {:pigment []})".to_string(), "at least one pigment", "empty layer vector"),
+        ("(surface {:pigment {:color [1 0 0 0.5] :pattern :wood}})".to_string(), "takes no other keys", "solid with a pattern"),
+        ("(surface {:pigment {:color [1 0 0 0.5 1]}})".to_string(), "[r g b t]", "five-component colour"),
+        (format!("(surface {{:pigment [{}}} 7]}})", wood), "expected a map", "non-map layer"),
         (format!("(surface {{:pigment {} :transform [1 2 3]}}}})", wood), "transform", "non-affine transform"),
     ];
     for (source, expected, what) in cases.iter() {

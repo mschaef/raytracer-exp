@@ -61,8 +61,9 @@ src/
     render/shapes.rs     The Shape enum and everything related. See below.
     render/noise.rs      Improved Perlin noise, vector noise (scaled to
                          POV-Ray's DNoise range) and octave turbulence.
-    render/pigment.rs    Procedural pigments: pattern (wood, checker),
-                         turbulence, wave, colour map, own transform.
+    render/pigment.rs    Procedural pigments: pattern (wood, checker,
+                         bozo, solid), turbulence, wave, rgbt colour map,
+                         own transform; LayeredPigment stacks them.
     render/poly.rs       Real roots of quadratics, cubics and quartics
                          (closed form, with Newton polishing for the
                          quartic). Used by the torus intersection.
@@ -339,8 +340,8 @@ the future).
 `Surface { color, ambient, specular, light, checked, reflection, transparency,
 metallic, pigment }`.
 
-`pigment: Option<&'static Pigment>` (entry 48) replaces `color` and
-`checked` with a procedural colour, evaluated at `RayHit::texture_point`.
+`pigment: Option<&'static LayeredPigment>` (entries 48 and 53) replaces
+`color` and `checked` with a procedural colour, possibly layered, evaluated at `RayHit::texture_point`.
 That's the hit in the local space of whatever gave it its surface: the
 leaf, if it has its own surface, otherwise the nearest `Surfaced`
 wrapper. `Transformed::hit_test` and the `Transform` arm of
@@ -2457,6 +2458,70 @@ Approximate order of recent commits, oldest first:
         uncorrelated (|r| < 0.3, against 1.0 unscrambled), with 2–6 per
         quadrant.
       - 86 unit and 80 suite tests pass (stand-in libraries).
+
+53. **Layered pigments (X10).**
+    - **`render::pigment`.**
+      - Colour-map entries are `Rgbt` (`[r, g, b, t]`), where `t` is
+        POV's transmit, and all four channels interpolate.
+      - New patterns: `Bozo` (noise rescaled to [0, 1], displaced by
+        turbulence like the checker) and `Solid` (the first map entry
+        everywhere).
+      - `LayeredPigment { layers }`, bottom layer first. Each upper
+        layer is composited as `layer * (1 - t) + below * t`, and the
+        bottom layer's transmit is ignored.
+      - POV lights each layer with its own finish and mixes the results.
+        Here the surface has one finish, and lighting is linear in
+        colour, so compositing colours first is equivalent when the
+        layers share a finish, as woods.inc's do.
+      - `Surface::pigment` is now `Option<&'static LayeredPigment>`.
+    - **SDL.**
+      - `:pigment` takes a map (one layer) or a vector of maps (layers,
+        bottom first). A one-element vector equals the bare map.
+      - Colours may be `[r g b]` or `[r g b t]`.
+      - `{:color [r g b t]}` is a solid layer, and takes no other keys.
+      - `:pattern :bozo` is new.
+      - New errors: an empty layer vector, a solid layer with other
+        keys, a colour of the wrong length, a non-map layer.
+    - **Layer order in POV:** `Link_Textures` prepends, so a layered
+      texture's head is its top layer. A `pigment {}` written after a
+      layered texture identifier (nba's middle block) replaces the top
+      layer's pigment.
+    - **`_pov.lisp`.**
+      - `pov-transform`: POV's transform steps, in POV order, as one
+        affine. `:rotate` is in degrees, turning about x, then y, then
+        z.
+      - Grains: `pov-wood-grain-1a/1b/7a/7b`.
+      - Maps: `pov-m-wood-7a/7b/13b/15a/15b/18a/18b` (13b is the
+        uncommented one of the two in woodmaps.inc).
+      - Textures as layer vectors: `pov-t-wood7/23/25/28`.
+      - The single-layer `pov-t-wood*-pigment` names are gone.
+    - **Scenes.**
+      - nba's blocks are T_Wood23, T_Wood7 with the clear pink as its
+        top layer, and T_Wood28. The pink-blend stand-in is gone.
+      - Xmastree's stand is the full T_Wood25, and the stand-in note is
+        gone.
+      - Only those two scenes changed. Every other scene renders
+        byte-identically.
+    - **Finding for the tuning pass.** A pigment-only render of nba
+      (ambient 1, no lights) shows the woods' raw colours come out paler
+      and less saturated than POV's lit reference.
+      - POV's look is the colour times about 1.5–2 (ambient plus four
+        diffuse lights), clipped per channel, which pushes it toward
+        saturated yellow and orange.
+      - Here the lit render goes toward cream instead. The likely cause
+        is that the output is gamma-encoded while `_pov.lisp` passes
+        POV's (linear-output) colour numbers through unchanged. Check
+        this first in the tuning pass.
+    - **Tests.**
+      - Unit tests: `solid_is_one_colour_with_transmit`,
+        `bozo_is_smooth_noise_in_range`,
+        `transmit_interpolates_through_the_map` and
+        `layers_show_through_by_transmit` (partial, clear and see-through
+        bottom layers, and a patterned layer).
+      - Layer cases in `bindings_surface.lisp`, including a layered
+        sphere in its render, and four more `pigment_rejects_bad_keys`
+        cases.
+      - 90 unit and 80 suite tests pass (stand-in libraries).
 
 ## Pitfalls and conventions
 

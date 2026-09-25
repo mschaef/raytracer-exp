@@ -21,8 +21,6 @@
 ; Stand-ins for features the renderer doesn't have yet (see
 ; docs/povray_gap_analysis.md, §5):
 ;
-;   * The stand's T_Wood25 is two layers of wood in POV; here it's the
-;     bottom layer alone (see `pov-t-wood25-pigment` in _pov.lisp).
 ;   * The white sky_sphere and the white hollow sphere of radius 2000
 ;     around everything become a white background (`xmas-ground` in
 ;     _pov.lisp).
@@ -65,7 +63,7 @@
 (def surface-beads  (pov-plain [0 0.8 0]))
 (def surface-trunk  (pov-metal-e pov-brass3))           ; T_Brass_3E
 (def surface-hook   (pov-metal-c pov-silver3))          ; T_Silver_3C
-(def surface-stand  (pov-pigmented pov-t-wood25-pigment)) ; T_Wood25
+(def surface-stand  (pov-pigmented pov-t-wood25))         ; T_Wood25
 
 ; makeOrnamentByID pairs these pigments with F_MetalC.
 (def ornament-colors [pov-gold3 pov-red pov-silver3 pov-yellow pov-blue])

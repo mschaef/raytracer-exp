@@ -65,8 +65,14 @@ plans.
   - Area-light samples now use the R2 sequence, which clears the
     speckled penumbrae at low sample counts.
   - The SDL reader accepts exponent literals (`1e-12`).
-- **Next:** snowman. Before that, optionally: layered textures, and a
-  tuning pass over the ported scenes.
+- **Layered textures: done** (X10; CLAUDE.md entry 53) as layered
+  pigments with rgbt colour maps, plus the bozo pattern. nba and
+  xmastree's stand use the full two-layer woods.
+- **Next: a tuning pass over the ported scenes, before snowman.** Start
+  with colour handling: POV's colour numbers are passed through as
+  linear, but the output is gamma-encoded, which likely explains why the
+  scenes look pale and washed out next to POV's renders (entry 53).
+  Snowman waits until the current images look right.
 
 ## 1. Summary
 

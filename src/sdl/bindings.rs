@@ -47,7 +47,7 @@ use crate::render::shapes::{
 };
 use crate::render::transform::Affine;
 use crate::render::noise::Octaves;
-use crate::render::pigment::{Pattern, Pigment, Wave};
+use crate::render::pigment::{LayeredPigment, Pattern, Pigment, Rgbt, Wave};
 use crate::render::{Camera, HeatmapTargets, Light, LightKind, Scene, SpotCone, Surface, ViewMode};
 
 use crate::sdl::env::EnvRef;
@@ -563,7 +563,7 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
     require_arity(args, 1, "surface", pos);
     let map = require_map(&args[0], "surface", pos);
 
-    let pigment = map.get("pigment").map(|v| build_pigment(v, pos));
+    let pigment = map.get("pigment").map(|v| build_layered_pigment(v, pos));
     // With a pigment, :color is optional: the pigment gives the colour.
     let color: LinearColor = if pigment.is_some() {
         maybe_key_point(&map, "color", "surface", pos).unwrap_or([0.5, 0.5, 0.5])
@@ -591,13 +591,49 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
     })
 }
 
-/// Build a pigment from its SDL map (the `:pigment` key of `surface`):
+/// Build a surface's `:pigment`: one pigment map, or a vector of them
+/// for layers, bottom first (POV-Ray's layered textures). A layer above
+/// the bottom shows what's under it through the transmit channel of its
+/// colours (see `LayeredPigment`).
 ///
-/// - `:pattern` — `:wood` (concentric rings around the z axis) or
-///   `:checker` (unit cubes).
-/// - `:color-map` — `[[value [r g b]] ...]`, ascending values in
+/// The result is leaked to get the `'static` reference `Surface`
+/// holds (see `Surface::pigment`).
+fn build_layered_pigment(v: &Value, pos: &Position) -> &'static LayeredPigment {
+    let layers = match v {
+        Value::Vec(items) => {
+            if items.is_empty() {
+                sdl_panic!(pos, "surface :pigment: a layer vector needs at least one pigment");
+            }
+            items.iter().map(|item| build_pigment(item, pos)).collect()
+        }
+        _ => vec![build_pigment(v, pos)],
+    };
+    Box::leak(Box::new(LayeredPigment { layers }))
+}
+
+/// A colour, `[r g b]` or `[r g b t]` with a transmit `t` (0 opaque, 1
+/// clear; POV's `rgbt`).
+fn require_rgbt(v: &Value, ctx: &str, pos: &Position) -> Rgbt {
+    let items = require_vec(v, ctx, pos);
+    match items.len() {
+        3 | 4 => {
+            let n = |i: usize| require_number(&items[i], ctx, pos);
+            [n(0), n(1), n(2), if items.len() == 4 { n(3) } else { 0.0 }]
+        }
+        k => sdl_panic!(pos, "{} expected [r g b] or [r g b t], got {} elements", ctx, k),
+    }
+}
+
+/// Build one pigment from its SDL map:
+///
+/// - `:pattern` — `:wood` (concentric rings around the z axis),
+///   `:checker` (unit cubes) or `:bozo` (smooth noise).
+/// - `:color` — instead of a pattern: one colour everywhere, usually
+///   with a transmit, as a layer (POV's `pigment { rgbt <...> }`).
+/// - `:color-map` — `[[value colour] ...]`, ascending values in
 ///   `[0, 1]`; repeat a value for a hard edge. For a checker,
-///   `:colors [a b]` is the shorthand POV uses.
+///   `:colors [a b]` is the shorthand POV uses. Colours are `[r g b]`
+///   or `[r g b t]`.
 /// - `:turbulence` (default 0; a number, or `[x y z]` per axis), with `:octaves` (6), `:omega` (0.5) and
 ///   `:lambda` (2.0), as in POV-Ray.
 /// - `:wave` — `:triangle` (the default, and POV's for wood), `:ramp`
@@ -606,12 +642,10 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
 ///   transforms inside a `pigment { }` (e.g. `(affine-scale [0.05 0.05
 ///   0.05])` for rings 20 times finer).
 ///
-/// The pigment is leaked to get the `'static` reference `Surface`
-/// holds (see `Surface::pigment`).
-fn build_pigment(v: &Value, pos: &Position) -> &'static Pigment {
+fn build_pigment(v: &Value, pos: &Position) -> Pigment {
     let map = require_map(v, "surface :pigment", pos);
-    const KEYS: [&str; 9] = [
-        "pattern", "color-map", "colors", "turbulence", "octaves", "omega", "lambda", "wave", "transform",
+    const KEYS: [&str; 10] = [
+        "pattern", "color", "color-map", "colors", "turbulence", "octaves", "omega", "lambda", "wave", "transform",
     ];
     for k in map.keys() {
         if !KEYS.contains(&k.as_str()) {
@@ -625,11 +659,27 @@ fn build_pigment(v: &Value, pos: &Position) -> &'static Pigment {
         })
     };
 
+    // A solid colour: `:color` and nothing else.
+    if let Some(c) = map.get("color") {
+        if let Some(k) = map.keys().find(|k| k.as_str() != "color") {
+            sdl_panic!(pos, "pigment: a solid :color pigment takes no other keys (got :{})", k);
+        }
+        return Pigment {
+            pattern: Pattern::Solid,
+            turbulence: [0.0; 3],
+            octaves: Octaves::default(),
+            wave: Wave::Triangle,
+            color_map: vec![(0.0, require_rgbt(c, "pigment :color", pos))],
+            from_texture: Affine::identity(),
+        };
+    }
+
     let pattern = match keyword("pattern").as_deref() {
         Some("wood") => Pattern::Wood,
         Some("checker") => Pattern::Checker,
-        Some(other) => sdl_panic!(pos, "pigment: unknown :pattern :{} (expected :wood or :checker)", other),
-        None => sdl_panic!(pos, "pigment: missing :pattern"),
+        Some("bozo") => Pattern::Bozo,
+        Some(other) => sdl_panic!(pos, "pigment: unknown :pattern :{} (expected :wood, :checker or :bozo)", other),
+        None => sdl_panic!(pos, "pigment: missing :pattern (or :color for a solid colour)"),
     };
     let wave = match keyword("wave").as_deref() {
         None | Some("triangle") => Wave::Triangle,
@@ -638,7 +688,7 @@ fn build_pigment(v: &Value, pos: &Position) -> &'static Pigment {
         Some(other) => sdl_panic!(pos, "pigment: unknown :wave :{} (expected :triangle, :ramp or :sine)", other),
     };
 
-    let color_map: Vec<(f64, LinearColor)> = match (map.get("color-map"), map.get("colors")) {
+    let color_map: Vec<(f64, Rgbt)> = match (map.get("color-map"), map.get("colors")) {
         (Some(_), Some(_)) => sdl_panic!(pos, "pigment: give :color-map or :colors, not both"),
         (Some(cm), None) => {
             let entries = require_vec(cm, "pigment :color-map", pos);
@@ -652,7 +702,7 @@ fn build_pigment(v: &Value, pos: &Position) -> &'static Pigment {
                     sdl_panic!(pos, "pigment: each :color-map entry is [value [r g b]] (got {})", e);
                 }
                 let value = require_number(&pair[0], "pigment :color-map value", pos);
-                let color = require_point(&pair[1], "pigment :color-map colour", pos);
+                let color = require_rgbt(&pair[1], "pigment :color-map colour", pos);
                 if let Some((last, _)) = out.last() {
                     if value < *last {
                         sdl_panic!(pos, "pigment: :color-map values must ascend ({} after {})", value, last);
@@ -668,8 +718,8 @@ fn build_pigment(v: &Value, pos: &Position) -> &'static Pigment {
                 sdl_panic!(pos, "pigment: :colors takes two colours (got {})", colors.len());
             }
             vec![
-                (0.0, require_point(&colors[0], "pigment :colors", pos)),
-                (1.0, require_point(&colors[1], "pigment :colors", pos)),
+                (0.0, require_rgbt(&colors[0], "pigment :colors", pos)),
+                (1.0, require_rgbt(&colors[1], "pigment :colors", pos)),
             ]
         }
         (None, None) => sdl_panic!(pos, "pigment: needs :color-map (or :colors for a checker)"),
@@ -702,14 +752,14 @@ fn build_pigment(v: &Value, pos: &Position) -> &'static Pigment {
         Some(v) => [require_number(v, "pigment :turbulence", pos); 3],
     };
 
-    Box::leak(Box::new(Pigment {
+    Pigment {
         pattern,
         turbulence,
         octaves,
         wave,
         color_map,
         from_texture: transform.inverse(),
-    }))
+    }
 }
 
 // ---------------------------------------------------------------------------

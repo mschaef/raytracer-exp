@@ -26,7 +26,7 @@ use std::time::Instant;
 use shapes::Shape;
 use output::{RenderTarget, HeatmapTarget};
 use transform::Affine;
-use pigment::Pigment;
+use pigment::LayeredPigment;
 
 use rayon::prelude::*;
 
@@ -87,13 +87,13 @@ pub struct Surface {
     /// drives body, reflection, and highlight. Rough/glossy metal
     /// (scattered reflections) is a deferred follow-on.
     pub metallic: bool,
-    /// A procedural pigment. When set, it replaces `color` (and the
-    /// `checked` pattern) as the surface colour, evaluated at the hit's
-    /// texture point. Pigments are built once, when a scene is
+    /// A procedural pigment, possibly layered. When set, it replaces
+    /// `color` (and the `checked` pattern) as the surface colour,
+    /// evaluated at the hit's texture point. Pigments are built once, when a scene is
     /// constructed, and leaked to get a `'static` reference, which keeps
     /// `Surface` small and `Copy`; the leak is bounded by the number of
     /// pigmented surfaces a script creates.
-    pub pigment: Option<&'static Pigment>,
+    pub pigment: Option<&'static LayeredPigment>,
 }
 
 /// Per-variant data for a light source. Phase 1 of the "Light types:

@@ -71,40 +71,45 @@
 ;; Surfaces
 ;; --------------------------------------------------------------------
 
-; A procedural pigment (see `surface`'s :pigment key) with POV's
-; default finish.
+; A procedural pigment (see `surface`'s :pigment key: a pigment map, or
+; a vector of layers) with POV's default finish.
 (defn pov-pigmented [pigment]
   (surface {:pigment pigment :ambient 0.1 :light 0.6 :specular 0.0}))
-
-;; woods.inc. T_Wood25 is two wood layers, the top one partly
-;; transparent (P_WoodGrain1A with M_Wood15A under P_WoodGrain1B with
-;; M_Wood15B). Layered textures aren't supported, so this is the bottom
-;; layer alone. The colour map is woodmaps.inc's M_Wood15A, whose
-;; two-colour entries join end to end, flattened to single colours.
-(def pov-t-wood25-pigment
-  (let [a (p* [0.504 0.310 0.078] 0.7)
-        b (p* [0.531 0.325 0.090] 0.8)
-        c (p* [0.547 0.333 0.090] 0.5)
-        d (p* [0.504 0.310 0.075] 0.6)
-        e (p* [0.559 0.322 0.102] 0.4)
-        f (p* [0.531 0.325 0.086] 0.4)]
-    ; P_WoodGrain1A: wood, turbulence 0.04, octaves 3, scale <0.05, 0.05, 1>.
-    {:pattern    :wood
-     :turbulence 0.04
-     :octaves    3
-     :color-map  [[0.0 a] [0.25 b] [0.40 c] [0.50 d] [0.70 e] [0.98 f] [1.0 a]]
-     :transform  (affine-scale [0.05 0.05 1])}))
 
 ;; POV colour maps are lists of two-colour entries, [v0 v1 c0 c1]: the
 ;; colour runs from c0 at v0 to c1 at v1. Where one entry's c1 differs
 ;; from the next entry's c0 the map steps, which a repeated value
-;; reproduces here.
+;; reproduces here. Colours may be [r g b t], with a transmit t.
 (defn pov-color-map [entries]
   (mapcat (fn [[v0 v1 c0 c1]] [[v0 c0] [v1 c1]]) entries))
 
-;; More of woods.inc, bottom layers only, as for T_Wood25 above.
+;; POV transforms written in POV's order, e.g.
+;; [[:scale [0.15 0.5 1]] [:rotate [5 10 5]] [:translate [-2 0 0]]],
+;; composed into one affine. A :rotate is in degrees and turns about x,
+;; then y, then z, as POV's does.
+(defn pov-transform [steps]
+  (reduce (fn [acc [op v]]
+            (affine-compose
+              (cond (= op :scale)     (affine-scale v)
+                    (= op :translate) (affine-translation v)
+                    (= op :rotate)    (affine-compose
+                                        (affine-rotation-z (deg->rad (z v)))
+                                        (affine-compose (affine-rotation-y (deg->rad (y v)))
+                                                        (affine-rotation-x (deg->rad (x v))))))
+              acc))
+          (affine-identity)
+          steps))
 
-; P_WoodGrain1A: the grain under most of the T_Wood textures.
+;; --------------------------------------------------------------------
+;; woods.inc and woodmaps.inc
+;; --------------------------------------------------------------------
+;
+; A T_Wood texture is two layers: an opaque grain underneath and a
+; partly transmitting grain on top, which adds streaks and darker late
+; wood. Here each T_Wood is a pigment layer vector, bottom first, for
+; `surface`'s :pigment (see `pov-pigmented`).
+
+; P_WoodGrain1A, the bottom grain of most T_Wood textures.
 (defn pov-wood-grain-1a [color-map]
   {:pattern    :wood
    :turbulence 0.04
@@ -112,11 +117,69 @@
    :color-map  color-map
    :transform  (affine-scale [0.05 0.05 1])})
 
+; P_WoodGrain1B, the top grain over P_WoodGrain1A: coarser, tilted
+; rings, off the object's axis.
+(defn pov-wood-grain-1b [color-map]
+  {:pattern    :wood
+   :turbulence [0.1 0.5 1]
+   :octaves    5
+   :lambda     3.25
+   :color-map  color-map
+   :transform  (pov-transform [[:scale [0.15 0.5 1]] [:rotate [5 10 5]] [:translate [-2 0 0]]])})
+
+; P_WoodGrain7A (T_Wood7's bottom), whose turbulence differs per axis.
+(defn pov-wood-grain-7a [color-map]
+  {:pattern    :wood
+   :turbulence [0.05 0.08 1000]
+   :octaves    4
+   :color-map  color-map
+   :transform  (affine-scale [0.15 0.15 1])})
+
+; P_WoodGrain7B (T_Wood7's top): fine noise streaks along z.
+(defn pov-wood-grain-7b [color-map]
+  {:pattern   :bozo
+   :color-map color-map
+   :transform (affine-scale [0.01 0.01 100000])})
+
 ; M_Wood7A, which woodmaps.inc repeats as M_Wood13A: yellow pine.
 (def pov-m-wood-7a
   (let [a [0.60 0.35 0.20]
         b [0.90 0.65 0.30]]
     (pov-color-map [[0.0 0.1 a a] [0.1 0.9 a b] [0.9 1.0 b a]])))
+
+; M_Wood7B: opaque yellow streaks fading to clear.
+(def pov-m-wood-7b
+  (let [y  [0.90 0.65 0.30 0.00]
+        y3 [0.90 0.65 0.30 0.30]
+        clear [1.0 1.0 1.0 1.0]]
+    (pov-color-map [[0.0 0.1 y y3] [0.1 1.0 y3 clear]])))
+
+; M_Wood13B (the active one of the two in woodmaps.inc).
+(def pov-m-wood-13b
+  (let [y  [0.90 0.65 0.30 0.00]
+        y3 [0.90 0.65 0.30 0.30]
+        clear [1.0 1.0 1.0 1.0]]
+    (pov-color-map [[0.0 0.4 clear y3] [0.4 0.5 y y3] [0.5 1.0 y3 clear]])))
+
+; M_Wood15A, with its two-colour entries (which join end to end)
+; flattened to single colours.
+(def pov-m-wood-15a
+  (let [a (p* [0.504 0.310 0.078] 0.7)
+        b (p* [0.531 0.325 0.090] 0.8)
+        c (p* [0.547 0.333 0.090] 0.5)
+        d (p* [0.504 0.310 0.075] 0.6)
+        e (p* [0.559 0.322 0.102] 0.4)
+        f (p* [0.531 0.325 0.086] 0.4)]
+    [[0.0 a] [0.25 b] [0.40 c] [0.50 d] [0.70 e] [0.98 f] [1.0 a]]))
+
+; M_Wood15B.
+(def pov-m-wood-15b
+  (pov-color-map [[0.00 0.25 [0.404 0.210 0.078 0.20] [0.431 0.225 0.090 0.80]]
+                  [0.25 0.40 [0.431 0.225 0.090 0.80] [0.447 0.233 0.090 0.20]]
+                  [0.40 0.50 [0.447 0.233 0.090 0.20] [0.404 0.210 0.075 0.60]]
+                  [0.50 0.70 [0.404 0.210 0.075 0.60] [0.459 0.222 0.102 0.20]]
+                  [0.70 0.98 [0.459 0.222 0.102 0.20] [0.431 0.225 0.086 0.40]]
+                  [0.98 1.00 [0.431 0.225 0.086 0.40] [0.404 0.210 0.078 0.10]]]))
 
 ; M_Wood18A: orange, with dark late-wood bands.
 (def pov-m-wood-18a
@@ -133,17 +196,20 @@
                     [0.70 0.98 (p* o45 0.7) (p* o45 0.5)]
                     [0.98 1.00 (p* o45 0.5) o50]])))
 
-; T_Wood7 (yellow pine, ragged grain): P_WoodGrain7A, whose turbulence
-; differs per axis, with M_Wood7A.
-(def pov-t-wood7-pigment
-  {:pattern    :wood
-   :turbulence [0.05 0.08 1000]
-   :octaves    4
-   :color-map  pov-m-wood-7a
-   :transform  (affine-scale [0.15 0.15 1])})
+; M_Wood18B.
+(def pov-m-wood-18b
+  (pov-color-map [[0.00 0.25 [0.50 0.26 0.12 0.30] [0.54 0.29 0.13 0.40]]
+                  [0.25 0.40 [0.54 0.29 0.13 0.40] [0.55 0.28 0.10 0.60]]
+                  [0.40 0.50 [0.55 0.28 0.10 0.60] [0.50 0.23 0.15 1.00]]
+                  [0.50 0.70 [0.50 0.23 0.15 1.00] [0.56 0.29 0.17 0.60]]
+                  [0.70 0.98 [0.56 0.29 0.17 0.60] [0.54 0.29 0.13 0.40]]
+                  [0.98 1.00 [0.54 0.29 0.13 0.40] [0.50 0.26 0.12 0.30]]]))
 
-(def pov-t-wood23-pigment (pov-wood-grain-1a pov-m-wood-7a))    ; M_Wood13A
-(def pov-t-wood28-pigment (pov-wood-grain-1a pov-m-wood-18a))
+; The textures: pigment layer vectors, bottom first.
+(def pov-t-wood7  [(pov-wood-grain-7a pov-m-wood-7a) (pov-wood-grain-7b pov-m-wood-7b)])  ; yellow pine, ragged grain
+(def pov-t-wood23 [(pov-wood-grain-1a pov-m-wood-7a) (pov-wood-grain-1b pov-m-wood-13b)]) ; M_Wood13A is M_Wood7A
+(def pov-t-wood25 [(pov-wood-grain-1a pov-m-wood-15a) (pov-wood-grain-1b pov-m-wood-15b)])
+(def pov-t-wood28 [(pov-wood-grain-1a pov-m-wood-18a) (pov-wood-grain-1b pov-m-wood-18b)])
 
 ; textures.inc's Dark_Wood: coarse (unscaled) rings with a hard step.
 (def pov-dark-wood-pigment

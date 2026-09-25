@@ -129,12 +129,28 @@
                                       :turbulence 0.2 :octaves 3 :omega 0.6 :lambda 2.5
                                       :wave :sine}})))
 
+; Layers: a vector of pigments, bottom first. Upper layers show what's
+; under them through a transmit channel ([r g b t]); a :color pigment is
+; one colour everywhere. Bozo is a noise pattern.
+(def streaks {:pattern :bozo
+              :color-map [[0.0 [0.9 0.65 0.3 0.0]] [1.0 [1 1 1 1]]]
+              :transform (affine-scale [0.01 0.01 100])})
+(def layered (surface {:pigment [pine streaks {:color [1 0.7 0.7 0.9]}]}))
+(assert (surface? layered))
+(assert (not= layered (surface {:pigment [pine streaks]})))
+; One layer in a vector is the same as the bare map.
+(assert= (surface {:pigment [pine]}) (surface {:pigment pine}))
+; Colour maps take [r g b] and [r g b t] entries side by side.
+(assert (surface? (surface {:pigment {:pattern :wood :color-map [[0 [1 0 0]] [1 [0 0 1 0.5]]]}})))
+(assert (surface? (surface {:pigment {:pattern :checker :colors [[1 1 1 0.2] [0 0 0]]}})))
+
 ; Pigmented surfaces work on any shape, through with-surface, and render.
 (def s (scene {:name "pigment-bindings"
                :camera (camera-looking-at [0 -5 1] [0 0 0] [0 0 1] 1.0)
                :background [0 0 0]
                :objects [(light-white [2 -4 3])
                          (with-surface wood-s (cuboid {:center [0 0 0] :size [1 1 1]}))
+                         (with-surface layered (sphere {:center [1.5 0 0] :r 0.5}))
                          (plane {:normal [0 0 1] :p0 [0 0 -0.5]
                                  :surface (surface {:pigment {:pattern :checker :colors [[1 1 1] [0 0 0]]}})})]
                :min-samples 1
