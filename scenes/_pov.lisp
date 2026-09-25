@@ -14,8 +14,54 @@
 ;     `object { X translate A rotate B }` is (rotate-B (translate-A X)).
 ;   * Shading uses this renderer's own model. The surfaces below are
 ;     starting points that borrow POV's numbers loosely, to be tuned by
-;     eye, not a translation of POV's finish model. Colours are used as
-;     written, with no gamma conversion.
+;     eye, not a translation of POV's finish model.
+;   * Colours are sRGB. The POV scenes predate POV-Ray 3.7 and set no
+;     `assumed_gamma`, so POV wrote their colour numbers straight to the
+;     image: they're display values. This renderer computes in linear
+;     light and sRGB-encodes its output, so a POV colour has to be
+;     decoded with `srgb` before the renderer sees it.
+;
+;     Convention: colours in these files are written as POV's numbers,
+;     and the helpers here decode them (`pov-plain`, the `pov-metal-*`
+;     surfaces, `pov-pigmented` for every colour in a pigment and its
+;     layers, and the lights). Anything a scene hands the renderer
+;     directly, such as a `surface` :color, a light :color or a
+;     :background, must be wrapped in `srgb`. Black and white are the
+;     same either way. (Snowman is different: it sets `assumed_gamma
+;     1.0`, so its colours are already linear.)
+
+;; --------------------------------------------------------------------
+;; sRGB decoding
+;; --------------------------------------------------------------------
+
+; One sRGB-encoded channel to linear (the IEC 61966-2-1 curve, the
+; inverse of the renderer's output encoding).
+(defn srgb-channel [c]
+  (if (<= c 0.04045)
+    (/ c 12.92)
+    (pow (/ (+ c 0.055) 1.055) 2.4)))
+
+; An sRGB colour, [r g b] or [r g b t], to linear. A transmit t isn't a
+; colour and passes through unchanged. POV-Ray 3.7's `srgb` keyword does
+; the same.
+(defn srgb [c]
+  (let [rgb [(srgb-channel (nth c 0)) (srgb-channel (nth c 1)) (srgb-channel (nth c 2))]]
+    (if (= (count c) 4) (conj rgb (nth c 3)) rgb)))
+
+; A pigment map with every colour decoded: :color, :colors and the
+; colours of :color-map (whose positions stay as they are).
+(defn srgb-pigment-layer [layer]
+  (let [layer (if (get layer :color) (assoc layer :color (srgb (get layer :color))) layer)
+        layer (if (get layer :colors) (assoc layer :colors (map srgb (get layer :colors))) layer)]
+    (if (get layer :color-map)
+      (assoc layer :color-map (map (fn [[v c]] [v (srgb c)]) (get layer :color-map)))
+      layer)))
+
+; A pigment, one map or a vector of layers, with every colour decoded.
+(defn srgb-pigment [pigment]
+  (if (map? pigment)
+    (srgb-pigment-layer pigment)
+    (map srgb-pigment-layer pigment)))
 
 ;; --------------------------------------------------------------------
 ;; Colours (colors.inc)
@@ -27,6 +73,8 @@
 (def pov-green [0.0 1.0 0.0])
 (def pov-blue  [0.0 0.0 1.0])
 (def pov-yellow [1.0 1.0 0.0])
+
+;; These are POV's numbers (sRGB); the surface helpers decode them.
 
 ;; metals.inc and golds.inc pigments.
 (def pov-gold3   [1.0 0.775 0.375])   ; P_Gold3
@@ -74,7 +122,7 @@
 ; A procedural pigment (see `surface`'s :pigment key: a pigment map, or
 ; a vector of layers) with POV's default finish.
 (defn pov-pigmented [pigment]
-  (surface {:pigment pigment :ambient 0.1 :light 0.6 :specular 0.0}))
+  (surface {:pigment (srgb-pigment pigment) :ambient 0.1 :light 0.6 :specular 0.0}))
 
 ;; POV colour maps are lists of two-colour entries, [v0 v1 c0 c1]: the
 ;; colour runs from c0 at v0 to c1 at v1. Where one entry's c1 differs
@@ -220,7 +268,7 @@
 ; textures.inc's Chrome_Texture: grey, ambient 0.3, diffuse 0.7,
 ; reflection 0.15, specular 0.8.
 (def pov-chrome
-  (surface {:color [0.658824 0.658824 0.658824]
+  (surface {:color (srgb [0.658824 0.658824 0.658824])
             :ambient 0.3 :light 0.7 :specular 0.8 :reflection 0.15}))
 
 ; glass_old.inc's T_Glass4: rgbf <0.98, 1, 0.99, 0.75> with F_Glass4
@@ -229,7 +277,7 @@
 ; but at this near-white colour the difference is slight. With no
 ; interior (no ior) POV doesn't refract it either.
 (def pov-glass4
-  (surface {:color [0.98 1.0 0.99]
+  (surface {:color (srgb [0.98 1.0 0.99])
             :ambient 0.1 :light 0.1 :specular 1.0 :reflection 0.25
             :transparency 0.75}))
 
@@ -237,10 +285,10 @@
 ; 0.6, no highlight), plus an optional specular strength.
 (defn pov-plain
   [color]
-  (surface {:color color :ambient 0.1 :light 0.6 :specular 0.0}))
+  (surface {:color (srgb color) :ambient 0.1 :light 0.6 :specular 0.0}))
 
 (defn pov-plain-specular [color specular]
-  (surface {:color color :ambient 0.1 :light 0.6 :specular specular}))
+  (surface {:color (srgb color) :ambient 0.1 :light 0.6 :specular specular}))
 
 ; Starting points for metals.inc's F_MetalA ("very soft and dull"),
 ; F_MetalC ("medium reflectivity, holds color well") and F_MetalE
@@ -250,14 +298,14 @@
 ; diffuse term, and POV's metal finishes keep theirs. Switch to the
 ; `metallic` helper in _common.lisp if a harder metal look is wanted.
 (defn pov-metal-a [color]
-  (surface {:color color :ambient 0.35 :light 0.3 :specular 0.8 :reflection 0.1}))
+  (surface {:color (srgb color) :ambient 0.35 :light 0.3 :specular 0.8 :reflection 0.1}))
 
 (defn pov-metal-c [color]
-  (surface {:color color :ambient 0.25 :light 0.5 :specular 0.8 :reflection 0.5}))
+  (surface {:color (srgb color) :ambient 0.25 :light 0.5 :specular 0.8 :reflection 0.5}))
 
 ; F_MetalE, "very highly polished & reflective".
 (defn pov-metal-e [color]
-  (surface {:color color :ambient 0.1 :light 0.7 :specular 0.8 :reflection 0.8}))
+  (surface {:color (srgb color) :ambient 0.1 :light 0.7 :specular 0.8 :reflection 0.8}))
 
 ;; --------------------------------------------------------------------
 ;; The compass (makeCompass)
@@ -293,7 +341,7 @@
               :inner-angle (deg->rad 20)
               :outer-angle (deg->rad 45)
               :intensity   1.5}]
-    [(light {:location [0 100 0] :color [0.6 0.6 0.6] :shadowless true})
+    [(light {:location [0 100 0] :color (srgb [0.6 0.6 0.6]) :shadowless true})
      (light (if area? (assoc spot :area-u [6 0 0] :area-v [0 6 0]) spot))]))
 
 ; The white ground plane. The white sky_sphere and the white hollow

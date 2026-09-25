@@ -15,6 +15,6 @@
   (scene
     {:name       "POV Compass"
      :camera     (pov-camera [1.5 1.2 -3] [0 0 0])
-     :background [0.3 0.3 0.3]
+     :background (srgb [0.3 0.3 0.3])
      :objects    [(light-white [5 10 -10])
                   pov-compass]}))

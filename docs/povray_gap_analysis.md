@@ -68,11 +68,11 @@ plans.
 - **Layered textures: done** (X10; CLAUDE.md entry 53) as layered
   pigments with rgbt colour maps, plus the bozo pattern. nba and
   xmastree's stand use the full two-layer woods.
-- **Next: a tuning pass over the ported scenes, before snowman.** Start
-  with colour handling: POV's colour numbers are passed through as
-  linear, but the output is gamma-encoded, which likely explains why the
-  scenes look pale and washed out next to POV's renders (entry 53).
-  Snowman waits until the current images look right.
+- **Colour handling: done** (CLAUDE.md entry 54). The ported scenes'
+  colours are decoded from sRGB, so flat colours now match POV's.
+- **Next: the rest of the tuning pass, before snowman:** lighting
+  balance and surfaces, judged by eye. Snowman waits until the current
+  images look right.
 
 ## 1. Summary
 
@@ -112,7 +112,7 @@ right first investment.
 ### Decisions (2026-09-22)
 
 - **Use this renderer's shading and light model.** The ports don't
-  emulate POV's shading (gamma handling, POV-style `metallic`,
+  emulate POV's shading (POV's gamma-less lighting math, POV-style `metallic`,
   `brilliance`, exact finish values). Scenes get tuned by eye later.
   That drops T4 and T5 and makes T3 optional (see §4).
 - **Port functionally, not by textual expansion.** Things like the
@@ -162,11 +162,15 @@ them once, during the first port.
    xmastree, braids and train is a good test object, and porting it is
    worth doing on its own.
 
-2. **Gamma.** POV 3.1 scenes without `assumed_gamma` treat pigment
-   colours as display values, and this renderer works in linear light,
-   so ported colours will come out lighter and less saturated. Per the
-   decisions above, that's accepted: colours are used as written and
-   adjusted by eye, with no conversion layer or "no gamma" mode.
+2. **Gamma.** POV scenes older than 3.7 without `assumed_gamma` treat
+   colours as display values: POV writes them to the image unchanged.
+   This renderer computes in linear light and sRGB-encodes its output.
+   So ported colours are decoded from sRGB (`srgb` in `_pov.lisp`),
+   which is what POV 3.7's `srgb` keyword does. There's no "no gamma"
+   mode. Lighting balance is still tuned by eye. Snowman sets
+   `assumed_gamma 1.0`, so its colours are linear already and aren't
+   decoded. *(Revised 2026-09-25; originally colours were used as
+   written.)*
 
 3. **A POV compat library, `scenes/_pov.lisp`.** It grows with each
    port and holds:

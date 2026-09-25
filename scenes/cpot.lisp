@@ -75,7 +75,7 @@
 ;; --------------------------------------------------------------------
 
 (def coffee
-  (surface {:color [0.65 0.65 0.4] :ambient 0.1 :light 0.6 :specular 0.3}))
+  (surface {:color (srgb [0.65 0.65 0.4]) :ambient 0.1 :light 0.6 :specular 0.3}))
 
 ; A glass cup of coffee, one unit tall, standing on the origin with its
 ; handle toward +x.

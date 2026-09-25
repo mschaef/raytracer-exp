@@ -2523,6 +2523,52 @@ Approximate order of recent commits, oldest first:
         cases.
       - 90 unit and 80 suite tests pass (stand-in libraries).
 
+54. **POV colours decoded from sRGB (the first step of the tuning
+    pass).**
+    - **Why:** the POV scenes predate 3.7 and set no `assumed_gamma`.
+      POV 3.7's parser turns gamma handling off for such scenes, so POV
+      wrote their colour numbers straight to the image, which makes them
+      display values. This renderer computes in linear light and
+      sRGB-encodes the output (`linear_to_srgb`, which also clips per
+      channel as POV does), so passing those numbers through as linear
+      encoded them twice. Everything came out pale.
+    - **The fix, in `_pov.lisp` only:**
+      - `srgb-channel`: the IEC 61966-2-1 decode.
+      - `srgb`: takes `[r g b]` or `[r g b t]`, and leaves transmit
+        alone.
+      - `srgb-pigment` and `srgb-pigment-layer`: decode `:color`,
+        `:colors` and the `:color-map` colours of a pigment or of every
+        layer. Map positions stay as they are.
+    - **Convention:** colours in the POV files are written as POV's
+      numbers, and the helpers decode them: `pov-plain(-specular)`,
+      `pov-metal-a/c/e`, `pov-chrome`, `pov-glass4`, `pov-pigmented` and
+      the xmas fill light. Colours handed straight to the renderer must
+      be wrapped in `srgb`: cpot's coffee, and `pov_compass`'s
+      background. Black and white are unchanged either way. Arithmetic
+      on POV colours (`(p* o50 0.5)`) happens before decoding, as POV
+      computed it. Snowman sets `assumed_gamma 1.0` and won't use
+      `srgb`.
+    - **The renderer is unchanged.** The scenes that don't load
+      `_pov.lisp` are untouched. The ports' load time is unchanged too:
+      xmastree evaluates in about 0.65 s either way.
+    - **Result** (a before-and-after sheet of all nine ports, with POV
+      references where the projects have them):
+      - nba's woods now have POV's hues (yellow pine, orange-brown).
+      - The greys read as intended: pov_compass's 0.3 background and
+        the ornament's 0.4 backdrop.
+      - The xmas-lights scenes' white ground is now light grey where
+        POV saturated it: the 0.6 fill light now decodes to 0.32
+        linear.
+    - **Left for the rest of the tuning pass:** lighting balance. nba is
+      still less saturated than POV's four-light render, and cpot's
+      chrome is still too white.
+      - Redball's `red.tga` shows a dark green ball on black. The port
+        follows `redball.pov`, which has a white ambient-1 backdrop, so
+        the reference probably predates the file, as texaco's does.
+        The dark ball fits the file's `brilliance 5` (POV's sharper
+        diffuse falloff), which the port doesn't model; that one is a
+        tuning question.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
