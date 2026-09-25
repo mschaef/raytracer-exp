@@ -653,6 +653,10 @@ pub struct HeatmapTargets<'a> {
     /// thread-local; `None` (the default) skips the bookkeeping
     /// entirely.
     pub depth: Option<&'a dyn HeatmapTarget>,
+    /// Per-pixel largest channel ×1000 (`output::clip_metric`), for the
+    /// clip map: where the image is over 1.0 and by how much. Saved with
+    /// `HeatmapScale::ClipStops`.
+    pub clip: Option<&'a dyn HeatmapTarget>,
 }
 
 thread_local! {
@@ -2028,12 +2032,15 @@ fn render_one_row<T: RenderTarget + ?Sized>(
     let want_time = heatmaps.time.is_some();
     let want_samples = heatmaps.samples.is_some();
     let want_depth = heatmaps.depth.is_some();
+    let want_clip = heatmaps.clip.is_some();
 
     let mut timings: Vec<u32> = if want_time { vec![0u32; imgx as usize] } else { Vec::new() };
     let mut sample_counts: Vec<u32> =
         if want_samples { vec![0u32; imgx as usize] } else { Vec::new() };
     let mut depths: Vec<u32> =
         if want_depth { vec![0u32; imgx as usize] } else { Vec::new() };
+    let mut clips: Vec<u32> =
+        if want_clip { vec![0u32; imgx as usize] } else { Vec::new() };
 
     for x in 0..imgx {
         // Timer is started conditionally: when `want_time` is false,
@@ -2061,6 +2068,9 @@ fn render_one_row<T: RenderTarget + ?Sized>(
         if want_depth {
             depths[x as usize] = depth_metric;
         }
+        if want_clip {
+            clips[x as usize] = output::clip_metric(&pc);
+        }
     }
 
     target.submit_row(0, y, &row);
@@ -2072,6 +2082,9 @@ fn render_one_row<T: RenderTarget + ?Sized>(
     }
     if let Some(h) = heatmaps.depth {
         h.submit_metric_row(0, y, &depths);
+    }
+    if let Some(h) = heatmaps.clip {
+        h.submit_metric_row(0, y, &clips);
     }
 }
 

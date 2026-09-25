@@ -2569,6 +2569,59 @@ Approximate order of recent commits, oldest first:
         diffuse falloff), which the port doesn't model; that one is a
         tuning question.
 
+55. **View transform, phase 1: clip report and clip map.** Renders
+    are byte-identical, and `render-clip.png` is new.
+    - **`output::ClipStats`:**
+      - Lock-free counters for pixels recorded, pixels with any channel
+        over 1.0, counts per channel, and the largest channel value.
+        The maximum is kept as `f64` bits with `fetch_max`, which is
+        valid because non-negative `f64`s order like their bits.
+        Exactly 1.0 doesn't count, and negative or NaN values count
+        as 0.
+      - `report()` gives a `ClipReport`, whose `Display` is one line:
+        `clipped: 41.4% of pixels (R 41.4%, G 29.1%, B 29.0%), max
+        1.88`, or `clipped: none (max 0.96)`.
+    - **Targets:**
+      - `PngTarget` and `StreamTarget` each keep a `ClipStats` and
+        record every row (and `put_pixel`). So the count covers
+        everything written to the target, compositing included.
+      - `clip_report()` reads it.
+      - `main.rs` prints the line after the timing, for both the PNG
+        and the stream paths.
+    - **The clip map:**
+      - A new `HeatmapTargets::clip` slot. `render_one_row` records
+        `output::clip_metric(pc)`, the largest channel ×1000 (only when
+        the slot is set, like the others).
+      - `main.rs` saves it as `render-clip.png` with the new
+        `HeatmapScale::ClipStops`. That's a fixed scale, not the 99th
+        percentile, so maps compare across renders. Black means at
+        most 1.0; grey goes from 64, just over 1.0, to white at three
+        stops over (8.0).
+      - The decomposition renders don't get one.
+    - **SDL:** `(clip-stats target)` returns `{:pixels :clipped :red
+      :green :blue :max}` for a png-target or a wrapper around one
+      (`SdlTarget::clip_report`).
+    - **First readings for the POV ports** at 320×240:
+      - nba 41.4% (max 1.88): the white checker squares, and the pale
+        streaks in the two pines.
+      - cpot 2.3%: the near white checker squares.
+      - braids 2.0%: blue highlights.
+      - xmastree 1.6%: ornament highlights.
+      - redball 0.8%: the highlight.
+      - ornament, texaco and train each 0.2% or less.
+      - pov_compass none.
+    - **Tests:**
+      - Unit tests for the counts, the maximum, the report text,
+        `PngTarget` counting rows and single pixels, and the clip-map
+        scale.
+      - A new `tests/sdl/clip_stats.lisp` renders flat backgrounds of
+        known colour: in range, exactly 1.0, over-bright in red, and a
+        second render composited through an `offset-target`.
+      - 94 unit and 81 suite tests pass (stand-in libraries).
+    - **Decided open question:** the report counts what the encode
+      sees. Until phase 2 adds exposure, "after exposure" and "before
+      the curve" are the same thing.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -3754,6 +3807,11 @@ pub struct ViewTransform { pub exposure: f64 /* stops */, pub curve: ToneCurve }
 - The heatmap targets aren't affected.
 
 ### Phase 1: clip report and clip map (images unchanged)
+
+Done; see history entry 55. Statistics live on the targets (`ClipStats`
+in `PngTarget` and `StreamTarget`), so the SDL reads them with
+`(clip-stats target)`. The clip map uses a fixed scale
+(`HeatmapScale::ClipStops`). The original plan follows.
 
 Make clipping visible before changing anything.
 

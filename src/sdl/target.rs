@@ -35,7 +35,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::render::output::{
-    ArcOffsetTarget, ArcProgressTarget, PngTarget, RenderTarget,
+    ArcOffsetTarget, ArcProgressTarget, ClipReport, PngTarget, RenderTarget,
 };
 
 /// SDL-side wrapper around a render target.
@@ -112,6 +112,13 @@ impl SdlTarget {
                 "save-png expected a png-target (or a wrapper around one)".to_string(),
             ),
         }
+    }
+
+    /// The clip statistics of the underlying PNG buffer (everything
+    /// written to it, through any wrapper), or `None` if this target
+    /// has no PNG buffer.
+    pub fn clip_report(&self) -> Option<ClipReport> {
+        self.png.as_ref().map(|p| p.clip_report())
     }
 
     /// Whether this target supports `save-png`. Useful for the

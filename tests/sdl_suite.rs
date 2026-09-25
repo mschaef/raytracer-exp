@@ -86,6 +86,7 @@ const DECLARED: &[&str] = &[
     "random",
     "recur",
     "render_dispatch",
+    "clip_stats",
     "strings",
     "threading",
     "vec_ops",
@@ -151,6 +152,7 @@ sdl_test!(quote);
 sdl_test!(random);
 sdl_test!(recur);
 sdl_test!(render_dispatch);
+sdl_test!(clip_stats);
 sdl_test!(strings);
 sdl_test!(threading);
 sdl_test!(vec_ops);

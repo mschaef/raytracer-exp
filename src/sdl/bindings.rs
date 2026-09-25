@@ -144,6 +144,7 @@ pub fn install(env: &EnvRef) {
     define_native(env, "progress-target", builtin_progress_target);
     define_native(env, "render", builtin_render);
     define_native(env, "save-png", builtin_save_png);
+    define_native(env, "clip-stats", builtin_clip_stats);
 
     // Type predicates for the new variants.
     define_native(env, "surface?", builtin_surface_q);
@@ -1818,6 +1819,28 @@ fn builtin_render(args: &[Value], pos: &Position) -> Value {
 /// to disk. Panics if `target` was not constructed from (or wrapped
 /// around) a png-target. `target` remains usable after save —
 /// further rendering or a second save are both fine.
+/// `(clip-stats target)` — how much of what's been written to a
+/// png-target (or a wrapper around one) clipped in the 8-bit encode:
+/// `{:pixels n :clipped n :red n :green n :blue n :max x}`. `:clipped`
+/// counts pixels with any channel over 1.0, the colour keys count per
+/// channel, and `:max` is the largest channel value written.
+fn builtin_clip_stats(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 1, "clip-stats", pos);
+    let target = require_target(&args[0], "clip-stats target", pos);
+    let r = match target.clip_report() {
+        Some(r) => r,
+        None => sdl_panic!(pos.clone(), "clip-stats expected a png-target (or a wrapper around one)"),
+    };
+    let mut map = HashMap::new();
+    map.insert("pixels".to_string(), Value::Int(r.pixels as i64));
+    map.insert("clipped".to_string(), Value::Int(r.clipped as i64));
+    map.insert("red".to_string(), Value::Int(r.channels[0] as i64));
+    map.insert("green".to_string(), Value::Int(r.channels[1] as i64));
+    map.insert("blue".to_string(), Value::Int(r.channels[2] as i64));
+    map.insert("max".to_string(), Value::Float(r.max));
+    Value::Map(Rc::new(map))
+}
+
 fn builtin_save_png(args: &[Value], pos: &Position) -> Value {
     require_arity(args, 2, "save-png", pos);
     let target = require_target(&args[0], "save-png target", pos);

@@ -290,10 +290,17 @@ fn main() {
     // to all-black, which is the right diagnostic outcome for
     // "no GI happened."
     let depth_heatmap = PngHeatmapTarget::new(width, height);
+    // Clip map: each pixel's largest channel, on a fixed scale (black
+    // if it's at most 1.0, grey to white for up to three stops over).
+    // Saved as `render-clip.png`. Shows where the 8-bit encode clips
+    // and shifts colour, and how badly; see "View transform (tone
+    // mapping): implementation plan" in CLAUDE.md.
+    let clip_heatmap = PngHeatmapTarget::new(width, height);
     let heatmaps = HeatmapTargets {
         time: Some(&time_heatmap),
         samples: Some(&samples_heatmap),
         depth: Some(&depth_heatmap),
+        clip: Some(&clip_heatmap),
     };
 
     // RTVIEW_ADDR=host:port routes pixels to a streaming receiver
@@ -306,10 +313,15 @@ fn main() {
             let target = StreamTarget::connect(&addr, width, height)
                 .expect("rtview receiver not reachable at RTVIEW_ADDR");
             render_into(&target, heatmaps, &scene, width, height);
+            println!("{}", target.clip_report());
         }
         Err(_) => {
             let target = PngTarget::new(width, height);
             render_into(&target, heatmaps, &scene, width, height);
+            // One line after the timing: how much of the image clipped
+            // in the encode (any channel over 1.0), per channel, and
+            // the brightest value.
+            println!("{}", target.clip_report());
             // `render.png` in `Full` mode (the default — same
             // behavior as every prior phase); `render-{mode}.png`
             // when the user has asked for a diagnostic view via
@@ -348,6 +360,11 @@ fn main() {
     // the sample-count heatmap's "where is the adaptive sampler
     // doing more work."
     depth_heatmap.save("render-depth.png", HeatmapScale::Linear).unwrap();
+
+    // Clip map: `HeatmapScale::ClipStops`, a fixed scale rather than
+    // the 99th percentile, so clip maps from different renders compare
+    // directly and an image with no clipping is all black.
+    clip_heatmap.save("render-clip.png", HeatmapScale::ClipStops).unwrap();
 
     // Sample-source decomposition (Phase 4 of the path-tracing plan).
     // When `RAYTRACER_DECOMP` is set, render the scene at each of the

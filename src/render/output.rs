@@ -41,7 +41,8 @@ use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::fmt;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use image::ImageResult;
 
@@ -74,6 +75,117 @@ pub trait RenderTarget: Send + Sync {
     fn finish(&self) {}
 }
 
+/// A running count of the pixels that clip when a target encodes them:
+/// those with any channel over 1.0, where the 8-bit encode clamps them
+/// and shifts their colour (see "View transform (tone mapping):
+/// implementation plan" in CLAUDE.md). `PngTarget` and `StreamTarget`
+/// each keep one and `record` every row they receive, so the count
+/// covers everything written to that target, compositing included.
+///
+/// Lock-free: rows arrive concurrently from the render workers.
+pub struct ClipStats {
+    pixels: AtomicU64,
+    clipped: AtomicU64,
+    channels: [AtomicU64; 3],
+    /// The largest channel value seen, as `f64` bits. Non-negative
+    /// `f64`s order the same way as their bit patterns, so
+    /// `fetch_max` on the bits keeps the numeric maximum.
+    max_bits: AtomicU64,
+}
+
+impl ClipStats {
+    pub fn new() -> Self {
+        ClipStats {
+            pixels: AtomicU64::new(0),
+            clipped: AtomicU64::new(0),
+            channels: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
+            max_bits: AtomicU64::new(0f64.to_bits()),
+        }
+    }
+
+    /// Count a row of pixels. Negative and NaN values count as 0.
+    pub fn record(&self, row: &[LinearColor]) {
+        let mut clipped = 0;
+        let mut channels = [0u64; 3];
+        let mut max = 0.0f64;
+        for px in row {
+            let mut any = false;
+            for c in 0..3 {
+                let v = px[c];
+                if v > 1.0 {
+                    channels[c] += 1;
+                    any = true;
+                }
+                if v > max {
+                    max = v;
+                }
+            }
+            if any {
+                clipped += 1;
+            }
+        }
+        self.pixels.fetch_add(row.len() as u64, Ordering::Relaxed);
+        self.clipped.fetch_add(clipped, Ordering::Relaxed);
+        for c in 0..3 {
+            self.channels[c].fetch_add(channels[c], Ordering::Relaxed);
+        }
+        self.max_bits.fetch_max(max.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn report(&self) -> ClipReport {
+        ClipReport {
+            pixels: self.pixels.load(Ordering::Relaxed),
+            clipped: self.clipped.load(Ordering::Relaxed),
+            channels: [
+                self.channels[0].load(Ordering::Relaxed),
+                self.channels[1].load(Ordering::Relaxed),
+                self.channels[2].load(Ordering::Relaxed),
+            ],
+            max: f64::from_bits(self.max_bits.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl Default for ClipStats {
+    fn default() -> Self {
+        ClipStats::new()
+    }
+}
+
+/// A snapshot of `ClipStats`. Pixels written twice (compositing) count
+/// twice.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct ClipReport {
+    /// Pixels recorded.
+    pub pixels: u64,
+    /// Pixels with at least one channel over 1.
+    pub clipped: u64,
+    /// Pixels with red, green and blue over 1, respectively.
+    pub channels: [u64; 3],
+    /// The largest channel value recorded.
+    pub max: f64,
+}
+
+impl fmt::Display for ClipReport {
+    /// One line, e.g. `clipped: 3.2% of pixels (R 3.1%, G 0.4%, B
+    /// 0.0%), max 2.71`, or `clipped: none (max 0.93)`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.clipped == 0 {
+            return write!(f, "clipped: none (max {:.2})", self.max);
+        }
+        let pct = |n: u64| 100.0 * n as f64 / self.pixels.max(1) as f64;
+        write!(
+            f,
+            "clipped: {:.1}% of pixels (R {:.1}%, G {:.1}%, B {:.1}%), max {:.2}",
+            pct(self.clipped),
+            pct(self.channels[0]),
+            pct(self.channels[1]),
+            pct(self.channels[2]),
+            self.max
+        )
+    }
+}
+
 /// PNG-backed target. Holds an in-memory `image::ImageBuffer` behind a
 /// `Mutex` for thread-safe row writes; saves to disk on demand via
 /// `save(path)`.
@@ -86,13 +198,20 @@ pub trait RenderTarget: Send + Sync {
 /// `&mut` slices, but neither is justified at present.
 pub struct PngTarget {
     buffer: Mutex<image::ImageBuffer<image::Rgb<u8>, Vec<u8>>>,
+    clip: ClipStats,
 }
 
 impl PngTarget {
     pub fn new(width: u32, height: u32) -> Self {
         PngTarget {
             buffer: Mutex::new(image::ImageBuffer::new(width, height)),
+            clip: ClipStats::new(),
         }
+    }
+
+    /// How many of the pixels written so far clipped in the encode.
+    pub fn clip_report(&self) -> ClipReport {
+        self.clip.report()
     }
 
     /// Write a single pixel directly. Useful for compositing operations
@@ -100,6 +219,7 @@ impl PngTarget {
     /// Color is in the same linear space as `submit_row`; sRGB encoding
     /// happens internally.
     pub fn put_pixel(&self, x: u32, y: u32, color: LinearColor) {
+        self.clip.record(&[color]);
         let encoded = to_png_color(&color);
         let mut buf = self.buffer.lock().unwrap();
         buf.put_pixel(x, y, image::Rgb(encoded));
@@ -123,6 +243,7 @@ impl RenderTarget for PngTarget {
         // pixel-buffer write itself. The temporary Vec is per-call, on
         // the order of a few KB at typical row widths — invisible
         // against ray-tracing cost.
+        self.clip.record(row);
         let encoded: Vec<[u8; 3]> = row.iter().map(to_png_color).collect();
 
         let mut buf = self.buffer.lock().unwrap();
@@ -174,6 +295,7 @@ impl RenderTarget for PngTarget {
 /// trait surface stays the same.
 pub struct StreamTarget {
     inner: Mutex<TcpStream>,
+    clip: ClipStats,
 }
 
 impl StreamTarget {
@@ -196,7 +318,13 @@ impl StreamTarget {
         hdr.extend_from_slice(&0u32.to_le_bytes()); // flags: linear f32
         stream.write_all(&hdr)?;
 
-        Ok(StreamTarget { inner: Mutex::new(stream) })
+        Ok(StreamTarget { inner: Mutex::new(stream), clip: ClipStats::new() })
+    }
+
+    /// How many of the pixels sent so far will clip in the receiver's
+    /// encode (which clamps each channel, as `PngTarget` does).
+    pub fn clip_report(&self) -> ClipReport {
+        self.clip.report()
     }
 }
 
@@ -205,6 +333,7 @@ impl RenderTarget for StreamTarget {
         // 12-byte row header + 12 bytes per pixel (3 × f32). Sized exactly
         // so the Vec allocates once and the write is a single contiguous
         // payload.
+        self.clip.record(row);
         let mut buf = Vec::with_capacity(12 + row.len() * 12);
         buf.extend_from_slice(&y.to_le_bytes());
         buf.extend_from_slice(&x.to_le_bytes());
@@ -438,6 +567,11 @@ pub trait HeatmapTarget: Send + Sync {
 pub enum HeatmapScale {
     Linear,
     Log,
+    /// For the clip map, whose metric is a pixel's largest channel
+    /// ×1000. A fixed scale, not the 99th percentile, so that images
+    /// compare: black up to 1.0 (not clipped), then grey from 64 just
+    /// over 1.0 up to white at 8.0 (three stops over) and beyond.
+    ClipStops,
 }
 
 /// Heatmap target backed by an in-memory buffer of per-pixel `u32`
@@ -491,6 +625,16 @@ impl PngHeatmapTarget {
         // `min_samples`, which is a small positive integer — but
         // there the percentile is already a positive `u32`, so the
         // `.max(1)` is purely belt-and-braces.
+        if let HeatmapScale::ClipStops = scale {
+            let mut img = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::new(self.width, self.height);
+            for (i, &t) in buffer.iter().enumerate() {
+                let x = (i as u32) % self.width;
+                let y = (i as u32) / self.width;
+                img.put_pixel(x, y, image::Luma([clip_stops_gray(t)]));
+            }
+            return img.save(path);
+        }
+
         let cutoff = if buffer.is_empty() {
             1
         } else {
@@ -519,6 +663,7 @@ impl PngHeatmapTarget {
                         // u64 multiply to avoid u32 overflow.
                         ((t as u64) * 255 / (cutoff as u64)) as u8
                     }
+                    HeatmapScale::ClipStops => unreachable!(),
                     HeatmapScale::Log => {
                         // ln(1 + t) / ln(1 + cutoff) * 255. The `+ 1`
                         // keeps the numerator finite at t = 0; for
@@ -537,6 +682,26 @@ impl PngHeatmapTarget {
 
         img.save(path)
     }
+}
+
+/// The clip map's metric for a pixel: its largest channel ×1000,
+/// saturating (so a value of 1.0 is exactly 1000).
+pub fn clip_metric(color: &LinearColor) -> u32 {
+    let m = color[0].max(color[1]).max(color[2]);
+    if m > 0.0 {
+        (m * 1000.0).round().min(u32::MAX as f64) as u32
+    } else {
+        0
+    }
+}
+
+/// Grey level for a clip-map metric (see `HeatmapScale::ClipStops`).
+fn clip_stops_gray(metric: u32) -> u8 {
+    if metric <= 1000 {
+        return 0;
+    }
+    let stops = (metric as f64 / 1000.0).log2();
+    (64.0 + 191.0 * (stops / 3.0).min(1.0)).round() as u8
 }
 
 impl HeatmapTarget for PngHeatmapTarget {
@@ -570,4 +735,59 @@ impl<'a, H: HeatmapTarget + ?Sized + 'a> HeatmapTarget for OffsetHeatmapTarget<'
         self.inner.submit_metric_row(x + self.dx, y + self.dy, metric);
     }
     // finish() intentionally not propagated — see struct doc.
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+
+    #[test]
+    fn clip_stats_count_channels_and_max() {
+        let stats = ClipStats::new();
+        stats.record(&[[0.5, 0.5, 0.5], [1.2, 0.9, 0.1], [2.5, 1.5, 0.0]]);
+        stats.record(&[[1.0, 1.0, 1.0], [0.0, 0.0, 3.0]]);
+        let r = stats.report();
+        assert_eq!(r.pixels, 5);
+        // Exactly 1.0 doesn't clip.
+        assert_eq!(r.clipped, 3);
+        assert_eq!(r.channels, [2, 1, 1]);
+        assert_eq!(r.max, 3.0);
+        assert_eq!(
+            r.to_string(),
+            "clipped: 60.0% of pixels (R 40.0%, G 20.0%, B 20.0%), max 3.00"
+        );
+    }
+
+    #[test]
+    fn clip_stats_none_and_odd_values() {
+        let stats = ClipStats::new();
+        assert_eq!(stats.report().to_string(), "clipped: none (max 0.00)");
+        stats.record(&[[-1.0, f64::NAN, 0.25]]);
+        let r = stats.report();
+        assert_eq!((r.pixels, r.clipped, r.max), (1, 0, 0.25));
+        assert_eq!(r.to_string(), "clipped: none (max 0.25)");
+    }
+
+    #[test]
+    fn png_target_counts_rows_and_single_pixels() {
+        let t = PngTarget::new(4, 2);
+        t.submit_row(0, 0, &[[0.2, 0.2, 0.2], [1.5, 0.2, 0.2], [0.0, 0.0, 0.0], [0.9, 0.9, 1.1]]);
+        t.put_pixel(0, 1, [0.0, 4.0, 0.0]);
+        let r = t.clip_report();
+        assert_eq!((r.pixels, r.clipped, r.channels, r.max), (5, 3, [1, 1, 1], 4.0));
+    }
+
+    #[test]
+    fn clip_map_scale() {
+        assert_eq!(clip_metric(&[0.5, 1.0, 0.2]), 1000);
+        assert_eq!(clip_metric(&[-1.0, 0.0, 0.0]), 0);
+        assert_eq!(clip_stops_gray(0), 0);
+        assert_eq!(clip_stops_gray(1000), 0);
+        assert_eq!(clip_stops_gray(1001), 64);
+        // One stop over is a third of the way from 64 to 255; three
+        // stops or more is white.
+        assert_eq!(clip_stops_gray(2000), 128);
+        assert_eq!(clip_stops_gray(8000), 255);
+        assert_eq!(clip_stops_gray(u32::MAX), 255);
+    }
 }

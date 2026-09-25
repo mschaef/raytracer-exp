@@ -79,6 +79,10 @@ plans.
   clip report (phase 1) should land before the lighting tuning, so
   tuning can tell over-lit from vivid. The choice of default curve
   (phase 6) affects how every port is tuned.
+- **View transform phase 1: done** (CLAUDE.md entry 55). Every render
+  prints a clip report and writes `render-clip.png`. The ports' first
+  readings: nba 41% of pixels clipped, cpot 2.3%, braids 2.0%, xmastree
+  1.6%, redball 0.8%, the rest 0.2% or less.
 
 ## 1. Summary
 
