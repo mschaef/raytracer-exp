@@ -459,6 +459,43 @@ fn bvh_render_equivalence() {
     let _ = fs::remove_file(&path_b);
 }
 
+/// `(light {...})` rejects malformed or contradictory keys.
+#[test]
+fn light_rejects_bad_keys() {
+    // (source, text the error must contain, description)
+    let cases: &[(&str, &str, &str)] = &[
+        ("(light {})", "location", "missing location"),
+        ("(light {:location [0 0 0] :colour [1 1 1]})", "unknown key :colour", "typo"),
+        ("(light {:location [0 0 0] :direction [0 0 -1] :point-at [0 0 -1] :inner-angle 0 :outer-angle 1})",
+         "not both", "direction and point-at"),
+        ("(light {:location [0 0 0] :inner-angle 0.1 :outer-angle 0.2})", "need :direction", "angles without a direction"),
+        ("(light {:location [0 0 0] :direction [0 0 -1] :inner-angle 0.1})", "both :inner-angle and :outer-angle", "one angle"),
+        ("(light {:location [0 0 0] :direction [0 0 -1] :inner-angle 0.5 :outer-angle 0.2})", "must be ≤", "reversed angles"),
+        ("(light {:location [0 0 0] :point-at [0 0 0] :inner-angle 0 :outer-angle 1})", "non-zero", "point-at the location"),
+        ("(light {:location [0 0 0] :radius 1})", "needs :axis", "disk without an axis"),
+        ("(light {:location [0 0 0] :radius 0 :axis [0 0 1]})", "positive", "zero radius"),
+        ("(light {:location [0 0 0] :axis [0 0 1]})", ":axis only applies", "axis without radius"),
+        ("(light {:location [0 0 0] :radius 1 :axis [0 0 1] :area-u [1 0 0] :area-v [0 1 0]})", "not both", "disk and quad"),
+        ("(light {:location [0 0 0] :area-u [1 0 0]})", "both :area-u and :area-v", "one edge"),
+        ("(light {:location [0 0 0] :area-u [1 0 0] :area-v [2 0 0]})", "not parallel", "parallel edges"),
+    ];
+    for &(source, expected, what) in cases.iter() {
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(source, "light_bad.lisp", &env);
+        }));
+        let message = match result {
+            Ok(_) => panic!("must reject {}: {}", what, source),
+            Err(p) => p.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        assert!(
+            message.contains(expected),
+            "error for {} ({}) should mention {:?}, got: {}",
+            what, source, expected, message
+        );
+    }
+}
+
 /// Lights-as-shapes affine equivalence: a scene with a bare
 /// `(light-white [5 5 5])` in `:objects` must render byte-identically
 /// to a scene where the same light is positioned by wrapping a
@@ -658,6 +695,11 @@ fn cornell_box_scene_loads() {
 #[test]
 fn pov_compass_scene_loads() {
     assert_scene_loads("pov_compass.lisp", "pov-compass-scene");
+}
+
+#[test]
+fn xmastree_scene_loads() {
+    assert_scene_loads("xmastree.lisp", "xmastree-scene");
 }
 
 #[test]

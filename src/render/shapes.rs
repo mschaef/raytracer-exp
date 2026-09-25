@@ -11,6 +11,7 @@
 use crate::render::{
     Light,
     LightKind,
+    SpotCone,
     Point,
     Surface,
     Hittable,
@@ -777,7 +778,7 @@ impl Shape {
                             outer_angle,
                         }
                     }
-                    LightKind::Area { axis, radius } => {
+                    LightKind::Area { axis, radius, cone } => {
                         // `axis` is a vector and transforms by the
                         // linear part only; renormalize because
                         // non-uniform scale can change its magnitude.
@@ -787,6 +788,18 @@ impl Shape {
                         LightKind::Area {
                             axis: normalizep(world_from_local.transform_vector(axis)),
                             radius,
+                            cone: cone.map(|c| transform_cone(&world_from_local, c)),
+                        }
+                    }
+                    LightKind::Quad { u, v, cone } => {
+                        // The edges are vectors that carry the quad's
+                        // size, so they transform by the linear part
+                        // and are *not* renormalized: scaling the light
+                        // scales the emitter.
+                        LightKind::Quad {
+                            u: world_from_local.transform_vector(u),
+                            v: world_from_local.transform_vector(v),
+                            cone: cone.map(|c| transform_cone(&world_from_local, c)),
                         }
                     }
                 };
@@ -795,6 +808,7 @@ impl Shape {
                     color: l.color,
                     intensity: l.intensity,
                     kind,
+                    shadowless: l.shadowless,
                 });
             }
             Shape::Group(children) => {
@@ -884,6 +898,16 @@ impl Shape {
             // they're trivially valid regardless of ancestry.
             Shape::Light(_) => Ok(()),
         }
+    }
+}
+
+/// A spot cone carried into world space: the direction transforms by
+/// the linear part and is renormalized, like `LightKind::Spot`'s; the
+/// angles don't change.
+fn transform_cone(world_from_local: &Affine, c: SpotCone) -> SpotCone {
+    SpotCone {
+        direction: normalizep(world_from_local.transform_vector(c.direction)),
+        ..c
     }
 }
 

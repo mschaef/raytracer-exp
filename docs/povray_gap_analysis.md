@@ -39,7 +39,16 @@ plans.
   CLAUDE.md entry 43.
 - **Step 7, BVH builder: done.** `(bvh [...])`. Xmastree's 16,730 beads
   render about 240× faster than as a plain group (CLAUDE.md entry 44).
-- **Next on the list:** porting xmastree with stand-ins (step 8, §5).
+- **Xmastree: ported with stand-ins** (step 8): `scenes/xmastree.lisp`.
+  See CLAUDE.md entry 45 for the stand-ins and the area-light sampling
+  finding (the scene uses 16–64 samples per pixel).
+- **`epsilon` binding and step 9 lights: done** (CLAUDE.md entry 46):
+  shadowless lights, quad area lights, and area lights with spot cones,
+  all through `(light {...})`. Xmastree now uses its original lights;
+  its only stand-ins are flat wood and the white background.
+- **Next:** braids, train and redball (step 10 and the calibration
+  port), then procedural pigments (step 12) with the ornament port
+  (step 11).
 
 ## 1. Summary
 

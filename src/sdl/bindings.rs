@@ -46,7 +46,7 @@ use crate::render::shapes::{
     Cone, Cuboid, Cylinder, Plane, Shape, Sphere, Torus, Triangle,
 };
 use crate::render::transform::Affine;
-use crate::render::{Camera, HeatmapTargets, Light, Scene, Surface, ViewMode};
+use crate::render::{Camera, HeatmapTargets, Light, LightKind, Scene, SpotCone, Surface, ViewMode};
 
 use crate::sdl::env::EnvRef;
 use crate::sdl::error::Position;
@@ -71,6 +71,14 @@ pub fn install(env: &EnvRef) {
     define_native(env, "light-point", builtin_light_point);
     define_native(env, "light-spot", builtin_light_spot);
     define_native(env, "light-area", builtin_light_area);
+    define_native(env, "light", builtin_light);
+
+    // The renderer's self-intersection tolerance (`render::geometry::
+    // EPSILON`): hits closer than this to a ray's origin are ignored.
+    // Scenes that offset nearly coincident surfaces (CSG faces a hair
+    // apart) should offset by at least this much, and should use this
+    // binding rather than a hard-coded copy.
+    env.borrow_mut().define("epsilon", Value::Float(EPSILON));
 
     // Cameras.
     define_native(env, "camera-looking-at", builtin_camera_looking_at);
@@ -685,6 +693,133 @@ fn builtin_light_area(args: &[Value], pos: &Position) -> Value {
         color,
         intensity,
     )))
+}
+
+/// `(light {:location [..] ...})` — the general light constructor,
+/// map-keyed, covering every combination the positional constructors
+/// don't. Keys:
+///
+/// - `:location` (required) — where the light is (the centre, for an
+///   area light).
+/// - `:color` (default white), `:intensity` (default 1).
+/// - `:shadowless` (default false) — cast no shadows (a fill light).
+/// - A spot cone: `:direction` (the way it shines) or `:point-at` (a
+///   point to aim at), with `:inner-angle` and `:outer-angle` in
+///   radians. Full strength inside the inner angle, none beyond the
+///   outer.
+/// - An area, for soft shadows, either a disk — `:radius`, with
+///   `:axis` its normal (defaults to the spot direction) — or a
+///   parallelogram — `:area-u` and `:area-v`, its two edge vectors,
+///   as in POV-Ray's `area_light <u>, <v>, ...`. A disk emits from its
+///   front face with a cosine falloff; a parallelogram emits equally in
+///   all directions, as POV's area lights do.
+///
+/// So `(light {:location L})` is a point light, adding a cone makes a
+/// spotlight, adding an area makes an area light, and both together
+/// make an area light that is also a spotlight. Direction and axis
+/// vectors are normalized; unknown keys are rejected so typos don't
+/// pass silently.
+fn builtin_light(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 1, "light", pos);
+    let map = require_map(&args[0], "light", pos);
+    const KEYS: [&str; 12] = [
+        "location", "color", "intensity", "shadowless", "direction", "point-at",
+        "inner-angle", "outer-angle", "radius", "axis", "area-u", "area-v",
+    ];
+    for k in map.keys() {
+        if !KEYS.contains(&k.as_str()) {
+            sdl_panic!(pos, "light: unknown key :{} (expected one of :{})", k, KEYS.join(" :"));
+        }
+    }
+
+    let location = require_key_point(&map, "location", "light", pos);
+    let color = maybe_key_point(&map, "color", "light", pos).unwrap_or([1.0, 1.0, 1.0]);
+    let intensity = maybe_key_number(&map, "intensity", "light", pos).unwrap_or(1.0);
+    let shadowless = maybe_key_bool(&map, "shadowless", "light", pos).unwrap_or(false);
+
+    let unit = |v: Point, what: &str| -> Point {
+        if lenp(v) < EPSILON {
+            sdl_panic!(pos, "light: {} must be a non-zero vector (got {:?})", what, v);
+        }
+        normalizep(v)
+    };
+
+    // The spot cone.
+    let direction = match (
+        maybe_key_point(&map, "direction", "light", pos),
+        maybe_key_point(&map, "point-at", "light", pos),
+    ) {
+        (Some(_), Some(_)) => sdl_panic!(pos, "light: give :direction or :point-at, not both"),
+        (Some(d), None) => Some(unit(d, ":direction")),
+        (None, Some(target)) => {
+            let d = [target[0] - location[0], target[1] - location[1], target[2] - location[2]];
+            Some(unit(d, ":point-at minus :location"))
+        }
+        (None, None) => None,
+    };
+    let inner = maybe_key_number(&map, "inner-angle", "light", pos);
+    let outer = maybe_key_number(&map, "outer-angle", "light", pos);
+    let cone = match (direction, inner, outer) {
+        (None, None, None) => None,
+        (Some(direction), Some(inner_angle), Some(outer_angle)) => {
+            if inner_angle > outer_angle {
+                sdl_panic!(
+                    pos,
+                    "light: :inner-angle ({}) must be ≤ :outer-angle ({})",
+                    inner_angle,
+                    outer_angle
+                );
+            }
+            Some(SpotCone { direction, inner_angle, outer_angle })
+        }
+        (None, _, _) => sdl_panic!(pos, "light: :inner-angle / :outer-angle need :direction or :point-at"),
+        (Some(_), _, _) => sdl_panic!(pos, "light: a spot cone needs both :inner-angle and :outer-angle"),
+    };
+
+    // The area.
+    let radius = maybe_key_number(&map, "radius", "light", pos);
+    let axis = maybe_key_point(&map, "axis", "light", pos);
+    let area_u = maybe_key_point(&map, "area-u", "light", pos);
+    let area_v = maybe_key_point(&map, "area-v", "light", pos);
+    if axis.is_some() && radius.is_none() {
+        sdl_panic!(pos, "light: :axis only applies to a disk area light (give :radius)");
+    }
+    let kind = match (radius, area_u, area_v) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+            sdl_panic!(pos, "light: give a disk (:radius) or a parallelogram (:area-u :area-v), not both")
+        }
+        (Some(r), None, None) => {
+            if r < EPSILON {
+                sdl_panic!(pos, "light: :radius must be positive (got {})", r);
+            }
+            let axis = match (axis, cone) {
+                (Some(a), _) => unit(a, ":axis"),
+                (None, Some(c)) => c.direction,
+                (None, None) => sdl_panic!(pos, "light: a disk area light needs :axis (or a spot :direction)"),
+            };
+            LightKind::Area { axis, radius: r, cone }
+        }
+        (None, Some(u), Some(v)) => {
+            let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            if lenp(n) < EPSILON {
+                sdl_panic!(pos, "light: :area-u and :area-v must be non-zero and not parallel");
+            }
+            LightKind::Quad { u, v, cone }
+        }
+        (None, Some(_), None) | (None, None, Some(_)) => {
+            sdl_panic!(pos, "light: a parallelogram area light needs both :area-u and :area-v")
+        }
+        (None, None, None) => match cone {
+            Some(c) => LightKind::Spot {
+                direction: c.direction,
+                inner_angle: c.inner_angle,
+                outer_angle: c.outer_angle,
+            },
+            None => LightKind::Point,
+        },
+    };
+
+    Value::Light(Rc::new(Light { location, color, intensity, kind, shadowless }))
 }
 
 // ---------------------------------------------------------------------------

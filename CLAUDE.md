@@ -405,6 +405,24 @@ because `shade_pixel` and `collect_lights` read `location` / `color` /
 `intensity` directly — a pure enum would force accessor methods or
 per-call-site `match` arms for fields every variant has.
 
+Since entry 46 there are two more kinds of light and a flag:
+
+- `LightKind::Quad { u, v, cone }` is a parallelogram area light
+  centred on `location` with edge vectors `u` and `v`, sampled with the
+  same per-pixel-sample coordinate as the disk. It has no cosine factor:
+  it emits equally in every direction, as POV-Ray's area lights do.
+- `LightKind::Area` gained `cone: Option<SpotCone>`, so a disk can also
+  be a spotlight.
+- `SpotCone { direction, inner_angle, outer_angle }` holds the
+  smoothstep falloff (`SpotCone::falloff`) that `light_vector_spot`,
+  the disk and the quad all share. On an area light the cone is
+  measured from the light's centre.
+- `Light::shadowless: bool` (false for every constructor) skips the
+  shadow walk through a new `light_ray` helper, for fill lights.
+- `pixel_color`'s `has_area_light` flag covers `Quad` too.
+- SDL `(light {...})` is the general map-keyed constructor for all of
+  these (see `builtin_light`).
+
 Convenience constructors: `Light::white(location)` for full-intensity
 white (matches the legacy implicit defaults), `Light::point(location,
 color, intensity)` for the general case, `Light::spot(location,
@@ -2025,6 +2043,111 @@ Approximate order of recent commits, oldest first:
       with 63 unit and 69 suite tests passing. `teapot_scene_loads` ran
       for real this time, with the model staged from this machine.
 
+45. **Xmastree port, with stand-ins (step 8 of the gap analysis's
+    work order).** New `scenes/xmastree.lisp`, a port of
+    `xmastree/xmastree.pov` at its final settings (gDetail 4, 6
+    stages, gAngle 3), plus an `xmastree_scene_loads` smoke test.
+    - **Structure.** Functional rather than POV's textual expansion:
+      - A branch is a list of steps (`[:chain n twist]`,
+        `[:loop ydir]`, `[:ornament i]`, `[:cap]`). `walk` threads the
+        path position through them with `reduce`, replacing
+        `paths.inc`'s mutated global stack.
+      - Each step's beads are computed branch-local centres, jittered by
+        `random-gaussian` keyed on `[layer branch step bead side axis]`,
+        and placed with one composed branch-to-world affine via
+        `affine-apply`. Beads are plain spheres.
+      - Ornaments (all four ball styles, hooks with their six-prong
+        crowns, and the yellow frame star) are CSG. They're keyed on
+        `[layer branch slot]` for presence, style and rotation, and
+        carried as transformed shapes.
+      - Everything (16,730 beads and, with seed 700, 143 ornaments)
+        goes into one `bvh` under the bead surface; the ornaments keep
+        their own surfaces.
+      - The trunk (`T_Brass_3E`) and the grooved stand (a disk minus a
+        stepped rim, a torus groove and nine torus grooves, plus a torus
+        lip) are separate.
+      - Evaluating the file takes about 0.9 s in release.
+    - **`_pov.lisp`** gained `pov-yellow`, `pov-gold3`, `pov-silver3`,
+      `pov-brass3` and `pov-metal-e` (`F_MetalE`).
+    - **Stand-ins, as planned in the gap analysis §5:**
+      - A disk area light (radius 3.4, intensity 1.5) instead of POV's
+        6×6 area light that is also a spotlight.
+      - The shadowless fill light is dropped, and the beads and ground
+        use ambient 0.3 instead.
+      - Wood pigments are flat colours.
+      - A white background replaces the sky sphere and the hollow
+        radius-2000 sphere.
+      - Local `eps` of 0.0001 instead of POV's 0.000001 (see "Expose
+        the renderer's `EPSILON`" in Future directions).
+    - **Result.** It renders and matches the original's composition
+      (the only reference is a 77×60 thumbnail, retouched in GIMP).
+    - **Finding: area lights need more samples.** At the default 4
+      samples per pixel, the tree's soft shadow on the ground was
+      grainy. The sample heatmap shows almost every lit pixel sampling
+      past the minimum, not just the penumbra: the direction to a
+      per-sample point on the disk varies, so Lambert shading varies
+      slightly between samples, and the thin bead chains make the
+      shadows genuinely noisy. Four samples can agree by chance and
+      stop early. The scene sets `:min-samples 16 :max-samples 64`,
+      which is clean. At 640×480, single-threaded under the stand-in
+      `rayon`, it goes from 20 s to 48 s.
+    - **Tests.** 63 unit and 70 suite tests pass (stand-in libraries).
+
+46. **Step 9 lights and the `epsilon` binding.** Done so xmastree needs
+    no light stand-ins.
+    - **Renderer** (`render.rs`, `shapes.rs`):
+      - New `SpotCone` struct, whose `falloff` is the smoothstep that
+        `light_vector_spot` used, moved rather than duplicated.
+      - `LightKind::Area` gained an optional `cone`.
+      - New `LightKind::Quad { u, v, cone }`: a parallelogram emitter
+        with full edge vectors, as in POV's `area_light <u>, <v>`, and
+        no cosine factor, as in POV.
+      - New `Light::shadowless`. `light_ray(origin, point, scene,
+        shadowless)` either walks the shadow ray or returns the bare ray
+        at transmittance 1.
+      - `collect_lights` transforms quad edges by the linear part
+        without renormalizing (they carry size) and cone directions
+        with renormalizing.
+      - `has_area_light` includes `Quad`, so quads get a per-sample
+        light coordinate.
+    - **SDL.**
+      - `(light {:location … :color … :intensity … :shadowless …
+        :direction | :point-at … :inner-angle … :outer-angle …
+        :radius … :axis … | :area-u … :area-v …})` builds any
+        combination: point, spot, disk, quad, disk or quad with a cone,
+        and any of them shadowless.
+      - `:point-at` also covers light-types Phase 3's "aim at a
+        target" item. A disk's `:axis` defaults to the cone direction.
+      - Unknown keys and contradictions are rejected with specific
+        errors.
+      - The positional constructors are unchanged, and `light` builds
+        structurally equal lights where they overlap.
+      - `epsilon` is bound in the default environment to
+        `render::geometry::EPSILON`.
+    - **Xmastree.** It now uses the original's lights: a shadowless
+      `Gray60` fill light overhead, and a `White*1.5` spotlight aimed at
+      `<0,5,0>` (20°/45°) that is also a 6×6 quad in the xy plane. The
+      bead and ground surfaces are back to POV's default finish, and it
+      uses `epsilon` instead of its own copy.
+      - The spot cone's edge shows on the far ground.
+      - 640×480 takes 34 s, down from 48 s with the disk stand-in
+        (single-threaded, stand-in `rayon`), still at 16–64 samples.
+      - The only stand-ins left are flat wood and a white background
+        for the hollow sphere.
+    - **Byte-identical.** Spotlight, area-light, soft-shadow,
+      multi-light, transparency, Texaco and xmastree (old lights)
+      renders all matched the step 7 build exactly.
+    - **Tests.**
+      - New `light_tests` module in `render.rs`: cone falloff; shadowless
+        point and quad lights ignore an occluder; quad samples span the
+        parallelogram with no cosine factor; cones on quads and disks
+        cut light off outside them.
+      - `bindings_lights.lisp` gained `light` cases (equality with the
+        positional constructors, `:point-at`, shadowless, disk and quad
+        spots, a render) and `epsilon`.
+      - New `light_rejects_bad_keys` Rust test with 13 cases.
+      - 68 unit and 71 suite tests pass (stand-in libraries).
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -2672,11 +2795,8 @@ without modification.
 
 Polish items, sized like Phase 3:
 
-- Quad area lights. Add `LightKind::Area { shape: AreaShape,
-  axis, ... }` (or a separate variant) carrying the second
-  basis vector for a parallelogram emitter. Sample map is the
-  trivial unit-square map rather than `concentric_disk`. Most
-  of the renderer work is reusable from the disk case.
+- Quad area lights. Done (entry 46): `LightKind::Quad { u, v,
+  cone }`, emitting without a cosine factor, as POV's do.
 - Sphere area lights — bulb-shaped emitters. The sampling
   geometry is different enough to be a real chunk of work
   (uniform spherical-cap sampling); worth its own phase if it
@@ -3114,6 +3234,10 @@ problems, each with its own fix:
 
 The README's own "Potential Futures" list overlaps these but is now somewhat
 out of date.
+
+**Expose the renderer's `EPSILON` to the SDL.** Done (entry 46): the
+default environment binds `epsilon` to `render::geometry::EPSILON`,
+and `scenes/xmastree.lisp` uses it.
 
 **Performance: BVH.** Done: `bvh(children)` / `(bvh [...])` builds a
 median-split tree of `Bounded(Group(...))` nodes, traversed nearer-box

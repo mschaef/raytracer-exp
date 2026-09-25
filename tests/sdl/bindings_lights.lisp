@@ -99,3 +99,60 @@
 ; Negative checks.
 (assert (not (light? nil)))
 (assert (not (light? [1 2 3])))
+
+;; --------------------------------------------------------------------
+;; (light {...}): the general, map-keyed constructor.
+;; --------------------------------------------------------------------
+
+; Where it overlaps the positional constructors, it builds the same
+; light.
+(assert= (light {:location [1 2 3]}) (light-white [1 2 3]))
+(assert= (light {:location [1 2 3] :color [0.5 0.2 0.1] :intensity 2})
+         (light-point [1 2 3] [0.5 0.2 0.1] 2))
+(assert= (light {:location [0 0 5] :direction [0 0 -1] :inner-angle 0.2 :outer-angle 0.4})
+         (light-spot [0 0 5] [0 0 -1] [1 1 1] 1 0.2 0.4))
+(assert= (light {:location [0 0 5] :radius 0.5 :axis [0 0 -2]})
+         (light-area [0 0 5] [0 0 -1] 0.5 [1 1 1] 1))
+
+; :point-at aims a cone at a point; it's the same as the direction to it.
+(assert= (light {:location [0 0 5] :point-at [0 0 1] :inner-angle 0.2 :outer-angle 0.4})
+         (light {:location [0 0 5] :direction [0 0 -1] :inner-angle 0.2 :outer-angle 0.4}))
+
+; Shadowless is its own light.
+(assert (light? (light {:location [0 10 0] :shadowless true})))
+(assert (not= (light {:location [0 10 0] :shadowless true}) (light-white [0 10 0])))
+(assert= (light {:location [0 10 0] :shadowless false}) (light-white [0 10 0]))
+
+; An area light that is also a spotlight: a disk (whose axis defaults to
+; the cone's direction) or a parallelogram.
+(def spot-disk (light {:location [0 5 0] :point-at [0 0 0] :inner-angle 0.3 :outer-angle 0.6 :radius 1}))
+(assert (light? spot-disk))
+(assert= spot-disk (light {:location [0 5 0] :point-at [0 0 0] :inner-angle 0.3 :outer-angle 0.6
+                           :radius 1 :axis [0 -1 0]}))
+(assert (not= spot-disk (light-area [0 5 0] [0 -1 0] 1 [1 1 1] 1)))
+(def spot-quad (light {:location [30 35 30] :point-at [0 5 0] :inner-angle 0.35 :outer-angle 0.79
+                       :area-u [6 0 0] :area-v [0 6 0] :intensity 1.5}))
+(assert (light? spot-quad))
+(assert (not= spot-quad (light {:location [30 35 30] :area-u [6 0 0] :area-v [0 6 0] :intensity 1.5})))
+
+; New lights work anywhere a light does: transformed, in groups, in a
+; scene that renders.
+(assert (shape? (translate [1 0 0] spot-quad)))
+(def s (scene {:name "light-constructor"
+               :camera (camera-looking-at [0 -5 2] [0 0 0] [0 0 1] 1.0)
+               :background [0 0 0]
+               :objects [(light {:location [0 0 10] :color [0.3 0.3 0.3] :shadowless true})
+                         (light {:location [3 -3 5] :point-at [0 0 0] :inner-angle 0.3 :outer-angle 0.6
+                                 :area-u [1 0 0] :area-v [0 1 0]})
+                         (sphere {:center [0 0 0] :r 1 :surface (surface {:color [1 0 0]})})]
+               :min-samples 1
+               :max-samples 1}))
+(def t (png-target 8 8))
+(assert= (render s t 8 8) t)
+
+;; --------------------------------------------------------------------
+;; epsilon: the renderer's self-intersection tolerance.
+;; --------------------------------------------------------------------
+
+(assert (float? epsilon))
+(assert= epsilon 0.0001)

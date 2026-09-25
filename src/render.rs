@@ -153,7 +153,62 @@ pub enum LightKind {
     Area {
         axis: Point,
         radius: f64,
+        /// Optional spot cone, measured from the disk's centre: a disk
+        /// light that is also a spotlight (POV-Ray's `spotlight` with
+        /// `area_light`). `None` is the plain disk.
+        cone: Option<SpotCone>,
     },
+    /// Parallelogram area emitter centred at `location`, spanned by the
+    /// edge vectors `u` and `v` (full edge lengths, as POV-Ray's
+    /// `area_light <u>, <v>, ...`). Soft shadows come from the same
+    /// per-pixel-sample light coordinate as the disk.
+    ///
+    /// Unlike the disk, a quad emits equally in every direction, from
+    /// both faces, with no Lambertian cosine factor: that's how POV-Ray
+    /// treats area lights (a point light spread over a rectangle). Give
+    /// it a `cone` to aim it, as POV does with `spotlight`.
+    Quad {
+        u: Point,
+        v: Point,
+        cone: Option<SpotCone>,
+    },
+}
+
+/// A spotlight's cone: `direction` (unit, pointing the way the light
+/// shines) and half-angles in radians. Inside `inner_angle` the light
+/// is at full strength, beyond `outer_angle` it contributes nothing,
+/// and between them it falls off with a smoothstep. Used by area
+/// lights that are also spotlights; `LightKind::Spot` carries the same
+/// three fields inline and shares `SpotCone::falloff`.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct SpotCone {
+    pub direction: Point,
+    pub inner_angle: f64,
+    pub outer_angle: f64,
+}
+
+impl SpotCone {
+    /// The cone's strength, in `[0, 1]`, toward a point in the unit
+    /// direction `light_to_point_unit` from the light.
+    pub fn falloff(&self, light_to_point_unit: Point) -> f64 {
+        let cos_theta = dotp(light_to_point_unit, self.direction);
+        let cos_inner = self.inner_angle.cos();
+        let cos_outer = self.outer_angle.cos();
+        // Hermite-cubic smoothstep with explicit clamping at both edges.
+        // The first arm handles "outside the outer cone"; the second
+        // handles "inside the inner cone"; the third is the transition
+        // band. Splitting it this way also avoids a 0/0 when
+        // `inner_angle == outer_angle` (the denominator vanishes but
+        // every input has already matched one of the clamp arms).
+        if cos_theta <= cos_outer {
+            0.0
+        } else if cos_theta >= cos_inner {
+            1.0
+        } else {
+            let t = (cos_theta - cos_outer) / (cos_inner - cos_outer);
+            t * t * (3.0 - 2.0 * t)
+        }
+    }
 }
 
 /// A light source. Common fields (`location`, `color`, `intensity`) sit
@@ -170,6 +225,11 @@ pub struct Light {
     pub color: LinearColor,
     pub intensity: f64,
     pub kind: LightKind,
+    /// A shadowless light illuminates every point it faces, ignoring
+    /// anything in between (POV-Ray's `shadowless`): no shadow ray is
+    /// cast. Typically a fill light. `false` for every constructor
+    /// below.
+    pub shadowless: bool,
 }
 
 impl Light {
@@ -181,12 +241,13 @@ impl Light {
             color: [1.0, 1.0, 1.0],
             intensity: 1.0,
             kind: LightKind::Point,
+            shadowless: false,
         }
     }
 
     /// Point light with an explicit color and intensity.
     pub const fn point(location: Point, color: LinearColor, intensity: f64) -> Light {
-        Light { location, color, intensity, kind: LightKind::Point }
+        Light { location, color, intensity, kind: LightKind::Point, shadowless: false }
     }
 
     /// Spotlight at `location` aimed along `direction`, with cone
@@ -217,6 +278,7 @@ impl Light {
             color,
             intensity,
             kind: LightKind::Spot { direction, inner_angle, outer_angle },
+            shadowless: false,
         }
     }
 
@@ -243,7 +305,8 @@ impl Light {
             location,
             color,
             intensity,
-            kind: LightKind::Area { axis, radius },
+            kind: LightKind::Area { axis, radius, cone: None },
+            shadowless: false,
         }
     }
 }
@@ -773,8 +836,11 @@ fn light_vector(
         LightKind::Spot { direction, inner_angle, outer_angle } => {
             light_vector_spot(point, scene, light, direction, inner_angle, outer_angle)
         }
-        LightKind::Area { axis, radius } => {
-            light_vector_area(point, scene, light, axis, radius, light_coord)
+        LightKind::Area { axis, radius, cone } => {
+            light_vector_area(point, scene, light, axis, radius, cone, light_coord)
+        }
+        LightKind::Quad { u, v, cone } => {
+            light_vector_quad(point, scene, light, u, v, cone, light_coord)
         }
     }
 }
@@ -878,7 +944,30 @@ fn shadow_ray_walk(origin: Point, target: &Point, scene: &Scene) -> Option<(Vect
 /// lives in `shadow_ray_walk`; this function exists to give the
 /// `light_vector` dispatcher a uniform per-kind handler shape.
 fn light_vector_point(point: &Point, scene: &Scene, light: &Light) -> Option<(Vector, f64)> {
-    shadow_ray_walk(light.location, point, scene)
+    light_ray(light.location, point, scene, light.shadowless)
+}
+
+/// The ray from a point on a light (`origin`) to the shaded `point`,
+/// with the transmittance along it: the shadow walk, or for a
+/// shadowless light just the ray at full transmittance.
+fn light_ray(origin: Point, point: &Point, scene: &Scene, shadowless: bool) -> Option<(Vector, f64)> {
+    if shadowless {
+        Some((Vector { start: origin, delta: normalizep(subp(*point, origin)) }, 1.0))
+    } else {
+        shadow_ray_walk(origin, point, scene)
+    }
+}
+
+/// The unit direction from `origin` to `point`, or `None` when they
+/// coincide (the direction is undefined).
+fn unit_toward(origin: Point, point: &Point) -> Option<Point> {
+    let d = subp(*point, origin);
+    let len = lenp(d);
+    if len < EPSILON {
+        None
+    } else {
+        Some([d[0] / len, d[1] / len, d[2] / len])
+    }
 }
 
 /// Shadow-ray test for a spotlight: cone falloff on top of the
@@ -926,25 +1015,7 @@ fn light_vector_spot(
         light_to_point[1] / dist,
         light_to_point[2] / dist,
     ];
-    let cos_theta = dotp(light_to_point_unit, direction);
-
-    let cos_inner = inner_angle.cos();
-    let cos_outer = outer_angle.cos();
-
-    // Hermite-cubic smoothstep with explicit clamping at both edges.
-    // The first arm handles "outside the outer cone"; the second
-    // handles "inside the inner cone"; the third is the transition
-    // band. Splitting it this way also avoids a 0/0 when
-    // `inner_angle == outer_angle` (the denominator vanishes but
-    // every input has already matched one of the clamp arms).
-    let cone_falloff = if cos_theta <= cos_outer {
-        0.0
-    } else if cos_theta >= cos_inner {
-        1.0
-    } else {
-        let t = (cos_theta - cos_outer) / (cos_inner - cos_outer);
-        t * t * (3.0 - 2.0 * t)
-    };
+    let cone_falloff = SpotCone { direction, inner_angle, outer_angle }.falloff(light_to_point_unit);
 
     if cone_falloff <= EPSILON {
         return None;
@@ -1029,6 +1100,7 @@ fn light_vector_area(
     light: &Light,
     axis: Point,
     radius: f64,
+    cone: Option<SpotCone>,
     light_coord: (f64, f64),
 ) -> Option<(Vector, f64)> {
     let light_to_point = subp(*point, light.location);
@@ -1057,6 +1129,19 @@ fn light_vector_area(
     if cosine <= EPSILON {
         return None;
     }
+    // A disk that is also a spotlight: the cone is measured from the
+    // disk's centre, and points outside it get nothing (checked before
+    // any shadow work, like `light_vector_spot`).
+    let strength = match cone {
+        None => cosine,
+        Some(c) => {
+            let falloff = c.falloff(light_to_point_unit);
+            if falloff <= EPSILON {
+                return None;
+            }
+            cosine * falloff
+        }
+    };
 
     // Sample a point on the disk. `light_coord` is the per-pixel-
     // sample `[0, 1)²` value (Halton-(11, 13) + per-pixel CP
@@ -1080,8 +1165,42 @@ fn light_vector_area(
     // Walk from the sampled disk origin toward the shaded point,
     // through any transparent occluders, then fold the cosine
     // attenuation into the surviving transmittance.
-    let (ray, transmittance) = shadow_ray_walk(origin, point, scene)?;
-    Some((ray, transmittance * cosine))
+    let (ray, transmittance) = light_ray(origin, point, scene, light.shadowless)?;
+    Some((ray, transmittance * strength))
+}
+
+/// Shadow-ray helper for `LightKind::Quad`: a parallelogram emitter
+/// centred on `light.location` with edges `u` and `v`. The per-sample
+/// `light_coord` in `[0, 1)²` picks a uniformly distributed point on it,
+/// the shadow ray starts there, and the result is scaled by the spot
+/// cone if there is one. No cosine factor: the quad emits equally in
+/// all directions, as POV-Ray's area lights do.
+fn light_vector_quad(
+    point: &Point,
+    scene: &Scene,
+    light: &Light,
+    u: Point,
+    v: Point,
+    cone: Option<SpotCone>,
+    light_coord: (f64, f64),
+) -> Option<(Vector, f64)> {
+    let strength = match cone {
+        None => 1.0,
+        Some(c) => {
+            let falloff = match unit_toward(light.location, point) {
+                Some(dir) => c.falloff(dir),
+                None => 1.0,
+            };
+            if falloff <= EPSILON {
+                return None;
+            }
+            falloff
+        }
+    };
+    let (lu, lv) = light_coord;
+    let origin = addp(light.location, addp(scalep(u, lu - 0.5), scalep(v, lv - 0.5)));
+    let (ray, transmittance) = light_ray(origin, point, scene, light.shadowless)?;
+    Some((ray, transmittance * strength))
 }
 
 /// Recursion-budget tracker threaded through `ray_color` /
@@ -1625,7 +1744,9 @@ fn pixel_color(
     // the entire frame (and indeed for the whole render call), and
     // the matches!() probe is too cheap to bother lifting further.
     // Phase 5 of the "Light types: spotlights and area lights" plan.
-    let has_area_light = lights.iter().any(|l| matches!(l.kind, LightKind::Area { .. }));
+    let has_area_light = lights
+        .iter()
+        .any(|l| matches!(l.kind, LightKind::Area { .. } | LightKind::Quad { .. }));
     let (aox, aoy) = if has_area_light {
         sampler::cranley_patterson_area_offset(x, y)
     } else {
@@ -1983,3 +2104,148 @@ pub fn render<T: RenderTarget + ?Sized>(
     }
 }
 
+
+#[cfg(test)]
+mod light_tests {
+    use super::*;
+    use crate::render::shapes::{group, Plane, Sphere};
+
+    fn opaque() -> Surface {
+        Surface {
+            color: [1.0, 1.0, 1.0],
+            ambient: 0.1,
+            specular: 0.0,
+            light: 0.6,
+            checked: false,
+            reflection: 0.0,
+            transparency: 0.0,
+            metallic: false,
+        }
+    }
+
+    /// A scene whose only geometry is an opaque unit sphere at the
+    /// origin, which blocks light between +z and -z.
+    fn blocker_scene() -> Scene {
+        Scene {
+            name: "light tests".to_string(),
+            camera: Camera::looking_at([0.0, -5.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0),
+            root: group(vec![Shape::Sphere(Sphere { center: [0.0, 0.0, 0.0], r: 1.0, surface: Some(opaque()) })]),
+            background: [0.0, 0.0, 0.0],
+            reflect_limit: 0,
+            transmit_limit: 0,
+            indirect_limit: 0,
+            min_samples: 1,
+            max_samples: 1,
+            variance_threshold: 0.0,
+            view_mode: ViewMode::default(),
+        }
+    }
+
+    const BELOW: Point = [0.0, 0.0, -3.0];
+
+    fn cone(direction: Point, inner_deg: f64, outer_deg: f64) -> SpotCone {
+        SpotCone {
+            direction: normalizep(direction),
+            inner_angle: inner_deg.to_radians(),
+            outer_angle: outer_deg.to_radians(),
+        }
+    }
+
+    #[test]
+    fn spot_cone_falloff() {
+        let c = cone([0.0, 0.0, -1.0], 10.0, 30.0);
+        assert_eq!(c.falloff([0.0, 0.0, -1.0]), 1.0);
+        assert_eq!(c.falloff([1.0, 0.0, 0.0]), 0.0);
+        let at = |deg: f64| c.falloff([deg.to_radians().sin(), 0.0, -deg.to_radians().cos()]);
+        assert_eq!(at(5.0), 1.0);
+        assert_eq!(at(35.0), 0.0);
+        let mid = at(20.0);
+        assert!(mid > 0.0 && mid < 1.0);
+        assert!(at(15.0) > mid && mid > at(25.0));
+        // A hard edge: equal angles give 1 inside and 0 outside.
+        let hard = cone([0.0, 0.0, -1.0], 20.0, 20.0);
+        assert_eq!(hard.falloff([0.0, 0.0, -1.0]), 1.0);
+        assert_eq!(hard.falloff([30f64.to_radians().sin(), 0.0, -30f64.to_radians().cos()]), 0.0);
+    }
+
+    #[test]
+    fn shadowless_lights_ignore_occluders() {
+        let scene = blocker_scene();
+        let mut light = Light::white([0.0, 0.0, 3.0]);
+        assert!(light_vector(&BELOW, &scene, &light, (0.5, 0.5)).is_none(), "the sphere blocks it");
+        light.shadowless = true;
+        let (ray, t) = light_vector(&BELOW, &scene, &light, (0.5, 0.5)).unwrap();
+        assert_eq!(t, 1.0);
+        assert_eq!(ray.start, [0.0, 0.0, 3.0]);
+        assert_eq!(ray.delta, [0.0, 0.0, -1.0]);
+        // Shadowless area lights too.
+        let quad = Light {
+            location: [0.0, 0.0, 3.0],
+            color: [1.0; 3],
+            intensity: 1.0,
+            kind: LightKind::Quad { u: [0.5, 0.0, 0.0], v: [0.0, 0.5, 0.0], cone: None },
+            shadowless: true,
+        };
+        assert!(light_vector(&BELOW, &scene, &quad, (0.3, 0.7)).is_some());
+    }
+
+    #[test]
+    fn quad_samples_span_the_parallelogram() {
+        // No geometry, so every sample reaches the point; the shadow
+        // ray starts at the sampled point on the quad.
+        let mut scene = blocker_scene();
+        scene.root = group(vec![]);
+        let quad = Light {
+            location: [1.0, 2.0, 3.0],
+            color: [1.0; 3],
+            intensity: 1.0,
+            kind: LightKind::Quad { u: [4.0, 0.0, 0.0], v: [0.0, 2.0, 0.0], cone: None },
+            shadowless: false,
+        };
+        let origin = |lu, lv| light_vector(&BELOW, &scene, &quad, (lu, lv)).unwrap().0.start;
+        assert_eq!(origin(0.5, 0.5), [1.0, 2.0, 3.0]);
+        assert_eq!(origin(0.0, 0.0), [-1.0, 1.0, 3.0]);
+        assert_eq!(origin(1.0, 1.0), [3.0, 3.0, 3.0]);
+        // Full strength with no cosine factor, even at a steep angle
+        // and from behind: a quad emits equally in all directions.
+        let (_, t) = light_vector(&[20.0, 2.0, 3.5], &scene, &quad, (0.5, 0.5)).unwrap();
+        assert_eq!(t, 1.0);
+    }
+
+    #[test]
+    fn a_quad_with_a_cone_is_a_spotlight() {
+        let mut scene = blocker_scene();
+        scene.root = group(vec![]);
+        let quad = Light {
+            location: [0.0, 0.0, 3.0],
+            color: [1.0; 3],
+            intensity: 1.0,
+            kind: LightKind::Quad { u: [1.0, 0.0, 0.0], v: [0.0, 1.0, 0.0], cone: Some(cone([0.0, 0.0, -1.0], 10.0, 20.0)) },
+            shadowless: false,
+        };
+        assert_eq!(light_vector(&[0.0, 0.0, 0.0], &scene, &quad, (0.2, 0.9)).unwrap().1, 1.0);
+        assert!(light_vector(&[3.0, 0.0, 0.0], &scene, &quad, (0.5, 0.5)).is_none(), "outside the cone");
+    }
+
+    #[test]
+    fn a_disk_with_a_cone_is_a_spotlight() {
+        let mut scene = blocker_scene();
+        scene.root = group(vec![Shape::Plane(Plane { normal: [0.0, 0.0, 1.0], p0: [0.0, 0.0, -10.0], surface: Some(opaque()) })]);
+        let axis = [0.0, 0.0, -1.0];
+        let plain = Light::area([0.0, 0.0, 3.0], axis, 0.5, [1.0; 3], 1.0);
+        let coned = Light {
+            kind: LightKind::Area { axis, radius: 0.5, cone: Some(cone(axis, 10.0, 20.0)) },
+            ..plain.clone()
+        };
+        // Straight below, both are the same.
+        let p = [0.0, 0.0, 0.0];
+        let (a, ta) = light_vector(&p, &scene, &plain, (0.3, 0.6)).unwrap();
+        let (b, tb) = light_vector(&p, &scene, &coned, (0.3, 0.6)).unwrap();
+        assert_eq!((a.start, a.delta, ta), (b.start, b.delta, tb));
+        // Off to the side, the plain disk still lights it (with its
+        // cosine falloff), the coned one doesn't.
+        let side = [3.0, 0.0, 0.0];
+        assert!(light_vector(&side, &scene, &plain, (0.5, 0.5)).is_some());
+        assert!(light_vector(&side, &scene, &coned, (0.5, 0.5)).is_none());
+    }
+}

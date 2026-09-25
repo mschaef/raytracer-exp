@@ -26,6 +26,12 @@
 (def pov-red   [1.0 0.0 0.0])
 (def pov-green [0.0 1.0 0.0])
 (def pov-blue  [0.0 0.0 1.0])
+(def pov-yellow [1.0 1.0 0.0])
+
+;; metals.inc and golds.inc pigments.
+(def pov-gold3   [1.0 0.775 0.375])   ; P_Gold3
+(def pov-silver3 [0.94 0.93 0.90])    ; P_Silver3
+(def pov-brass3  [0.58 0.42 0.20])    ; P_Brass3
 
 ;; --------------------------------------------------------------------
 ;; Geometry
@@ -74,8 +80,9 @@
 (defn pov-plain-specular [color specular]
   (surface {:color color :ambient 0.1 :light 0.6 :specular specular}))
 
-; Starting points for metals.inc's F_MetalA ("very soft and dull") and
-; F_MetalC ("medium reflectivity, holds color well"), using their
+; Starting points for metals.inc's F_MetalA ("very soft and dull"),
+; F_MetalC ("medium reflectivity, holds color well") and F_MetalE
+; (below), using their
 ; ambient, diffuse (:light), specular and reflection numbers. These
 ; are *not* flagged :metallic: this renderer's metallic model drops the
 ; diffuse term, and POV's metal finishes keep theirs. Switch to the
@@ -85,3 +92,7 @@
 
 (defn pov-metal-c [color]
   (surface {:color color :ambient 0.25 :light 0.5 :specular 0.8 :reflection 0.5}))
+
+; F_MetalE, "very highly polished & reflective".
+(defn pov-metal-e [color]
+  (surface {:color color :ambient 0.1 :light 0.7 :specular 0.8 :reflection 0.8}))
