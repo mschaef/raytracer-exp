@@ -1287,6 +1287,20 @@ const MISSING_SURFACE: Surface = Surface {
     pigment: None,
 };
 
+/// The mirror reflection of the direction `d` (the way a ray travels)
+/// in a surface with unit normal `n`: `d - 2 (d . n) n`. The result
+/// leaves the surface on the side `d` came from.
+///
+/// Until history entry 60 the renderer computed this from the reversed
+/// ray, `-d + 2 (d . n) n`, which is the reflection flipped around: it
+/// sent reflected rays into or through the surface, so mirrors showed
+/// what was behind them or the object's own inside. See
+/// `reflect_leaves_on_the_incoming_side` and the `mirror_reflects_the_
+/// right_way` suite test.
+pub fn reflect(d: Point, n: Point) -> Point {
+    subp(d, scalep(n, 2.0 * dotp(d, n)))
+}
+
 fn shade_pixel(
     ray: &Vector,
     scene: &Scene,
@@ -1319,7 +1333,7 @@ fn shade_pixel(
     let ambient: LinearColor = scale_linear_color(&scolor, surface.ambient);
 
     let reflected: LinearColor = if (surface.reflection > EPSILON) && (depth.reflect < scene.reflect_limit) {
-        let rvec = subp(negp(ray.delta), scalep(hit.normal, 2.0 * dotp(negp(ray.delta), hit.normal)));
+        let rvec = reflect(ray.delta, hit.normal);
 
         // Reuse the same `light_coord` and `indirect_coord` for
         // recursive rays rather than re-deriving them per bounce.
@@ -2175,6 +2189,33 @@ pub fn render<T: RenderTarget + ?Sized>(
     }
 }
 
+
+#[cfg(test)]
+mod reflect_tests {
+    use super::*;
+
+    #[test]
+    fn reflect_leaves_on_the_incoming_side() {
+        // Straight down onto an upward-facing floor: straight back up.
+        assert_eq!(reflect([0.0, 0.0, -1.0], [0.0, 0.0, 1.0]), [0.0, 0.0, 1.0]);
+        // At 45 degrees: the part along the normal flips, the rest keeps
+        // going.
+        let s = 0.5f64.sqrt();
+        let r = reflect([s, 0.0, -s], [0.0, 0.0, 1.0]);
+        assert!((r[0] - s).abs() < 1e-15 && r[1] == 0.0 && (r[2] - s).abs() < 1e-15, "{:?}", r);
+        // For any direction arriving at the front of a surface, the
+        // reflection leaves from the front (d . n < 0, r . n > 0), keeps
+        // unit length, and makes the same angle with the normal.
+        let n = normalizep([0.3, -0.8, 0.5]);
+        for d in [[0.1, 0.9, -0.2], [-0.7, 0.2, -0.6], [0.0, 1.0, 0.0]] {
+            let d = normalizep(d);
+            let r = reflect(d, n);
+            assert!(dotp(d, n) < 0.0 && dotp(r, n) > 0.0, "d {:?} r {:?}", d, r);
+            assert!((lenp(r) - 1.0).abs() < 1e-12);
+            assert!((dotp(r, n) + dotp(d, n)).abs() < 1e-12);
+        }
+    }
+}
 
 #[cfg(test)]
 mod light_tests {

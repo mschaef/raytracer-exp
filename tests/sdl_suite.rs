@@ -546,6 +546,40 @@ fn back_lit_surfaces_get_no_light() {
     let _ = fs::remove_file(&path_b);
 }
 
+/// A mirror reflects toward the side the ray came from. The camera
+/// looks along +y at a mirror plane facing it and tilted down, so the
+/// true reflection heads down to a green floor, not up to a red
+/// ceiling. Before history entry 60 the reflected direction was
+/// flipped, and this rendered red.
+#[test]
+fn mirror_reflects_the_right_way() {
+    let env = sdl::default_env();
+    let path = std::env::temp_dir().join(format!("sdl_mirror_{}.png", std::process::id()));
+    let _ = fs::remove_file(&path);
+    env.borrow_mut().define("PATH", Value::String(Rc::new(path.to_string_lossy().to_string())));
+    let source = r#"
+(def s (scene {:name "mirror"
+               :camera (camera-looking-at [0 0 0] [0 1 0] [0 0 1] 1.0)
+               :background [0 0 0]
+               :min-samples 1 :max-samples 1
+               :view {:curve :clip}
+               :objects [(plane {:normal (normalize [0 -1 -1]) :p0 [0 5 0]
+                                 :surface (surface {:color [0 0 0] :ambient 0 :light 0 :reflection 1.0})})
+                         (plane {:normal [0 0 -1] :p0 [0 0 20]
+                                 :surface (surface {:color [1 0 0] :ambient 1 :light 0})})
+                         (plane {:normal [0 0 1] :p0 [0 0 -20]
+                                 :surface (surface {:color [0 1 0] :ambient 1 :light 0})})]}))
+(def t (png-target 5 5))
+(render s t 5 5)
+(save-png t PATH)
+"#;
+    sdl::eval_source(source, "mirror.lisp", &env);
+    let img = image::open(&path).unwrap_or_else(|e| panic!("decode: {}", e)).to_rgb8();
+    let centre = img.get_pixel(2, 2).0;
+    assert_eq!(centre, [0, 255, 0], "the mirror should show the green floor, got {:?}", centre);
+    let _ = fs::remove_file(&path);
+}
+
 /// A surface's `:pigment` map rejects malformed or contradictory keys.
 #[test]
 fn pigment_rejects_bad_keys() {

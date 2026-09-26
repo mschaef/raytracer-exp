@@ -2822,6 +2822,54 @@ Approximate order of recent commits, oldest first:
       - SDL: `{:white 6}` without `:curve`.
       - 113 unit and 82 suite tests pass.
 
+60. **Reflections were mirrored the wrong way; fixed.** This is an
+    intended image change for every reflective scene.
+    - **The bug:** `shade_pixel` computed the reflected direction from
+      the reversed ray, `-d + 2 (d . n) n`, which is the true
+      reflection `d - 2 (d . n) n` negated. Reflected rays went into or
+      through the surface instead of back out:
+      - Mirrors showed what was behind them.
+      - Solid reflective objects showed their own inside. A plain
+        reflective cylinder's sides rendered black, because the rays hit
+        its far wall from inside.
+      - **No reflective floor in any scene ever showed a reflection.**
+        The rays went down through the plane.
+      - cpot's pot got a flat grey reflection term, part of why it read
+        as white ceramic rather than chrome.
+    - **Found by** decomposing cpot (`RAYTRACER_VIEW=reflection` showed a
+      featureless pot), then:
+      - A mirror test: a mirror that should show a green floor showed the
+        red ceiling.
+      - A plain-versus-CSG reflective cylinder over a checkerboard.
+    - **The fix:** a new `render::reflect(d, n)` (`d - 2 (d . n) n`),
+      used by `shade_pixel`. It's documented with the old formula so the
+      history is clear. Metallic tinting and everything else about
+      reflection are unchanged.
+    - **Changed renders** (23 of 34): area_light_test, ball_on_plane,
+      cone_test, cpot, csg_test, cuboid_test, cylinder_test,
+      depth_of_field_test, gi_test, group_test, metallic_test,
+      moravian_star, multi_light_test, one_sphere, soft_shadow_test,
+      spotlight_test, teapot, texaco (and texaco_frames), torus_test,
+      transform_test, transparency_test and xmastree.
+      - Unchanged, having nothing reflective: axis_spheres, braids,
+        cornell_box, nba, ornament, pigment_test, pov_compass, redball,
+        sphere_occlusion_test, sphere_surface_test and train.
+      - Before/after sheet: `reflection_fix_before_after.png`. The
+        reflective floors now mirror the objects on them, and texaco's
+        bowl reflects the star and its leaves.
+    - **Tests:**
+      - `reflect_leaves_on_the_incoming_side` (unit): straight down,
+        45°, and for arbitrary directions the reflection leaves from the
+        front at the same angle and unit length.
+      - `mirror_reflects_the_right_way` (suite): the mirror test above,
+        which fails with the old formula (checked).
+      - 114 unit and 83 suite tests pass.
+    - **Follow-up for tuning:** `pov-chrome` (Chrome_Texture) is 85%
+      matte grey even when reflections work. A mirror-like balance
+      (reflection about 0.8, low diffuse and ambient, possibly
+      `:metallic`) is what reads as chrome; see the demo in
+      `cpot_chrome.png`.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -2869,6 +2917,12 @@ or `into`, which are linear (16,730 computed spheres build in about
 **`vec` is `vector`, not Clojure's `vec`.** `(vec xs)` wraps `xs` in a
 one-element vector rather than converting it. `map`, `mapcat` and `for`
 already return vectors, so no conversion is needed.
+
+**Ray directions are travel directions.** `ray.delta` points the way
+the ray travels, away from the camera or the previous surface. A
+reflection is `d - 2 (d . n) n` (`render::reflect`); building it from
+`-d` flips it (entry 60, which went unnoticed for a long time because
+flipped reflections still look plausible on curved objects).
 
 **Lights behind a surface contribute nothing; mind the half vector's
 sign.** `shade_pixel` skips a light when `dot(normal, toward light) <= 0`.
