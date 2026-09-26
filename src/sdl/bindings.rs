@@ -1579,8 +1579,9 @@ fn builtin_aabb(args: &[Value], pos: &Position) -> Value {
 ///          :view {:curve :clip :exposure 0}})`
 ///
 /// `:view` sets how the rendered values become display values (see
-/// `render::view` and `build_view_transform`); omitted, it's `:clip` at
-/// exposure 0, the original behaviour.
+/// `render::view` and `build_view_transform`); omitted, it's
+/// `:reinhard` with white point 4 at exposure 0. `{:curve :clip}` is the
+/// original behaviour.
 ///
 /// After the stage-2 collapse the scene is a single top-level
 /// `Shape`. `:objects` is exposed at the SDL surface as a list for
@@ -1724,7 +1725,8 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
 }
 
 /// A scene's `:view` map: `:curve` (a keyword naming a `ToneCurve`:
-/// `:clip`, the default, `:hue-clip`, `:reinhard` or `:agx`),
+/// `:reinhard`, the default, `:clip`, `:hue-clip`, `:agx` or
+/// `:agx-punchy`),
 /// `:exposure` (stops, default 0) and, for `:reinhard` only, `:white`
 /// (the luminance that maps to 1, default 4). Unknown keys and curves
 /// are rejected.
@@ -1736,7 +1738,7 @@ fn build_view_transform(v: &Value, pos: &Position) -> ViewTransform {
         }
     }
     let mut curve = match map.get("curve") {
-        None => ToneCurve::Clip,
+        None => ViewTransform::default().curve,
         Some(Value::Keyword(k)) => ToneCurve::from_name(k).unwrap_or_else(|| {
             sdl_panic!(
                 pos,

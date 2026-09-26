@@ -54,8 +54,8 @@ src/
                          lenp, normalizep, negp.
     render/color.rs      LinearColor and its arithmetic.
     render/view.rs       The view transform: exposure, tone curve
-                         (clip, hue-clip, reinhard, agx) and 8-bit sRGB
-                         encoding; its stream wire form.
+                         (clip, hue-clip, reinhard, agx, agx-punchy)
+                         and 8-bit sRGB encoding; its stream wire form.
     render/transform.rs  Affine 3D transforms as (3×3 linear, 3-vec translation).
                          Mat3 type alias, mat3_apply/multiply/transpose/inverse,
                          and Affine constructors: identity, translation, scale,
@@ -2751,6 +2751,77 @@ Approximate order of recent commits, oldest first:
       - New SDL cases and five more `view_rejects_bad_keys` cases.
       - 111 unit and 82 suite tests pass (stand-in libraries).
 
+58. **AgX Punchy (`ToneCurve::AgXPunchy`, `:agx-punchy`).** Renders
+    are byte-identical at the default.
+    - **The look:** Blender's "Punchy" is an ASC CDL applied to AgX's
+      sigmoid output, before the outset matrix: power 1.35 and
+      saturation 1.4, with slope 1 and offset 0. Saturation is taken
+      around the Rec. 709 luma of the result after the power, the
+      standard CDL order.
+      - The values and placement are from dmnsgn's glsl-tone-map
+        (`agxCdl` and `agxPunchy`), read through a web fetch.
+      - Values are clamped at 0 before the power, since the sigmoid dips
+        a hair below 0 and a fractional power of a negative number is
+        undefined.
+      - Written as `AgxLook` in `view.rs`, so other looks (e.g.
+        "Golden": slope `[1 0.9 0.5]`, power 0.8, saturation 1.3) are a
+        constant away. Only Punchy is exposed.
+    - **Everywhere:** name `agx-punchy`, wire id 4, and listed in the
+      usage text and the SDL docs.
+    - **Contact sheet** (`tone_curves_punchy.png`: clip, reinhard, agx
+      +1, agx-punchy and agx-punchy +1, on the same seven scenes):
+      - Punchy at +1 stop comes closest to today's saturation (texaco's
+        red, redball's green, the ornament's train), with rolled-off
+        highlights instead of flat clipped ones.
+      - nba's right block goes a deeper orange than under base AgX.
+      - At 0 stops, Punchy is darker than base AgX: its power lowers the
+        mid-tones.
+    - **Tests:** Punchy is more saturated than base AgX for four
+      saturated colours at 0.25×, 1× and 4×. It's darker at 0.02, 0.18
+      and 1.0 grey, still reaches almost white at the top, and moves
+      warm colours by under 5°. It's also in the all-curves range,
+      grey and monotonic tests and the wire round trip. 112 unit and 82
+      suite tests pass.
+
+59. **The default view transform is now Reinhard, white point 4**
+    (view transform phase 6). This is an intended image change: the
+    default look of every scene changes.
+    - **Chosen by Mike** from the contact sheets of entries 57 and 58.
+      It never clips luminance and keeps hue and saturation. Its
+      trade-off is that whites grey at exposure 0 (1.0 grey comes out
+      at 0.53 display-linear), which scenes answer with `:exposure` or
+      `:white`.
+    - **`Default for ViewTransform`** is `Reinhard { white: 4 }` at
+      exposure 0. A `:view` without `:curve` also gets Reinhard, so
+      `{:white 6}` alone now works.
+    - **`ViewTransform::LEGACY`** (clip at exposure 0) names the
+      original behaviour. `is_default` became `is_legacy`.
+      - The stream sends flags 0 only for `LEGACY`, so flags 0 keeps
+        its meaning, and `rtview_receiver` maps flags 0 to `LEGACY`.
+      - The default now sends a 16-byte block (curve id 2, white 4).
+    - **Checks:**
+      - With `RAYTRACER_CURVE=clip`, every scene renders byte-identically
+        to the previous default (33 of 33 with a `render.png`).
+      - `texaco_frames` renders inside its script, so the environment
+        variables don't reach it. Its frames follow the new default like
+        everything else.
+      - Every default render changed.
+      - The stream at the default matches `render.png` exactly on nba.
+      - No byte-pinned test depended on the encoder, so none needed
+        regenerating.
+    - **For the tuning pass:** the POV ports were lit for clipping, so
+      under the new default they read darker and greyer, with whites at
+      about 0.53. Each port's tuning should include `:view` (usually
+      `:exposure`, sometimes `:white`) alongside its lights. A port that
+      wants POV's clipped look can say `{:curve :clip}`.
+    - **Tests:**
+      - `default_is_reinhard_white_4`; `legacy_clip_matches_the_old_encoder`
+        (renamed).
+      - The stream test covers flags 0 for `LEGACY` and a block for the
+        default when no `begin` came.
+      - SDL: `{:white 6}` without `:curve`.
+      - 113 unit and 82 suite tests pass.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -4028,7 +4099,7 @@ Done; see history entry 56.
 
 Done; see history entry 57. Both curves darken at exposure 0 (1.0 goes
 to about 0.59 under AgX), and AgX's base look desaturates, both of which
-bear on phase 6.
+bear on phase 6. AgX Punchy was added afterwards (entry 58).
 
 - **`Reinhard`:** luminance `L` from the Rec. 709 weights, then
   `L' = L (1 + L / white²) / (1 + L)`, and the colour is scaled by
@@ -4056,6 +4127,8 @@ bear on phase 6.
 
 ### Phase 6: choosing the default (a decision point, with renders)
 
+Done; see history entry 59. The default is Reinhard with white point 4.
+
 - Render the POV ports, `cornell_box`, `gi_test` and a few test scenes
   under `:clip`, `:hue-clip`, `:reinhard` and `:agx`, with the clip
   report, as contact sheets. Pick the default by eye.
@@ -4065,8 +4138,7 @@ bear on phase 6.
 
 ### Decisions still open
 
-- **The default curve.** `:clip` until phase 6. After that, likely
-  `:agx`, subject to the renders.
+- **The default curve.** Decided: Reinhard, white 4 (entry 59).
 - **Per scene or per render:** should the transform be only a scene
   setting, or also something `(render ...)` or the target can override
   (e.g. rendering one scene with two looks)? The phase 2 environment

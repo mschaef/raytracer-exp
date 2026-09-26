@@ -70,6 +70,11 @@ plans.
   xmastree's stand use the full two-layer woods.
 - **Colour handling: done** (CLAUDE.md entry 54). The ported scenes'
   colours are decoded from sRGB, so flat colours now match POV's.
+- **View transform: default chosen** (CLAUDE.md entries 56–59). Clip,
+  hue-clip, Reinhard, AgX and AgX Punchy are all available per scene
+  through `:view`. The default is Reinhard with white point 4, so the
+  ports now render darker and greyer until they're tuned: each port's
+  tuning includes its `:view` exposure.
 - **Next: the rest of the tuning pass, before snowman:** lighting
   balance and surfaces, judged by eye. Snowman waits until the current
   images look right.

@@ -21,8 +21,9 @@
 //! 2. **Encoding** (`ViewTransform::encode`): display-linear to 8-bit
 //!    sRGB, the same for every image.
 //!
-//! The default, `Clip` at exposure 0, is the renderer's original
-//! behaviour, byte for byte.
+//! The default is Reinhard with white point 4 at exposure 0 (see
+//! `Default for ViewTransform`). `ViewTransform::LEGACY`, `Clip` at
+//! exposure 0, is the renderer's original behaviour, byte for byte.
 //!
 //! The transform also has a wire form (`write_wire` / `read_wire`), so
 //! `StreamTarget` can send it with the (still scene-linear) pixels and
@@ -54,8 +55,13 @@ pub enum ToneCurve {
     /// AgX inset matrix, a log2 encoding over [-12.47, 4.03] stops, a
     /// polynomial fit of the AgX sigmoid, the outset matrix, a 2.2
     /// power back to linear, and Rec. 2020 back to sRGB. Bright colours
-    /// fade gradually toward white without skewing hue. Base look only.
+    /// fade gradually toward white without skewing hue. Base look:
+    /// noticeably desaturated.
     AgX,
+    /// AgX with Blender's "Punchy" look: an ASC CDL (power 1.35,
+    /// saturation 1.4) applied to the sigmoid's output, before the
+    /// outset matrix. More contrast and saturation than the base look.
+    AgXPunchy,
 }
 
 /// Reinhard's default white point: luminance 4 (two stops over 1) maps
@@ -123,13 +129,47 @@ fn agx_contrast(x: f64) -> f64 {
         - 0.00232
 }
 
-fn agx(c: LinearColor) -> LinearColor {
+/// An AgX look: an ASC CDL (slope, offset, power, then saturation
+/// around Rec. 709 luma of the result, the standard CDL order), applied
+/// to the sigmoid's output. The Punchy values are Blender's, as ported
+/// in dmnsgn's glsl-tone-map (`agxPunchy`). Slope and offset are 1 and
+/// 0 there, so only power and saturation are kept here.
+struct AgxLook {
+    power: f64,
+    saturation: f64,
+}
+
+const AGX_PUNCHY: AgxLook = AgxLook { power: 1.35, saturation: 1.4 };
+
+impl AgxLook {
+    fn apply(&self, v: [f64; 3]) -> [f64; 3] {
+        // The sigmoid dips a hair below 0 at the bottom of its range;
+        // clamp so the fractional power is defined (GLSL's `pow` of a
+        // negative is undefined too).
+        let p = [
+            v[0].max(0.0).powf(self.power),
+            v[1].max(0.0).powf(self.power),
+            v[2].max(0.0).powf(self.power),
+        ];
+        let luma = luminance(p);
+        [
+            luma + self.saturation * (p[0] - luma),
+            luma + self.saturation * (p[1] - luma),
+            luma + self.saturation * (p[2] - luma),
+        ]
+    }
+}
+
+fn agx(c: LinearColor, look: Option<&AgxLook>) -> LinearColor {
     let c = mat_mul(&AGX_INSET, mat_mul(&SRGB_TO_REC2020, c));
     let mut v = [0.0; 3];
     for i in 0..3 {
         // `max` also turns NaN into the floor.
         let e = (c[i].max(1e-10).log2() - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
         v[i] = agx_contrast(e.clamp(0.0, 1.0));
+    }
+    if let Some(look) = look {
+        v = look.apply(v);
     }
     let v = mat_mul(&AGX_OUTSET, v);
     let v = [v[0].max(0.0).powf(2.2), v[1].max(0.0).powf(2.2), v[2].max(0.0).powf(2.2)];
@@ -165,7 +205,7 @@ fn reinhard(c: LinearColor, white: f64) -> LinearColor {
 
 impl ToneCurve {
     /// Every curve, for listing in messages.
-    pub const NAMES: [&'static str; 4] = ["clip", "hue-clip", "reinhard", "agx"];
+    pub const NAMES: [&'static str; 5] = ["clip", "hue-clip", "reinhard", "agx", "agx-punchy"];
 
     /// The curve's name in the SDL (`:clip`) and in `RAYTRACER_CURVE`.
     pub fn name(&self) -> &'static str {
@@ -174,6 +214,7 @@ impl ToneCurve {
             ToneCurve::HueClip => "hue-clip",
             ToneCurve::Reinhard { .. } => "reinhard",
             ToneCurve::AgX => "agx",
+            ToneCurve::AgXPunchy => "agx-punchy",
         }
     }
 
@@ -186,6 +227,7 @@ impl ToneCurve {
             "hue-clip" => Some(ToneCurve::HueClip),
             "reinhard" => Some(ToneCurve::Reinhard { white: DEFAULT_REINHARD_WHITE }),
             "agx" => Some(ToneCurve::AgX),
+            "agx-punchy" => Some(ToneCurve::AgXPunchy),
             _ => None,
         }
     }
@@ -197,6 +239,7 @@ impl ToneCurve {
             ToneCurve::HueClip => 1,
             ToneCurve::Reinhard { .. } => 2,
             ToneCurve::AgX => 3,
+            ToneCurve::AgXPunchy => 4,
         }
     }
 
@@ -219,6 +262,7 @@ impl ToneCurve {
                 _ => return Err(invalid(format!("bad reinhard parameters {:?}", params))),
             },
             3 => ToneCurve::AgX,
+            4 => ToneCurve::AgXPunchy,
             other => return Err(invalid(format!("unknown tone curve id {}", other))),
         };
         if params.len() != curve.wire_params().len() {
@@ -238,7 +282,8 @@ impl ToneCurve {
             ToneCurve::Clip => [clamp01(c[0]), clamp01(c[1]), clamp01(c[2])],
             ToneCurve::HueClip => hue_clip(c),
             ToneCurve::Reinhard { white } => reinhard(c, *white),
-            ToneCurve::AgX => agx(c),
+            ToneCurve::AgX => agx(c, None),
+            ToneCurve::AgXPunchy => agx(c, Some(&AGX_PUNCHY)),
         }
     }
 }
@@ -252,9 +297,18 @@ pub struct ViewTransform {
     pub curve: ToneCurve,
 }
 
+/// The default: Reinhard with white point 4, at exposure 0. Chosen
+/// over clipping (the original behaviour, `ViewTransform::LEGACY`)
+/// after comparing the curves on the POV ports and test scenes (CLAUDE.md
+/// history entry 59): it never clips luminance and keeps hue and
+/// saturation, at the cost of greying whites unless a scene raises its
+/// exposure.
 impl Default for ViewTransform {
     fn default() -> Self {
-        ViewTransform { exposure: 0.0, curve: ToneCurve::Clip }
+        ViewTransform {
+            exposure: 0.0,
+            curve: ToneCurve::Reinhard { white: DEFAULT_REINHARD_WHITE },
+        }
     }
 }
 
@@ -263,9 +317,14 @@ impl Default for ViewTransform {
 pub const WIRE_FLAG_VIEW: u32 = 1;
 
 impl ViewTransform {
-    /// Whether this is the default (the original behaviour).
-    pub fn is_default(&self) -> bool {
-        *self == ViewTransform::default()
+    /// Per-channel clipping at exposure 0: the renderer's behaviour
+    /// before view transforms existed, and what a stream header with
+    /// flags 0 (no view-transform block) means.
+    pub const LEGACY: ViewTransform = ViewTransform { exposure: 0.0, curve: ToneCurve::Clip };
+
+    /// Whether this is `LEGACY`.
+    pub fn is_legacy(&self) -> bool {
+        *self == ViewTransform::LEGACY
     }
 
     /// The colour after exposure, before the curve: what the clip report
@@ -295,7 +354,7 @@ impl ViewTransform {
     }
 
     /// The view-transform block for the stream: curve id (`u32`; 0
-    /// clip, 1 hue-clip, 2 reinhard, 3 agx),
+    /// clip, 1 hue-clip, 2 reinhard, 3 agx, 4 agx-punchy),
     /// exposure (`f32`), parameter count (`u32`), then the parameters
     /// (`f32` each), all little-endian.
     pub fn write_wire(&self, out: &mut Vec<u8>) {
@@ -409,9 +468,9 @@ mod tests {
     }
 
     #[test]
-    fn default_clip_matches_the_old_encoder() {
-        let view = ViewTransform::default();
-        assert!(view.is_default());
+    fn legacy_clip_matches_the_old_encoder() {
+        let view = ViewTransform::LEGACY;
+        assert!(view.is_legacy());
         for x in sweep() {
             for c in [[x, 0.5, 0.25], [0.1, x, 2.0], [x, x, x]] {
                 assert_eq!(view.encode(c), legacy_encode(c), "at {:?}", c);
@@ -430,7 +489,7 @@ mod tests {
         // range, so nothing clips.
         assert_eq!(v(-2.0).apply(c), [0.0625, 0.125, 0.75]);
         assert_eq!(v(0.0).apply(c), [0.25, 0.5, 1.0]);
-        assert!(!v(-2.0).is_default());
+        assert!(!v(-2.0).is_legacy());
     }
 
     #[test]
@@ -481,12 +540,13 @@ mod tests {
     fn wire_round_trip() {
         for view in [
             ViewTransform::default(),
+            ViewTransform::LEGACY,
             ViewTransform { exposure: -1.5, curve: ToneCurve::HueClip },
             ViewTransform { exposure: 2.0, curve: ToneCurve::Clip },
         ] {
             let mut buf = Vec::new();
             view.write_wire(&mut buf);
-            assert_eq!(buf.len(), 12);
+            assert_eq!(buf.len(), 12 + 4 * view.curve.wire_params().len());
             let back = ViewTransform::read_wire(&mut &buf[..]).unwrap();
             assert_eq!(back, view);
         }
@@ -510,11 +570,12 @@ mod tests {
         assert!(ViewTransform::read_wire(&mut &block(0, 0)[..8]).is_err());
     }
 
-    const ALL_CURVES: [ToneCurve; 4] = [
+    const ALL_CURVES: [ToneCurve; 5] = [
         ToneCurve::Clip,
         ToneCurve::HueClip,
         ToneCurve::Reinhard { white: DEFAULT_REINHARD_WHITE },
         ToneCurve::AgX,
+        ToneCurve::AgXPunchy,
     ];
 
     /// Grey levels from far below to far above 1.
@@ -649,6 +710,7 @@ mod tests {
         for view in [
             ViewTransform { exposure: 0.5, curve: ToneCurve::Reinhard { white: 6.0 } },
             ViewTransform { exposure: -1.0, curve: ToneCurve::AgX },
+            ViewTransform { exposure: 1.0, curve: ToneCurve::AgXPunchy },
         ] {
             let mut buf = Vec::new();
             view.write_wire(&mut buf);
@@ -666,5 +728,50 @@ mod tests {
         bad.extend_from_slice(&1u32.to_le_bytes());
         bad.extend_from_slice(&(-1f32).to_le_bytes());
         assert!(ViewTransform::read_wire(&mut &bad[..]).is_err());
+    }
+
+    /// Chroma of a display-linear colour: max minus min of its sRGB
+    /// encoding.
+    fn chroma(c: LinearColor) -> f64 {
+        let e = [linear_to_srgb(c[0]), linear_to_srgb(c[1]), linear_to_srgb(c[2])];
+        e[0].max(e[1]).max(e[2]) - e[0].min(e[1]).min(e[2])
+    }
+
+    #[test]
+    fn agx_punchy_is_more_saturated_and_contrasty() {
+        // Saturated colours come out more saturated than under the base
+        // look, at every brightness tried.
+        for c in [[1.0, 0.05, 0.05], [0.1, 1.0, 0.1], [0.1, 0.2, 1.0], [1.0, 0.5, 0.1]] {
+            for k in [0.25, 1.0, 4.0] {
+                let bright = [c[0] * k, c[1] * k, c[2] * k];
+                let base = chroma(ToneCurve::AgX.apply(bright));
+                let punchy = chroma(ToneCurve::AgXPunchy.apply(bright));
+                assert!(punchy > base, "{:?} x{}: punchy {} vs base {}", c, k, punchy, base);
+            }
+        }
+        // More contrast: the power darkens the shadows and mid-tones,
+        // and both looks still head to (almost) white at the top.
+        let g = |curve: ToneCurve, x: f64| curve.apply([x, x, x])[0];
+        for x in [0.02, 0.18, 1.0] {
+            assert!(g(ToneCurve::AgXPunchy, x) < g(ToneCurve::AgX, x), "at {}", x);
+        }
+        assert!(g(ToneCurve::AgXPunchy, 1.0e6) > 0.99);
+        // Warm colours still keep their hue.
+        let wood = [0.9, 0.65, 0.3];
+        let h0 = hue_deg(wood);
+        for k in [1.0, 4.0, 16.0] {
+            let shift = hue_shift(h0, hue_deg(ToneCurve::AgXPunchy.apply([wood[0] * k, wood[1] * k, wood[2] * k])));
+            assert!(shift < 5.0, "x{}: {} degrees", k, shift);
+        }
+    }
+
+    #[test]
+    fn default_is_reinhard_white_4() {
+        let d = ViewTransform::default();
+        assert_eq!(d, ViewTransform { exposure: 0.0, curve: ToneCurve::Reinhard { white: 4.0 } });
+        assert!(!d.is_legacy());
+        // Luminance 4 maps to white; 1.0 grey comes out about half.
+        assert_eq!(d.apply([4.0, 4.0, 4.0]), [1.0, 1.0, 1.0]);
+        assert!((d.apply([1.0, 1.0, 1.0])[0] - 0.53125).abs() < 1e-12);
     }
 }

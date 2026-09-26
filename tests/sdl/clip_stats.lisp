@@ -73,3 +73,7 @@
 (def t5 (png-target 2 2))
 (render (viewed-scene [2.5 0.5 0] {:curve :agx}) t5 2 2)
 (assert= (get (clip-stats t5) :clipped) 4)
+(assert (scene? (viewed-scene [0 0 0] {:curve :agx-punchy :exposure 1})))
+
+; The default curve is Reinhard, so :white works without naming it.
+(assert (scene? (viewed-scene [0 0 0] {:white 6})))

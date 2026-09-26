@@ -298,7 +298,7 @@ impl RenderTarget for PngTarget {
 /// View-transform block (only when flags bit 0 is set; see
 /// `ViewTransform::write_wire`):
 ///   curve    u32     0 clip, 1 hue-clip, 2 reinhard (1 param:
-///                    white), 3 agx
+///                    white), 3 agx, 4 agx-punchy
 ///   exposure f32     stops
 ///   nparams  u32
 ///   params   [f32; nparams]
@@ -319,12 +319,13 @@ impl RenderTarget for PngTarget {
 /// scene-linear and unclamped even when the scene has a view transform:
 /// the transform travels in the header and the receiver applies it, so
 /// it keeps the full values (for adjusting exposure live, saving HDR, or
-/// reporting clipping). The default transform sends flags 0 and no
-/// block, the same bytes as before view transforms existed.
+/// reporting clipping). `ViewTransform::LEGACY` (clip at exposure 0)
+/// sends flags 0 and no block, the same bytes as before view transforms
+/// existed; anything else, the default included, sends the block.
 ///
 /// A stream carries one view transform: the header goes out at the
-/// first `begin` (or before the first row, with the default, if no
-/// `begin` came). A later `begin` with a different transform is ignored
+/// first `begin` (or before the first row, with the default transform,
+/// if no `begin` came). A later `begin` with a different transform is ignored
 /// with a warning.
 ///
 /// `submit_row` packs y/x/count + payload into a single `Vec<u8>` and
@@ -361,7 +362,7 @@ impl StreamState {
         hdr.extend_from_slice(b"RTVW");
         hdr.extend_from_slice(&self.width.to_le_bytes());
         hdr.extend_from_slice(&self.height.to_le_bytes());
-        if view.is_default() {
+        if view.is_legacy() {
             hdr.extend_from_slice(&0u32.to_le_bytes());
         } else {
             hdr.extend_from_slice(&WIRE_FLAG_VIEW.to_le_bytes());
@@ -908,8 +909,9 @@ mod clip_tests {
     fn png_target_applies_the_view_transform() {
         use super::super::view::ToneCurve;
         let t = PngTarget::new(2, 1);
-        // Before any `begin`, the default: clipping each channel turns
-        // this over-bright orange yellow.
+        // The legacy transform: clipping each channel turns this
+        // over-bright orange yellow.
+        t.begin(&ViewTransform::LEGACY);
         t.submit_row(0, 0, &[[1.8, 0.9, 0.3], [0.5, 0.5, 0.5]]);
         let clipped = *t.buffer.lock().unwrap().get_pixel(0, 0);
         // Hue-preserving clip keeps it orange; exposure -1 halves the
@@ -962,8 +964,8 @@ mod clip_tests {
         let u32_at = |b: &[u8], i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
         let f32_at = |b: &[u8], i: usize| f32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
 
-        // The default transform: the original 16-byte header, flags 0.
-        for view in [Some(ViewTransform::default()), None] {
+        // The legacy transform: the original 16-byte header, flags 0.
+        for view in [Some(ViewTransform::LEGACY)] {
             let b = capture(view, None);
             assert_eq!(&b[0..4], b"RTVW");
             assert_eq!((u32_at(&b, 4), u32_at(&b, 8), u32_at(&b, 12)), (3, 2, 0));
@@ -972,6 +974,13 @@ mod clip_tests {
             assert_eq!((u32_at(&b, 16), u32_at(&b, 20), u32_at(&b, 24)), (1, 0, 1));
             assert_eq!(f32_at(&b, 28), 2.5);
         }
+
+        // With no `begin`, the stream announces the default (Reinhard),
+        // which takes a block with one parameter.
+        let b = capture(None, None);
+        assert_eq!(u32_at(&b, 12), WIRE_FLAG_VIEW);
+        assert_eq!(ViewTransform::read_wire(&mut &b[16..32]).unwrap(), ViewTransform::default());
+        assert_eq!(f32_at(&b, 44), 2.5);
 
         // Anything else: flags bit 0 and the block, and the pixels still
         // go out scene-linear.

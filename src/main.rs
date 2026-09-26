@@ -278,7 +278,8 @@ fn usage_and_exit() -> ! {
     eprintln!("                       reflection, transmission. Output goes");
     eprintln!("                       to render-MODE.png for non-full modes.");
     eprintln!("  RAYTRACER_CURVE=NAME Tone curve, overriding the scene's :view");
-    eprintln!("                       (clip, hue-clip, reinhard, agx).");
+    eprintln!("                       (clip, hue-clip, reinhard, agx,");
+    eprintln!("                       agx-punchy; default reinhard).");
     eprintln!("  RAYTRACER_WHITE=N    Reinhard's white point: the luminance that");
     eprintln!("                       maps to 1 (default 4).");
     eprintln!("  RAYTRACER_EXPOSURE=N Exposure in stops, overriding the scene's");

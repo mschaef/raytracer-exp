@@ -623,8 +623,9 @@ pub struct Scene {
     pub view_mode: ViewMode,
 
     /// How the rendered values become display values: exposure, then a
-    /// tone curve (see `render::view`). The default, `Clip` at exposure
-    /// 0, is the original behaviour. Set from the SDL's `:view` key;
+    /// tone curve (see `render::view`). The default is Reinhard with
+    /// white point 4; `ViewTransform::LEGACY` (clip at exposure 0) is the
+    /// original behaviour. Set from the SDL's `:view` key;
     /// main.rs overrides it from `RAYTRACER_CURVE` and
     /// `RAYTRACER_EXPOSURE`.
     pub view: view::ViewTransform,

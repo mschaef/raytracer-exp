@@ -83,7 +83,8 @@ fn main() -> std::io::Result<()> {
     let view = if flags & WIRE_FLAG_VIEW != 0 {
         ViewTransform::read_wire(&mut conn)?
     } else {
-        ViewTransform::default()
+        // Flags 0: no block, meaning the legacy per-channel clip.
+        ViewTransform::LEGACY
     };
     eprintln!(
         "rtview_receiver: view transform: {}, exposure {}",
