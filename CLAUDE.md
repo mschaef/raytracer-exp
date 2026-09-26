@@ -2870,6 +2870,27 @@ Approximate order of recent commits, oldest first:
       `:metallic`) is what reads as chrome; see the demo in
       `cpot_chrome.png`.
 
+61. **`scene :size`.** Renders are byte-identical at any given size.
+    - **What it does:** `(scene {... :size [w h]})` records the image size
+      a scene was composed for, as `Scene::size: Option<(u32, u32)>`.
+      - `main.rs` resolves the size as the `SIZE` environment variable,
+        then the scene's `:size`, then 1024×1024. That logic is
+        `resolve_size`, unit-tested in `main.rs`.
+      - `(render s t w h)` ignores `:size` and uses the size it's given.
+        So `texaco_frames` still renders at 320×240.
+      - Both values must be positive integers, and bad input is
+        rejected.
+    - **Sizes set:** each POV port gets the 4:3 size its header already
+      suggested, and the header now says it renders at that size:
+      - 640×480: braids, nba, redball, train, xmastree and texaco.
+      - 800×600: cpot and ornament.
+      - Without `SIZE`, these used to render at 1024×1024, with a
+        different (square) framing from POV's.
+    - **Tests:** `size_comes_from_the_variable_then_the_scene_then_the_default`
+      (main.rs), `scene_size_rejects_bad_values` (six cases), and a
+      `:size` case in `bindings_scene.lisp`. 114 unit, 1 main and 84
+      suite tests pass.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the

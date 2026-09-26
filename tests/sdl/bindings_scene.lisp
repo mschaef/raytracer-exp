@@ -69,3 +69,8 @@
 ; Negative check.
 (assert (not (scene? nil)))
 (assert (not (scene? cam)))
+
+; :size is the image size the scene was composed for (main.rs's default;
+; SIZE overrides it).
+(assert (scene? (scene {:name "sized" :camera (camera-looking-at [0 0 5] [0 0 0] [0 1 0] 1.0)
+                        :objects [] :size [640 480]})))

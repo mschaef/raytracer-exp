@@ -2,7 +2,7 @@
 ; ported from magic/nba.pov in the POV-Ray projects
 ; (github.com/mschaef/povray-projects). Left to right: T_Wood23 (pale
 ; pine), T_Wood7 under a nearly clear pink layer, and T_Wood28
-; (orange). Render at 4:3, e.g. SIZE=640x480.
+; (orange). Renders at 640x480 (its :size); SIZE overrides.
 ;
 ; The woods are woods.inc's two-layer textures (see _pov.lisp). In
 ; nba.pov the middle block's `pigment { rgbt <1, 0.7, 0.7, 0.9> }`
@@ -27,6 +27,7 @@
 (def nba-scene
   (scene
     {:name       "NBA"
+     :size       [640 480]
      ; POV's look_at straight down along the default up (y) falls back
      ; to right = +x, up = +z.
      :camera     (camera-looking-at [0 8 0] [0 0 0] [0 0 1] 1.0)

@@ -1,8 +1,8 @@
 ; Rope braids, ported from braids/braids.pov in the POV-Ray projects
 ; (github.com/mschaef/povray-projects): six ropes of beads wound around
 ; each other and twisting up a vertical axis, 200 rows high, seen from
-; xmastree's close "ground" camera (gAngle 2). Render at 4:3, e.g.
-; SIZE=640x480.
+; xmastree's close "ground" camera (gAngle 2). Renders at
+; 640x480 (its :size); SIZE overrides.
 ;
 ; The original builds 200 x 6 x 8 = 9,600 spheres with nested #while
 ; loops; here that's one `for` comprehension computing each sphere's
@@ -33,6 +33,7 @@
 (def braids-scene
   (scene
     {:name        "Braids"
+     :size        [640 480]
      ; gAngle 2: location <0,3,0> + 5, look_at <0,3,0>, direction 2*z.
      :camera      (camera-looking-at [5 8 5] [0 3 0] [0 1 0] 2.0)
      :background  pov-white

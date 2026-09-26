@@ -629,6 +629,12 @@ pub struct Scene {
     /// main.rs overrides it from `RAYTRACER_CURVE` and
     /// `RAYTRACER_EXPOSURE`.
     pub view: view::ViewTransform,
+
+    /// The image size the scene was composed for, `(width, height)`, from
+    /// the SDL's `:size`. Only a default for main.rs (the `SIZE`
+    /// environment variable overrides it); `render` itself takes its
+    /// size from its caller. `None` means main.rs's 1024×1024.
+    pub size: Option<(u32, u32)>,
 }
 
 /// Optional diagnostic heatmap targets that `render()` populates
@@ -2252,6 +2258,7 @@ mod light_tests {
             variance_threshold: 0.0,
             view_mode: ViewMode::default(),
             view: view::ViewTransform::default(),
+            size: None,
         }
     }
 

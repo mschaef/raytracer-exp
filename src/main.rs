@@ -27,10 +27,9 @@ use raytracer::render::output::{
 use raytracer::sdl;
 use raytracer::sdl::value::Value;
 
-/// Default output dimensions when no `SIZE` env var is set. Square,
-/// matches what the pre-stage-3 quadrant layout rendered per scene.
-/// Pick a smaller value via `SIZE=512x512` for quick iteration; the
-/// teapot at 1024² is slow without a real BVH.
+/// Output dimensions when neither `SIZE` nor the scene's `:size` says.
+/// Square, matching what the pre-stage-3 quadrant layout rendered per
+/// scene. Pick a smaller value via `SIZE=512x512` for quick iteration.
 const DEFAULT_SIZE: (u32, u32) = (1024, 1024);
 
 fn is_parallel() -> bool {
@@ -101,14 +100,21 @@ fn decomposition_enabled() -> bool {
     }
 }
 
-/// Resolve the output image dimensions. `SIZE=N` is shorthand for `NxN`;
-/// `SIZE=WxH` sets width and height separately. Anything malformed
-/// exits with a usage message — bad numeric input is the kind of thing
-/// you want to learn about up front, not on every pixel.
-fn image_size() -> (u32, u32) {
-    let s = match env::var("SIZE") {
-        Ok(s) => s,
-        Err(_) => return DEFAULT_SIZE,
+/// Resolve the output image dimensions: the `SIZE` environment variable
+/// if set, otherwise the scene's `:size`, otherwise `DEFAULT_SIZE`.
+/// `SIZE=N` is shorthand for `NxN`; `SIZE=WxH` sets width and height
+/// separately. Anything malformed exits with a usage message — bad
+/// numeric input is the kind of thing you want to learn about up front,
+/// not on every pixel.
+fn image_size(scene_size: Option<(u32, u32)>) -> (u32, u32) {
+    resolve_size(env::var("SIZE").ok(), scene_size)
+}
+
+/// `image_size` without the environment, for testing.
+fn resolve_size(size_var: Option<String>, scene_size: Option<(u32, u32)>) -> (u32, u32) {
+    let s = match size_var {
+        Some(s) => s,
+        None => return scene_size.unwrap_or(DEFAULT_SIZE),
     };
 
     let parse_dim = |text: &str, label: &str| -> u32 {
@@ -268,7 +274,8 @@ fn usage_and_exit() -> ! {
     eprintln!("this convention.");
     eprintln!();
     eprintln!("Environment variables:");
-    eprintln!("  SIZE=N or SIZE=WxH   Output image dimensions (default {}x{}).",
+    eprintln!("  SIZE=N or SIZE=WxH   Output image dimensions, overriding the");
+    eprintln!("                       scene's :size (default {}x{}).",
         DEFAULT_SIZE.0, DEFAULT_SIZE.1);
     eprintln!("  PARALLEL=n           Disable Rayon parallelism (default on).");
     eprintln!("  RTVIEW_ADDR=host:port  Stream pixels to a live receiver");
@@ -315,7 +322,7 @@ fn main() {
     // pre-Phase-4 renderer.
     scene.view_mode = view_mode();
     view_transform_overrides(&mut scene);
-    let (width, height) = image_size();
+    let (width, height) = image_size(scene.size);
 
     // Diagnostic heatmaps: same dimensions as the pixel target.
     //
@@ -478,5 +485,18 @@ fn main() {
                 decomp_target.save(output_filename(mode)).unwrap();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_comes_from_the_variable_then_the_scene_then_the_default() {
+        assert_eq!(resolve_size(None, None), DEFAULT_SIZE);
+        assert_eq!(resolve_size(None, Some((640, 480))), (640, 480));
+        assert_eq!(resolve_size(Some("320x240".to_string()), Some((640, 480))), (320, 240));
+        assert_eq!(resolve_size(Some("256".to_string()), None), (256, 256));
     }
 }

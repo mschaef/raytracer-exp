@@ -1,8 +1,8 @@
 ; A chrome coffee pot with a wooden handle and two glass cups of
 ; coffee on a checkerboard, ported from cpot/cpot.pov and
 ; cpot/coffeecup.inc in the POV-Ray projects
-; (github.com/mschaef/povray-projects). Render at 4:3, e.g.
-; SIZE=800x600.
+; (github.com/mschaef/povray-projects). Renders at
+; 800x600 (its :size); SIZE overrides.
 ;
 ; Stand-ins: the glass (T_Glass4) is see-through without the filter's
 ; tint, which at its near-white colour changes little. It has no ior in
@@ -108,6 +108,7 @@
 (def cpot-scene
   (scene
     {:name       "Coffee Pot"
+     :size       [800 600]
      :camera     (pov-camera [6 13 12] [0 3 3])
      :background pov-black
      :objects

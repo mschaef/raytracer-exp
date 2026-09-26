@@ -91,6 +91,7 @@
 (defn texaco-at [angle backdrop?]
   (scene
     {:name          "Texaco"
+     :size          [640 480]
      :camera        (pov-camera [0 0 -2.2] [0 0 0])
      :background    pov-black
      :reflect-limit 3

@@ -1576,7 +1576,12 @@ fn builtin_aabb(args: &[Value], pos: &Position) -> Value {
 /// `(scene {:name "..." :camera C :background [r g b] :objects [...]
 ///          :reflect-limit n :transmit-limit n :indirect-limit n
 ///          :min-samples n :max-samples m :variance-threshold t
-///          :view {:curve :clip :exposure 0}})`
+///          :view {:curve :clip :exposure 0} :size [w h]})`
+///
+/// `:size [w h]` is the image size the scene was composed for (e.g.
+/// `[640 480]` for a 4:3 POV port). main.rs renders at it unless the
+/// `SIZE` environment variable says otherwise; `(render ...)` ignores
+/// it and uses the size it's given. Both must be positive integers.
 ///
 /// `:view` sets how the rendered values become display values (see
 /// `render::view` and `build_view_transform`); omitted, it's
@@ -1691,6 +1696,18 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         .get("view")
         .map(|v| build_view_transform(v, pos))
         .unwrap_or_default();
+    let size = map.get("size").map(|v| {
+        let dims = require_vec(v, "scene :size", pos);
+        if dims.len() != 2 {
+            sdl_panic!(pos, "scene :size is [width height] (got {} elements)", dims.len());
+        }
+        let w = require_u32(&dims[0], "scene :size width", pos);
+        let h = require_u32(&dims[1], "scene :size height", pos);
+        if w == 0 || h == 0 {
+            sdl_panic!(pos, "scene :size must be positive (got {}x{})", w, h);
+        }
+        (w, h)
+    });
 
     // Validate that every leaf in the scene graph has a surface,
     // either explicitly or via an enclosing `Shape::Surfaced`
@@ -1721,6 +1738,7 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         // default.
         view_mode: ViewMode::Full,
         view,
+        size,
     }))
 }
 

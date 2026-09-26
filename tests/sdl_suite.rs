@@ -662,6 +662,40 @@ fn view_rejects_bad_keys() {
     }
 }
 
+#[test]
+fn scene_size_rejects_bad_values() {
+    let scene = |size: &str| {
+        format!(
+            "(scene {{:name \"s\" :camera (camera-looking-at [0 0 5] [0 0 0] [0 1 0] 1.0) \
+             :objects [] :size {}}})",
+            size
+        )
+    };
+    let cases: Vec<(String, &str, &str)> = vec![
+        (scene("[640]"), "[width height]", "one number"),
+        (scene("[640 480 3]"), "[width height]", "three numbers"),
+        (scene("[0 480]"), "positive", "zero width"),
+        (scene("[640 -1]"), "non-negative", "negative height"),
+        (scene("[640.5 480]"), "width expected an integer", "non-integer width"),
+        (scene("640"), "vector", "not a vector"),
+    ];
+    for (source, expected, what) in cases.iter() {
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(source, "size_bad.lisp", &env);
+        }));
+        let message = match result {
+            Ok(_) => panic!("must reject {}: {}", what, source),
+            Err(p) => p.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        assert!(
+            message.contains(expected),
+            "error for {} ({}) should mention {:?}, got: {}",
+            what, source, expected, message
+        );
+    }
+}
+
 /// Lights-as-shapes affine equivalence: a scene with a bare
 /// `(light-white [5 5 5])` in `:objects` must render byte-identically
 /// to a scene where the same light is positioned by wrapping a

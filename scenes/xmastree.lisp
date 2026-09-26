@@ -1,7 +1,7 @@
 ; The Christmas tree, ported from xmastree/xmastree.pov in the POV-Ray
 ; projects (github.com/mschaef/povray-projects), at the settings its
 ; final render used: gDetail 4, gTreeStages 6, gAngle 3 (the
-; off-centre shot), 4:3 frame. Render at 4:3, e.g. SIZE=640x480.
+; off-centre shot), 4:3 frame. Renders at 640x480 (its :size); SIZE overrides.
 ;
 ; Geometry follows the original's numbers, in POV's own coordinates
 ; (see _pov.lisp). The structure is functional rather than POV's
@@ -300,6 +300,7 @@
 (def xmastree-scene
   (scene
     {:name          "Christmas Tree"
+     :size          [640 480]
      ; gAngle 3: location <-14,12,0> + <5,1.2,2>*12, look_at <-14,7,0>,
      ; direction 2*z (zoom 2).
      :camera        (camera-looking-at [46 26.4 24] [-14 7 0] [0 1 0] 2.0)

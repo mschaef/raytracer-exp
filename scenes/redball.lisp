@@ -1,7 +1,7 @@
 ; A green metal ball, ported from redball/red.pov in the POV-Ray projects
 ; (github.com/mschaef/povray-projects): one sphere in front of a white,
 ; self-lit backdrop, with a single light. Despite the file name, the ball
-; is green. Render at 4:3, e.g. SIZE=640x480.
+; is green. Renders at 640x480 (its :size); SIZE overrides.
 ;
 ; The ball's finish is ambient 0.15, diffuse 0.6, specular 0.8,
 ; roughness 1/100, brilliance 5, metallic, no reflection. Per the
@@ -16,6 +16,7 @@
 (def redball-scene
   (scene
     {:name       "Red Ball"
+     :size       [640 480]
      ; POV's default camera shape: zoom 1.
      :camera     (pov-camera [0 0 -3] [0 0 0])
      :background pov-black

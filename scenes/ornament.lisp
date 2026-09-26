@@ -2,7 +2,7 @@
 ; POV-Ray projects (github.com/mschaef/povray-projects): a toy train
 ; engine standing in front of a yellow eight-pointed frame, on a grey
 ; tilted backdrop. The parts live in _trainorn.lisp, shared with
-; xmastree.lisp. Render at 4:3, e.g. SIZE=800x600.
+; xmastree.lisp. Renders at 800x600 (its :size); SIZE overrides.
 ;
 ; Every part is painted in fine-grained wood (see `painted-wood`). The
 ; one stand-in: the smokestack is a flat-shaded mesh, as in the original.
@@ -22,6 +22,7 @@
 (def ornament-scene
   (scene
     {:name       "Train Ornament"
+     :size       [800 600]
      :camera     (pov-camera [2 2 20] [2 0 0])
      :background pov-black
      :objects
