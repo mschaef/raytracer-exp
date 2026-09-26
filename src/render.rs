@@ -18,6 +18,7 @@ pub mod sampler;
 pub mod poly;
 pub mod noise;
 pub mod pigment;
+pub mod view;
 
 use std::cell::Cell;
 use std::convert::TryFrom;
@@ -620,6 +621,13 @@ pub struct Scene {
     /// definition; per-view debugging is a render-time concern.
     /// Phase 4 of the path-tracing plan.
     pub view_mode: ViewMode,
+
+    /// How the rendered values become display values: exposure, then a
+    /// tone curve (see `render::view`). The default, `Clip` at exposure
+    /// 0, is the original behaviour. Set from the SDL's `:view` key;
+    /// main.rs overrides it from `RAYTRACER_CURVE` and
+    /// `RAYTRACER_EXPOSURE`.
+    pub view: view::ViewTransform,
 }
 
 /// Optional diagnostic heatmap targets that `render()` populates
@@ -2069,7 +2077,8 @@ fn render_one_row<T: RenderTarget + ?Sized>(
             depths[x as usize] = depth_metric;
         }
         if want_clip {
-            clips[x as usize] = output::clip_metric(&pc);
+            // After exposure, like the clip report.
+            clips[x as usize] = output::clip_metric(&scene.view.expose(pc));
         }
     }
 
@@ -2132,6 +2141,10 @@ pub fn render<T: RenderTarget + ?Sized>(
     scene.root.collect_lights(Affine::identity(), &mut effective_lights);
     let lights = effective_lights.as_slice();
 
+    // Tell the target the scene's view transform before any row
+    // arrives (see `render::view` and `RenderTarget::begin`).
+    target.begin(&scene.view);
+
     if parallel {
         (0..imgy).into_par_iter().for_each(
             | y | render_one_row(target, heatmaps, &camera, scene, lights, imgx, y)
@@ -2154,6 +2167,9 @@ pub fn render<T: RenderTarget + ?Sized>(
         h.finish();
     }
     if let Some(h) = heatmaps.depth {
+        h.finish();
+    }
+    if let Some(h) = heatmaps.clip {
         h.finish();
     }
 }
@@ -2193,6 +2209,7 @@ mod light_tests {
             max_samples: 1,
             variance_threshold: 0.0,
             view_mode: ViewMode::default(),
+            view: view::ViewTransform::default(),
         }
     }
 

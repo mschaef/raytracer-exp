@@ -46,7 +46,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use image::ImageResult;
 
-use super::color::{LinearColor, to_png_color};
+use super::color::LinearColor;
+use super::view::{ViewTransform, WIRE_FLAG_VIEW};
 
 /// Where rendered pixels go.
 ///
@@ -65,6 +66,13 @@ pub trait RenderTarget: Send + Sync {
     /// Targets that ultimately render to a display-space format are
     /// responsible for the appropriate encode.
     fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]);
+
+    /// Called once by `render()` before any row is submitted, with the
+    /// scene's view transform (exposure and tone curve). Targets that
+    /// encode for display (`PngTarget`) use it for the rows that
+    /// follow; `StreamTarget` sends it to its receiver. Default no-op.
+    /// Wrapper targets forward it.
+    fn begin(&self, _view: &ViewTransform) {}
 
     /// Called once by `render()` after every row has been submitted.
     /// Default no-op. Streaming targets override this to send a
@@ -199,6 +207,10 @@ impl fmt::Display for ClipReport {
 pub struct PngTarget {
     buffer: Mutex<image::ImageBuffer<image::Rgb<u8>, Vec<u8>>>,
     clip: ClipStats,
+    /// The view transform for the rows being written: the default
+    /// until a `render()` calls `begin`. Each render sets its own, so
+    /// renders composited into one target each keep their own look.
+    view: Mutex<ViewTransform>,
 }
 
 impl PngTarget {
@@ -206,6 +218,7 @@ impl PngTarget {
         PngTarget {
             buffer: Mutex::new(image::ImageBuffer::new(width, height)),
             clip: ClipStats::new(),
+            view: Mutex::new(ViewTransform::default()),
         }
     }
 
@@ -216,11 +229,13 @@ impl PngTarget {
 
     /// Write a single pixel directly. Useful for compositing operations
     /// that don't fit the row-at-a-time pattern (e.g. drawing a crosshair).
-    /// Color is in the same linear space as `submit_row`; sRGB encoding
-    /// happens internally.
+    /// Color is in the same linear space as `submit_row`; the view
+    /// transform and sRGB encoding happen internally.
     pub fn put_pixel(&self, x: u32, y: u32, color: LinearColor) {
-        self.clip.record(&[color]);
-        let encoded = to_png_color(&color);
+        let view = *self.view.lock().unwrap();
+        let exposed = view.expose(color);
+        self.clip.record(&[exposed]);
+        let encoded = view.encode_exposed(exposed);
         let mut buf = self.buffer.lock().unwrap();
         buf.put_pixel(x, y, image::Rgb(encoded));
     }
@@ -237,14 +252,22 @@ impl PngTarget {
 }
 
 impl RenderTarget for PngTarget {
+    fn begin(&self, view: &ViewTransform) {
+        *self.view.lock().unwrap() = *view;
+    }
+
     fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]) {
         // Encode outside the lock so concurrent workers can do the
         // linear → sRGB conversion in parallel and only contend for the
         // pixel-buffer write itself. The temporary Vec is per-call, on
         // the order of a few KB at typical row widths — invisible
         // against ray-tracing cost.
-        self.clip.record(row);
-        let encoded: Vec<[u8; 3]> = row.iter().map(to_png_color).collect();
+        let view = *self.view.lock().unwrap();
+        // The clip report counts values after exposure, before the
+        // curve: what the curve has to bring into range.
+        let exposed: Vec<LinearColor> = row.iter().map(|c| view.expose(*c)).collect();
+        self.clip.record(&exposed);
+        let encoded: Vec<[u8; 3]> = exposed.iter().map(|c| view.encode_exposed(*c)).collect();
 
         let mut buf = self.buffer.lock().unwrap();
         for (i, p) in encoded.iter().enumerate() {
@@ -254,8 +277,9 @@ impl RenderTarget for PngTarget {
 }
 
 /// TCP-streaming target. Opens a connection on construction, sends a
-/// fixed-size header with the image dimensions, then writes one
-/// length-prefixed message per `submit_row` call. The receiver (e.g. the
+/// header with the image dimensions (and the view transform, when it
+/// isn't the default) at `begin`, then writes one length-prefixed
+/// message per `submit_row` call. The receiver (e.g. the
 /// `rtview` GUI, or the `rtview_receiver` test binary) reads the header
 /// to size its buffer and then consumes row messages until the connection
 /// closes.
@@ -267,7 +291,16 @@ impl RenderTarget for PngTarget {
 ///   magic   [u8; 4]  "RTVW"
 ///   width   u32
 ///   height  u32
-///   flags   u32      0 = linear-color f32 payload (only variant today)
+///   flags   u32      bit 0 (WIRE_FLAG_VIEW): a view-transform block
+///                    follows. Other bits are reserved; receivers reject
+///                    them.
+///
+/// View-transform block (only when flags bit 0 is set; see
+/// `ViewTransform::write_wire`):
+///   curve    u32     0 clip, 1 hue-clip
+///   exposure f32     stops
+///   nparams  u32
+///   params   [f32; nparams]
 ///
 /// Row message (variable, sent per submit_row):
 ///   y       u32
@@ -281,7 +314,17 @@ impl RenderTarget for PngTarget {
 /// decimal digits, far more than any 8-bit display encoding needs, and
 /// keeps the bandwidth tractable for typical 2K-square renders. The
 /// receiver is responsible for whatever display-space encoding it wants
-/// to do (sRGB, tone mapping, HDR pass-through).
+/// to do (sRGB, tone mapping, HDR pass-through). The pixels stay
+/// scene-linear and unclamped even when the scene has a view transform:
+/// the transform travels in the header and the receiver applies it, so
+/// it keeps the full values (for adjusting exposure live, saving HDR, or
+/// reporting clipping). The default transform sends flags 0 and no
+/// block, the same bytes as before view transforms existed.
+///
+/// A stream carries one view transform: the header goes out at the
+/// first `begin` (or before the first row, with the default, if no
+/// `begin` came). A later `begin` with a different transform is ignored
+/// with a warning.
 ///
 /// `submit_row` packs y/x/count + payload into a single `Vec<u8>` and
 /// issues a single `write_all` under the lock. The pack-then-write idiom
@@ -294,31 +337,59 @@ impl RenderTarget for PngTarget {
 /// improvement is an mpsc channel feeding a dedicated writer thread; the
 /// trait surface stays the same.
 pub struct StreamTarget {
-    inner: Mutex<TcpStream>,
+    inner: Mutex<StreamState>,
     clip: ClipStats,
 }
 
+struct StreamState {
+    stream: TcpStream,
+    width: u32,
+    height: u32,
+    /// The view transform the header announced, once it's been sent.
+    sent: Option<ViewTransform>,
+}
+
+impl StreamState {
+    /// Send the header for `view` if it hasn't gone yet, and return the
+    /// transform the stream carries.
+    fn ensure_header(&mut self, view: &ViewTransform) -> ViewTransform {
+        if let Some(sent) = self.sent {
+            return sent;
+        }
+        let mut hdr = Vec::with_capacity(32);
+        hdr.extend_from_slice(b"RTVW");
+        hdr.extend_from_slice(&self.width.to_le_bytes());
+        hdr.extend_from_slice(&self.height.to_le_bytes());
+        if view.is_default() {
+            hdr.extend_from_slice(&0u32.to_le_bytes());
+        } else {
+            hdr.extend_from_slice(&WIRE_FLAG_VIEW.to_le_bytes());
+            view.write_wire(&mut hdr);
+        }
+        // Errors are dropped, as for rows (see `submit_row`).
+        let _ = self.stream.write_all(&hdr);
+        self.sent = Some(*view);
+        *view
+    }
+}
+
 impl StreamTarget {
-    /// Connect to the receiver at `addr` (e.g. `"127.0.0.1:9999"`) and
-    /// send the header. Subsequent `submit_row` calls stream rows on the
-    /// same connection. Returns an `io::Error` if the connection or the
-    /// header write fails — the renderer can decide how to react (today,
-    /// `main.rs` aborts with a clear message).
+    /// Connect to the receiver at `addr` (e.g. `"127.0.0.1:9999"`).
+    /// The header follows at `begin`, once the view transform is known;
+    /// subsequent `submit_row` calls stream rows on the same connection.
+    /// Returns an `io::Error` if the connection fails — the renderer can
+    /// decide how to react (today, `main.rs` aborts with a clear
+    /// message).
     pub fn connect(addr: &str, width: u32, height: u32) -> io::Result<Self> {
-        let mut stream = TcpStream::connect(addr)?;
+        let stream = TcpStream::connect(addr)?;
         // Disable Nagle: rows are already packed into a single write
         // each, and we'd rather have them on the wire promptly than
         // batched into 40ms windows.
         stream.set_nodelay(true)?;
-
-        let mut hdr = Vec::with_capacity(16);
-        hdr.extend_from_slice(b"RTVW");
-        hdr.extend_from_slice(&width.to_le_bytes());
-        hdr.extend_from_slice(&height.to_le_bytes());
-        hdr.extend_from_slice(&0u32.to_le_bytes()); // flags: linear f32
-        stream.write_all(&hdr)?;
-
-        Ok(StreamTarget { inner: Mutex::new(stream), clip: ClipStats::new() })
+        Ok(StreamTarget {
+            inner: Mutex::new(StreamState { stream, width, height, sent: None }),
+            clip: ClipStats::new(),
+        })
     }
 
     /// How many of the pixels sent so far will clip in the receiver's
@@ -329,11 +400,27 @@ impl StreamTarget {
 }
 
 impl RenderTarget for StreamTarget {
+    fn begin(&self, view: &ViewTransform) {
+        let mut state = self.inner.lock().unwrap();
+        let sent = state.ensure_header(view);
+        if sent != *view {
+            eprintln!(
+                "warning: stream already carries view transform {:?}; ignoring {:?}",
+                sent, view
+            );
+        }
+    }
+
     fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]) {
+        let view = self.inner.lock().unwrap().ensure_header(&ViewTransform::default());
         // 12-byte row header + 12 bytes per pixel (3 × f32). Sized exactly
         // so the Vec allocates once and the write is a single contiguous
         // payload.
-        self.clip.record(row);
+        //
+        // The clip report counts what the receiver's curve will see
+        // (after exposure); the pixels themselves go out unexposed.
+        let exposed: Vec<LinearColor> = row.iter().map(|c| view.expose(*c)).collect();
+        self.clip.record(&exposed);
         let mut buf = Vec::with_capacity(12 + row.len() * 12);
         buf.extend_from_slice(&y.to_le_bytes());
         buf.extend_from_slice(&x.to_le_bytes());
@@ -348,7 +435,7 @@ impl RenderTarget for StreamTarget {
         // the receiver gets a partial image and the renderer keeps going;
         // for stage one that's acceptable. If we ever want hard failure,
         // it's a single-line API change across all targets.
-        let _ = self.inner.lock().unwrap().write_all(&buf);
+        let _ = self.inner.lock().unwrap().stream.write_all(&buf);
     }
 
     fn finish(&self) {
@@ -356,7 +443,7 @@ impl RenderTarget for StreamTarget {
         // the socket) but keeps the door open for later buffering. Drop
         // closes the connection, which the receiver reads as EOF and
         // treats as "render complete".
-        let _ = self.inner.lock().unwrap().flush();
+        let _ = self.inner.lock().unwrap().stream.flush();
     }
 }
 
@@ -381,6 +468,10 @@ impl<'a, T: RenderTarget + ?Sized + 'a> OffsetTarget<'a, T> {
 }
 
 impl<'a, T: RenderTarget + ?Sized + 'a> RenderTarget for OffsetTarget<'a, T> {
+    fn begin(&self, view: &ViewTransform) {
+        self.inner.begin(view);
+    }
+
     fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]) {
         self.inner.submit_row(x + self.dx, y + self.dy, row);
     }
@@ -423,6 +514,10 @@ impl<'a, T: RenderTarget + ?Sized + 'a> ProgressTarget<'a, T> {
 }
 
 impl<'a, T: RenderTarget + ?Sized + 'a> RenderTarget for ProgressTarget<'a, T> {
+    fn begin(&self, view: &ViewTransform) {
+        self.inner.begin(view);
+    }
+
     fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]) {
         self.inner.submit_row(x, y, row);
 
@@ -469,6 +564,10 @@ impl ArcOffsetTarget {
 }
 
 impl RenderTarget for ArcOffsetTarget {
+    fn begin(&self, view: &ViewTransform) {
+        self.inner.begin(view);
+    }
+
     fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]) {
         self.inner.submit_row(x + self.dx, y + self.dy, row);
     }
@@ -502,6 +601,10 @@ impl ArcProgressTarget {
 }
 
 impl RenderTarget for ArcProgressTarget {
+    fn begin(&self, view: &ViewTransform) {
+        self.inner.begin(view);
+    }
+
     fn submit_row(&self, x: u32, y: u32, row: &[LinearColor]) {
         self.inner.submit_row(x, y, row);
 
@@ -775,6 +878,109 @@ mod clip_tests {
         t.put_pixel(0, 1, [0.0, 4.0, 0.0]);
         let r = t.clip_report();
         assert_eq!((r.pixels, r.clipped, r.channels, r.max), (5, 3, [1, 1, 1], 4.0));
+    }
+
+    /// Records the transform each `begin` receives.
+    struct Spy(Mutex<Vec<ViewTransform>>);
+
+    impl RenderTarget for Spy {
+        fn begin(&self, view: &ViewTransform) {
+            self.0.lock().unwrap().push(*view);
+        }
+        fn submit_row(&self, _x: u32, _y: u32, _row: &[LinearColor]) {}
+    }
+
+    #[test]
+    fn begin_passes_through_wrappers() {
+        use super::super::view::ToneCurve;
+        let view = ViewTransform { exposure: -1.0, curve: ToneCurve::HueClip };
+        let spy = Spy(Mutex::new(Vec::new()));
+        OffsetTarget::new(&spy, 1, 2).begin(&view);
+        ProgressTarget::new(&spy, 4, "t").begin(&view);
+        let arc: Arc<dyn RenderTarget> = Arc::new(Spy(Mutex::new(Vec::new())));
+        ArcOffsetTarget::new(arc.clone(), 0, 0).begin(&view);
+        ArcProgressTarget::new(arc, 4, "t".to_string()).begin(&view);
+        assert_eq!(*spy.0.lock().unwrap(), vec![view, view]);
+    }
+
+    #[test]
+    fn png_target_applies_the_view_transform() {
+        use super::super::view::ToneCurve;
+        let t = PngTarget::new(2, 1);
+        // Before any `begin`, the default: clipping each channel turns
+        // this over-bright orange yellow.
+        t.submit_row(0, 0, &[[1.8, 0.9, 0.3], [0.5, 0.5, 0.5]]);
+        let clipped = *t.buffer.lock().unwrap().get_pixel(0, 0);
+        // Hue-preserving clip keeps it orange; exposure -1 halves the
+        // grey and brings the orange's red to 0.9 (so nothing clips).
+        t.begin(&ViewTransform { exposure: 0.0, curve: ToneCurve::HueClip });
+        t.submit_row(0, 0, &[[1.8, 0.9, 0.3], [0.5, 0.5, 0.5]]);
+        let hue = *t.buffer.lock().unwrap().get_pixel(0, 0);
+        assert_eq!(hue.0, super::super::view::encode_display([1.0, 0.5, 0.3 / 1.8]));
+        assert!(hue.0[1] < clipped.0[1], "{:?} vs {:?}", hue, clipped);
+        t.begin(&ViewTransform { exposure: -1.0, curve: ToneCurve::Clip });
+        t.submit_row(0, 0, &[[1.8, 0.9, 0.3], [0.5, 0.5, 0.5]]);
+        let px = |x| t.buffer.lock().unwrap().get_pixel(x, 0).0;
+        assert_eq!(px(0), super::super::view::encode_display([0.9, 0.45, 0.15]));
+        assert_eq!(px(1), super::super::view::encode_display([0.25, 0.25, 0.25]));
+        // The clip report counts after exposure: two clipped (the first
+        // two rows' orange), not three.
+        let r = t.clip_report();
+        assert_eq!((r.pixels, r.clipped), (6, 2));
+        assert_eq!(r.max, 1.8);
+    }
+
+    #[test]
+    fn stream_sends_the_view_transform_in_its_header() {
+        use super::super::view::ToneCurve;
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        // Read everything a StreamTarget sends for one begin and one row.
+        fn capture(view: Option<ViewTransform>, second: Option<ViewTransform>) -> Vec<u8> {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap().to_string();
+            let reader = std::thread::spawn(move || {
+                let (mut conn, _) = listener.accept().unwrap();
+                let mut bytes = Vec::new();
+                conn.read_to_end(&mut bytes).unwrap();
+                bytes
+            });
+            {
+                let t = StreamTarget::connect(&addr, 3, 2).unwrap();
+                if let Some(v) = view {
+                    t.begin(&v);
+                }
+                if let Some(v) = second {
+                    t.begin(&v);
+                }
+                t.submit_row(0, 1, &[[2.5, 0.5, 0.0]]);
+            }
+            reader.join().unwrap()
+        }
+        let u32_at = |b: &[u8], i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        let f32_at = |b: &[u8], i: usize| f32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+
+        // The default transform: the original 16-byte header, flags 0.
+        for view in [Some(ViewTransform::default()), None] {
+            let b = capture(view, None);
+            assert_eq!(&b[0..4], b"RTVW");
+            assert_eq!((u32_at(&b, 4), u32_at(&b, 8), u32_at(&b, 12)), (3, 2, 0));
+            assert_eq!(b.len(), 16 + 12 + 12);
+            // The row: y, x, count, then the pixel, unclamped.
+            assert_eq!((u32_at(&b, 16), u32_at(&b, 20), u32_at(&b, 24)), (1, 0, 1));
+            assert_eq!(f32_at(&b, 28), 2.5);
+        }
+
+        // Anything else: flags bit 0 and the block, and the pixels still
+        // go out scene-linear.
+        let view = ViewTransform { exposure: -1.0, curve: ToneCurve::HueClip };
+        let other = ViewTransform { exposure: 3.0, curve: ToneCurve::Clip };
+        let b = capture(Some(view), Some(other));
+        assert_eq!(u32_at(&b, 12), WIRE_FLAG_VIEW);
+        assert_eq!(ViewTransform::read_wire(&mut &b[16..28]).unwrap(), view);
+        assert_eq!(b.len(), 16 + 12 + 12 + 12);
+        assert_eq!(f32_at(&b, 40), 2.5);
     }
 
     #[test]

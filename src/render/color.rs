@@ -38,22 +38,5 @@ pub fn multiply_linear_color(colora: &LinearColor, colorb: &LinearColor) -> Line
     ]
 }
 
-fn linear_to_srgb(x: f64) -> f64 {
-    if x < 0.0 {
-        0.0
-    } else if x < 0.0031308	{
-        x * 12.92
-    } else if x < 1.0 {
-        1.055 * x.powf(1.0/2.4) - 0.055
-    } else {
-        1.0
-    }
-}
-
-pub fn to_png_color(color: &LinearColor) -> [u8; 3] {
-    [
-        (linear_to_srgb(color[0]) * 256.0) as u8,
-        (linear_to_srgb(color[1]) * 256.0) as u8,
-        (linear_to_srgb(color[2]) * 256.0) as u8
-    ]
-}
+// Encoding to 8-bit sRGB lives in `render::view` (`ViewTransform`,
+// `encode_display`), with the exposure and tone curve that come first.

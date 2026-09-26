@@ -13,9 +13,11 @@
 //! Stage one of the rtview integration: lets us validate the wire protocol
 //! end-to-end without the Cocoa GUI in play. Listens on
 //! `RTVIEW_ADDR` (default `127.0.0.1:9999`), accepts a single connection,
-//! reads the header + row stream, applies the same linear → sRGB encode
-//! that `PngTarget` uses, and writes the result to `received.png`. After
-//! one render it exits.
+//! reads the header + row stream, applies the same view transform and
+//! sRGB encode that `PngTarget` uses (`render::view`, with the transform
+//! the header announces), and writes the result to `received.png`. It
+//! prints the same clip report as the renderer when the stream closes.
+//! After one render it exits.
 //!
 //! Run alongside the renderer:
 //!
@@ -35,30 +37,8 @@ use std::env;
 use std::io::{ErrorKind, Read};
 use std::net::TcpListener;
 
-/// Mirrors `render::color::linear_to_srgb` but takes `f32` because the
-/// wire payload is `f32`. Stage one stays self-contained — the renderer
-/// crate has no `lib.rs` to import from, so duplicating six lines of
-/// transfer function is cheaper than restructuring the package.
-fn linear_to_srgb(x: f32) -> f32 {
-    if x < 0.0 {
-        0.0
-    } else if x < 0.003_130_8 {
-        x * 12.92
-    } else if x < 1.0 {
-        1.055 * x.powf(1.0 / 2.4) - 0.055
-    } else {
-        1.0
-    }
-}
-
-/// Mirrors `render::color::to_png_color` for `f32` inputs.
-fn to_png_color(c: [f32; 3]) -> [u8; 3] {
-    [
-        (linear_to_srgb(c[0]) * 256.0) as u8,
-        (linear_to_srgb(c[1]) * 256.0) as u8,
-        (linear_to_srgb(c[2]) * 256.0) as u8,
-    ]
-}
+use raytracer::render::output::ClipStats;
+use raytracer::render::view::{ViewTransform, WIRE_FLAG_VIEW};
 
 fn read_u32_le<R: Read>(r: &mut R) -> std::io::Result<u32> {
     let mut buf = [0u8; 4];
@@ -91,12 +71,27 @@ fn main() -> std::io::Result<()> {
         "rtview_receiver: header {}x{}, flags={} (0=linear-f32)",
         width, height, flags
     );
-    if flags != 0 {
+    // Bit 0: a view-transform block follows. Any other bit is from a
+    // newer protocol than this receiver knows, so fail rather than show
+    // the wrong image.
+    if flags & !WIRE_FLAG_VIEW != 0 {
         return Err(std::io::Error::new(
             ErrorKind::InvalidData,
             format!("unknown flags value {}", flags),
         ));
     }
+    let view = if flags & WIRE_FLAG_VIEW != 0 {
+        ViewTransform::read_wire(&mut conn)?
+    } else {
+        ViewTransform::default()
+    };
+    eprintln!(
+        "rtview_receiver: view transform: {}, exposure {}",
+        view.curve.name(),
+        view.exposure
+    );
+    // The same clip report the renderer prints, over what arrived.
+    let clip = ClipStats::new();
 
     let mut img = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::new(width, height);
 
@@ -141,7 +136,12 @@ fn main() -> std::io::Result<()> {
             let b = f32::from_le_bytes([
                 payload[off + 8], payload[off + 9], payload[off + 10], payload[off + 11],
             ]);
-            let p = to_png_color([r, g, b]);
+            // The pixels arrive scene-linear and unclamped; the view
+            // transform (exposure, curve) and the sRGB encode happen
+            // here, as in `PngTarget`.
+            let exposed = view.expose([r as f64, g as f64, b as f64]);
+            clip.record(&[exposed]);
+            let p = view.encode_exposed(exposed);
             img.put_pixel(x + i as u32, y, image::Rgb(p));
         }
 
@@ -160,6 +160,7 @@ fn main() -> std::io::Result<()> {
         rows_received
     );
 
+    eprintln!("rtview_receiver: {}", clip.report());
     img.save("received.png")
         .map_err(|e| std::io::Error::new(ErrorKind::Other, e.to_string()))?;
     eprintln!("rtview_receiver: wrote received.png");

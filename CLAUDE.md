@@ -52,7 +52,10 @@ src/
     render/geometry.rs   Point = [f64; 3], Vector { start, delta }, EPSILON,
                          and pointwise ops: addp, subp, scalep, dotp, crossp,
                          lenp, normalizep, negp.
-    render/color.rs      LinearColor and conversions to/from PNG sRGB.
+    render/color.rs      LinearColor and its arithmetic.
+    render/view.rs       The view transform: exposure, tone curve
+                         (clip, hue-clip) and 8-bit sRGB encoding; its
+                         stream wire form.
     render/transform.rs  Affine 3D transforms as (3×3 linear, 3-vec translation).
                          Mat3 type alias, mat3_apply/multiply/transpose/inverse,
                          and Affine constructors: identity, translation, scale,
@@ -2622,6 +2625,71 @@ Approximate order of recent commits, oldest first:
       sees. Until phase 2 adds exposure, "after exposure" and "before
       the curve" are the same thing.
 
+56. **View transform, phases 2 and 3: exposure and a hue-preserving
+    clip.** Renders are byte-identical at the default.
+    - **`render::view` (new):**
+      - `ToneCurve::{Clip, HueClip}` and `ViewTransform { exposure,
+        curve }`, where exposure is in stops and multiplies by
+        `2^exposure`.
+      - `expose`, `apply` (exposure, then the curve), `encode` (both
+        stages, to 8-bit sRGB) and `encode_exposed`.
+      - `linear_to_srgb` and `encode_display` moved here from
+        `color.rs`, whose `to_png_color` is gone.
+      - `Clip` clamps exactly as the old encoder did, NaN going to 1.
+        A test sweeps it against a verbatim copy of the old encoder.
+      - `HueClip`: negative values and NaN go to 0; then, if the
+        largest channel is over 1, all three are divided by it.
+      - Curve names (`clip`, `hue-clip`) are shared by the SDL and the
+        environment variables.
+    - **Plumbing:**
+      - `Scene::view`, default `Clip` at exposure 0.
+      - `render()` calls the new `RenderTarget::begin(&scene.view)`
+        before the rows. The four wrapper targets forward it.
+      - `PngTarget` keeps the transform from its latest `begin`, so
+        renders composited into one target each keep their own look.
+      - The clip report and the clip map now count values after
+        exposure.
+    - **Streaming** (the updated plan):
+      - The pixels stay scene-linear and unclamped.
+      - `StreamTarget` sends its header at `begin` rather than on
+        connect: flags 0 for the default transform (the same bytes as
+        before), otherwise `WIRE_FLAG_VIEW` and a 12-byte block (curve
+        id, exposure, parameter count).
+      - A later `begin` with a different transform is ignored with a
+        warning.
+      - `rtview_receiver` reads the block and encodes through the
+        library (its private sRGB copies are gone). It still rejects
+        unknown flag bits, and it prints the clip report at the end.
+      - Checked end to end on nba: at the default, `received.png`
+        matches `render.png` exactly; at hue-clip and exposure -0.5, one
+        channel of one pixel differs by 1 (the f32 wire).
+    - **SDL:** `scene` takes `:view {:curve :clip|:hue-clip :exposure
+      n}`. Both keys are optional. Unknown keys and curves, a
+      non-keyword curve and a non-finite exposure are rejected.
+    - **Command line:** `RAYTRACER_CURVE` and `RAYTRACER_EXPOSURE`
+      override the scene's `:view`, and bad values are fatal. They're
+      listed in the usage text.
+    - **First look:**
+      - On nba, hue-clip hardly changes the woods, since little of them
+        is far over 1.
+      - Exposure -0.5 cuts nba's clipping from 41% to 11%, and shows the
+        four lights' pools on the white squares that clipping had
+        flattened.
+      - Braids at -0.5 clips nothing.
+    - **Tests:**
+      - `view` unit tests: byte-identity with the old encoder, exposure,
+        both curves (ratios preserved, in-range colours untouched,
+        negatives and NaN), names, the wire round trip and wire
+        rejections.
+      - Output tests: `begin` through all four wrappers; `PngTarget`
+        applying the transform and counting after exposure; and the
+        stream header over a local socket (default, non-default, a
+        second `begin`, and unclamped pixels).
+      - `:view` cases in `clip_stats.lisp`, and a new
+        `view_rejects_bad_keys` Rust test.
+      - Every scene byte-identical.
+      - 105 unit and 82 suite tests pass (stand-in libraries).
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -3799,12 +3867,35 @@ pub struct ViewTransform { pub exposure: f64 /* stops */, pub curve: ToneCurve }
   a no-op, like `finish`.
 - `PngTarget` stores the transform, and its encode becomes stage 1 then
   stage 2.
-- `StreamTarget` applies stage 1 before sending, and sets a header flag
-  meaning "display-linear". Its receiver keeps encoding with sRGB, and
-  its clip becomes a no-op for curve output.
+- **Streaming: the wire stays scene-linear.** `StreamTarget` keeps
+  sending exactly what `render()` produced: unclamped linear `f32`s.
+  It sends the view transform alongside them, and `rtview_receiver`
+  applies it when it encodes, using the library's view-transform code
+  instead of its own copies of `linear_to_srgb` and `to_png_color`.
+  - That keeps the receiver a real viewer: it could adjust exposure or
+    switch curves live, save an HDR copy (phase 5), and report
+    clipping, none of which works if the sender has already tone-mapped
+    the values.
+  - Wire format: flags bit 0 means "a view-transform block follows the
+    16-byte header". The block is the curve id (`u32`), the exposure
+    (`f32`), a parameter count (`u32`), and that many `f32` parameters
+    (e.g. Reinhard's white point). Curve ids: 0 clip, 1 hue-clip, 2
+    reinhard, 3 agx.
+  - The default transform (clip at exposure 0) sends flags 0 and no
+    block, the same bytes as before. The receiver rejects flag bits it
+    doesn't know, so a stale receiver fails loudly on a newer stream
+    rather than showing the wrong colours.
+  - A stream carries one view transform. The header, and with it the
+    block, is sent at the first `begin`, not on connect. A later
+    `begin` with a different transform is ignored with a warning, since
+    the stream only has one render on it in practice.
 - Floating-point outputs (phase 5) skip stage 1 and store scene-linear
   values.
-- The heatmap targets aren't affected.
+- **The clip report and clip map** count values after exposure and
+  before the curve: the values the curve has to compress. For `:clip`
+  that's the pixels that lost information; for a tone curve it's the
+  pixels in its shoulder.
+- The other heatmap targets aren't affected.
 
 ### Phase 1: clip report and clip map (images unchanged)
 
@@ -3833,9 +3924,19 @@ Make clipping visible before changing anything.
 
 ### Phase 2: `ViewTransform` plumbing, exposure and `Clip` (byte-identical)
 
+Done; see history entry 56.
+
 - Add `ViewTransform` and `ToneCurve::Clip`, `Scene::view`, and the
-  `begin` hook. `to_png_color` takes the transform.
-- `rtview_receiver` and the stream header change as described above.
+  `begin` hook, forwarded by every wrapper target. `PngTarget` encodes
+  through the transform.
+- Streaming as described above:
+  - `StreamTarget` sends its header, with the view-transform block
+    when the transform isn't the default, at `begin`.
+  - `rtview_receiver` reads the block and encodes through the library's
+    `ViewTransform`. Its private copies of the sRGB functions go.
+  - It prints the same clip report when the stream closes.
+- The clip report (`ClipStats`) and the clip map count values after
+  exposure.
 - **SDL:** `:view {:curve :clip :exposure 0.0}` on `scene`. Unknown keys
   and curves are rejected, as elsewhere.
 - **Command line:** `RAYTRACER_CURVE` and `RAYTRACER_EXPOSURE`
@@ -3844,10 +3945,18 @@ Make clipping visible before changing anything.
   (view modes).
 - **Default:** `:clip` at exposure 0, so every scene renders
   byte-identically and the byte-pinned tests don't change.
-- **Tests:** exposure scales values as expected; `:clip` with exposure
-  0 matches the old encoder over a sweep of values; binding rejections.
+- **Tests:**
+  - Exposure scales values as expected.
+  - `:clip` with exposure 0 matches the old encoder over a sweep of
+    values.
+  - `begin` is forwarded through the wrapper targets.
+  - The stream header and block round-trip over a local socket, and the
+    default transform sends the old header.
+  - Binding rejections.
 
 ### Phase 3: `HueClip`
+
+Done; see history entry 56.
 
 - If the largest channel `m` is over 1, divide all three channels by
   `m`.

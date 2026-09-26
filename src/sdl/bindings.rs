@@ -48,6 +48,7 @@ use crate::render::shapes::{
 use crate::render::transform::Affine;
 use crate::render::noise::Octaves;
 use crate::render::pigment::{LayeredPigment, Pattern, Pigment, Rgbt, Wave};
+use crate::render::view::{ToneCurve, ViewTransform};
 use crate::render::{Camera, HeatmapTargets, Light, LightKind, Scene, SpotCone, Surface, ViewMode};
 
 use crate::sdl::env::EnvRef;
@@ -1574,7 +1575,12 @@ fn builtin_aabb(args: &[Value], pos: &Position) -> Value {
 
 /// `(scene {:name "..." :camera C :background [r g b] :objects [...]
 ///          :reflect-limit n :transmit-limit n :indirect-limit n
-///          :min-samples n :max-samples m :variance-threshold t})`
+///          :min-samples n :max-samples m :variance-threshold t
+///          :view {:curve :clip :exposure 0}})`
+///
+/// `:view` sets how the rendered values become display values (see
+/// `render::view` and `build_view_transform`); omitted, it's `:clip` at
+/// exposure 0, the original behaviour.
 ///
 /// After the stage-2 collapse the scene is a single top-level
 /// `Shape`. `:objects` is exposed at the SDL surface as a list for
@@ -1680,6 +1686,10 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         .unwrap_or(32) as u32;
     let variance_threshold = maybe_key_number(&map, "variance-threshold", "scene", pos)
         .unwrap_or(0.005);
+    let view = map
+        .get("view")
+        .map(|v| build_view_transform(v, pos))
+        .unwrap_or_default();
 
     // Validate that every leaf in the scene graph has a surface,
     // either explicitly or via an enclosing `Shape::Surfaced`
@@ -1709,7 +1719,37 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         // and SDL scripts always get the byte-identical `Full`
         // default.
         view_mode: ViewMode::Full,
+        view,
     }))
+}
+
+/// A scene's `:view` map: `:curve` (a keyword naming a `ToneCurve`,
+/// default `:clip`) and `:exposure` (stops, default 0). Unknown keys
+/// and curves are rejected.
+fn build_view_transform(v: &Value, pos: &Position) -> ViewTransform {
+    let map = require_map(v, "scene :view", pos);
+    for k in map.keys() {
+        if k != "curve" && k != "exposure" {
+            sdl_panic!(pos, "scene :view: unknown key :{} (expected :curve or :exposure)", k);
+        }
+    }
+    let curve = match map.get("curve") {
+        None => ToneCurve::Clip,
+        Some(Value::Keyword(k)) => ToneCurve::from_name(k).unwrap_or_else(|| {
+            sdl_panic!(
+                pos,
+                "scene :view: unknown :curve :{} (expected one of :{})",
+                k,
+                ToneCurve::NAMES.join(" :")
+            )
+        }),
+        Some(other) => sdl_panic!(pos, "scene :view :curve must be a keyword (got {})", other),
+    };
+    let exposure = maybe_key_number(&map, "exposure", "scene :view", pos).unwrap_or(0.0);
+    if !exposure.is_finite() {
+        sdl_panic!(pos, "scene :view :exposure must be finite (got {})", exposure);
+    }
+    ViewTransform { exposure, curve }
 }
 
 // ---------------------------------------------------------------------------

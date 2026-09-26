@@ -38,3 +38,29 @@
 (assert= (get after :clipped) 12)
 (assert= [(get after :red) (get after :green) (get after :blue)] [6 6 6])
 (assert= (get after :max) 3.0)
+
+; A scene's :view sets exposure and the tone curve. The clip report
+; counts after exposure: two stops down brings the 2.5 red to 0.625, so
+; nothing clips.
+(defn viewed-scene [background view]
+  (scene {:name "clip-stats-view"
+          :camera (camera-looking-at [0 0 5] [0 0 0] [0 1 0] 1.0)
+          :background background
+          :objects []
+          :min-samples 1
+          :max-samples 1
+          :view view}))
+(def t3 (png-target 2 2))
+(render (viewed-scene [2.5 0.5 0] {:exposure -2}) t3 2 2)
+(assert= (clip-stats t3) {:pixels 4 :clipped 0 :red 0 :green 0 :blue 0 :max 0.625})
+
+; One stop up pushes a 0.75 grey over.
+(def t4 (png-target 2 2))
+(render (viewed-scene [0.75 0.75 0.75] {:curve :hue-clip :exposure 1}) t4 2 2)
+(assert= (get (clip-stats t4) :clipped) 4)
+(assert= (get (clip-stats t4) :max) 1.5)
+
+; Every key is optional; an empty :view is the default.
+(assert (scene? (viewed-scene [0 0 0] {})))
+(assert (scene? (viewed-scene [0 0 0] {:curve :clip})))
+(assert (scene? (viewed-scene [0 0 0] {:curve :hue-clip :exposure -0.5})))

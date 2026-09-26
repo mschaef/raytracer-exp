@@ -15,6 +15,7 @@ use std::process;
 use std::time::Instant;
 
 use raytracer::render::{render, HeatmapTargets, Scene, ViewMode};
+use raytracer::render::view::ToneCurve;
 use raytracer::render::output::{
     PngTarget,
     StreamTarget,
@@ -210,6 +211,32 @@ fn render_into<T: RenderTarget + ?Sized>(
     println!("Time elapsed in {} is: {:?} (parallel: {})", scene.name, duration, parallel);
 }
 
+/// Apply `RAYTRACER_CURVE` (a tone-curve name, e.g. `hue-clip`) and
+/// `RAYTRACER_EXPOSURE` (stops, e.g. `-1`) over the scene's own `:view`,
+/// for trying a look without editing the scene. Bad values are fatal,
+/// since a render with the wrong look is worse than no render.
+fn view_transform_overrides(scene: &mut Scene) {
+    if let Ok(name) = env::var("RAYTRACER_CURVE") {
+        scene.view.curve = ToneCurve::from_name(&name).unwrap_or_else(|| {
+            eprintln!(
+                "error: RAYTRACER_CURVE={:?} is not a tone curve (expected one of: {})",
+                name,
+                ToneCurve::NAMES.join(", ")
+            );
+            process::exit(2);
+        });
+    }
+    if let Ok(text) = env::var("RAYTRACER_EXPOSURE") {
+        scene.view.exposure = match text.trim().parse::<f64>() {
+            Ok(e) if e.is_finite() => e,
+            _ => {
+                eprintln!("error: RAYTRACER_EXPOSURE={:?} is not a number of stops", text);
+                process::exit(2);
+            }
+        };
+    }
+}
+
 fn usage_and_exit() -> ! {
     let argv0 = env::args().next().unwrap_or_else(|| "raytracer".to_string());
     eprintln!("usage: {} <path-to-scene.lisp>", argv0);
@@ -231,6 +258,10 @@ fn usage_and_exit() -> ! {
     eprintln!("                       full (default), local, indirect,");
     eprintln!("                       reflection, transmission. Output goes");
     eprintln!("                       to render-MODE.png for non-full modes.");
+    eprintln!("  RAYTRACER_CURVE=NAME Tone curve, overriding the scene's :view");
+    eprintln!("                       (clip, hue-clip).");
+    eprintln!("  RAYTRACER_EXPOSURE=N Exposure in stops, overriding the scene's");
+    eprintln!("                       :view (e.g. -1 halves every value).");
     eprintln!("  RAYTRACER_DECOMP=1   After the main render, also render at");
     eprintln!("                       each non-full view mode, producing");
     eprintln!("                       render-local/indirect/reflection/");
@@ -261,6 +292,7 @@ fn main() {
     // tests always render at `Full` — bit-identical to the
     // pre-Phase-4 renderer.
     scene.view_mode = view_mode();
+    view_transform_overrides(&mut scene);
     let (width, height) = image_size();
 
     // Diagnostic heatmaps: same dimensions as the pixel target.

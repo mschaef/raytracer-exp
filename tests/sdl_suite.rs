@@ -590,6 +590,40 @@ fn pigment_rejects_bad_keys() {
     }
 }
 
+#[test]
+fn view_rejects_bad_keys() {
+    let scene = |view: &str| {
+        format!(
+            "(scene {{:name \"v\" :camera (camera-looking-at [0 0 5] [0 0 0] [0 1 0] 1.0) \
+             :objects [] :view {}}})",
+            view
+        )
+    };
+    // (source, text the error must contain, description)
+    let cases: Vec<(String, &str, &str)> = vec![
+        (scene("{:curve :filmic}"), "unknown :curve :filmic", "unknown curve"),
+        (scene("{:curve \"clip\"}"), "must be a keyword", "string curve"),
+        (scene("{:exposure :lots}"), "exposure", "keyword exposure"),
+        (scene("{:gamma 2.2}"), "unknown key :gamma", "unknown key"),
+        (scene("[:clip]"), "expected a map", "not a map"),
+    ];
+    for (source, expected, what) in cases.iter() {
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(source, "view_bad.lisp", &env);
+        }));
+        let message = match result {
+            Ok(_) => panic!("must reject {}: {}", what, source),
+            Err(p) => p.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        assert!(
+            message.contains(expected),
+            "error for {} ({}) should mention {:?}, got: {}",
+            what, source, expected, message
+        );
+    }
+}
+
 /// Lights-as-shapes affine equivalence: a scene with a bare
 /// `(light-white [5 5 5])` in `:objects` must render byte-identically
 /// to a scene where the same light is positioned by wrapping a
