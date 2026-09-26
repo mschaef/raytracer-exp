@@ -226,6 +226,25 @@ fn view_transform_overrides(scene: &mut Scene) {
             process::exit(2);
         });
     }
+    if let Ok(text) = env::var("RAYTRACER_WHITE") {
+        let white = match text.trim().parse::<f64>() {
+            Ok(w) if w.is_finite() && w > 0.0 => w,
+            _ => {
+                eprintln!("error: RAYTRACER_WHITE={:?} is not a positive number", text);
+                process::exit(2);
+            }
+        };
+        match scene.view.curve {
+            ToneCurve::Reinhard { .. } => scene.view.curve = ToneCurve::Reinhard { white },
+            other => {
+                eprintln!(
+                    "error: RAYTRACER_WHITE only applies to the reinhard curve (the curve is {})",
+                    other.name()
+                );
+                process::exit(2);
+            }
+        }
+    }
     if let Ok(text) = env::var("RAYTRACER_EXPOSURE") {
         scene.view.exposure = match text.trim().parse::<f64>() {
             Ok(e) if e.is_finite() => e,
@@ -259,7 +278,9 @@ fn usage_and_exit() -> ! {
     eprintln!("                       reflection, transmission. Output goes");
     eprintln!("                       to render-MODE.png for non-full modes.");
     eprintln!("  RAYTRACER_CURVE=NAME Tone curve, overriding the scene's :view");
-    eprintln!("                       (clip, hue-clip).");
+    eprintln!("                       (clip, hue-clip, reinhard, agx).");
+    eprintln!("  RAYTRACER_WHITE=N    Reinhard's white point: the luminance that");
+    eprintln!("                       maps to 1 (default 4).");
     eprintln!("  RAYTRACER_EXPOSURE=N Exposure in stops, overriding the scene's");
     eprintln!("                       :view (e.g. -1 halves every value).");
     eprintln!("  RAYTRACER_DECOMP=1   After the main render, also render at");

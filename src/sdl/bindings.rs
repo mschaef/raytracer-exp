@@ -1723,17 +1723,19 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
     }))
 }
 
-/// A scene's `:view` map: `:curve` (a keyword naming a `ToneCurve`,
-/// default `:clip`) and `:exposure` (stops, default 0). Unknown keys
-/// and curves are rejected.
+/// A scene's `:view` map: `:curve` (a keyword naming a `ToneCurve`:
+/// `:clip`, the default, `:hue-clip`, `:reinhard` or `:agx`),
+/// `:exposure` (stops, default 0) and, for `:reinhard` only, `:white`
+/// (the luminance that maps to 1, default 4). Unknown keys and curves
+/// are rejected.
 fn build_view_transform(v: &Value, pos: &Position) -> ViewTransform {
     let map = require_map(v, "scene :view", pos);
     for k in map.keys() {
-        if k != "curve" && k != "exposure" {
-            sdl_panic!(pos, "scene :view: unknown key :{} (expected :curve or :exposure)", k);
+        if k != "curve" && k != "exposure" && k != "white" {
+            sdl_panic!(pos, "scene :view: unknown key :{} (expected :curve, :exposure or :white)", k);
         }
     }
-    let curve = match map.get("curve") {
+    let mut curve = match map.get("curve") {
         None => ToneCurve::Clip,
         Some(Value::Keyword(k)) => ToneCurve::from_name(k).unwrap_or_else(|| {
             sdl_panic!(
@@ -1745,6 +1747,17 @@ fn build_view_transform(v: &Value, pos: &Position) -> ViewTransform {
         }),
         Some(other) => sdl_panic!(pos, "scene :view :curve must be a keyword (got {})", other),
     };
+    if let Some(white) = maybe_key_number(&map, "white", "scene :view", pos) {
+        match curve {
+            ToneCurve::Reinhard { .. } => {
+                if !(white.is_finite() && white > 0.0) {
+                    sdl_panic!(pos, "scene :view :white must be a positive number (got {})", white);
+                }
+                curve = ToneCurve::Reinhard { white };
+            }
+            other => sdl_panic!(pos, "scene :view :white only applies to :reinhard (the curve is :{})", other.name()),
+        }
+    }
     let exposure = maybe_key_number(&map, "exposure", "scene :view", pos).unwrap_or(0.0);
     if !exposure.is_finite() {
         sdl_panic!(pos, "scene :view :exposure must be finite (got {})", exposure);

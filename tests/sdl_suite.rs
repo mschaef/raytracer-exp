@@ -605,7 +605,12 @@ fn view_rejects_bad_keys() {
         (scene("{:curve \"clip\"}"), "must be a keyword", "string curve"),
         (scene("{:exposure :lots}"), "exposure", "keyword exposure"),
         (scene("{:gamma 2.2}"), "unknown key :gamma", "unknown key"),
+        (scene("{:curve :aces}"), "unknown :curve :aces", "unlisted curve"),
         (scene("[:clip]"), "expected a map", "not a map"),
+        (scene("{:curve :clip :white 4}"), "only applies to :reinhard", "white without reinhard"),
+        (scene("{:white 4}"), "only applies to :reinhard", "white with the default curve"),
+        (scene("{:curve :reinhard :white 0}"), "positive", "zero white"),
+        (scene("{:curve :reinhard :white :bright}"), "white", "keyword white"),
     ];
     for (source, expected, what) in cases.iter() {
         let env = sdl::default_env();

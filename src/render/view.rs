@@ -43,25 +43,149 @@ pub enum ToneCurve {
     /// divide all three by it. Keeps hue and saturation exactly; still
     /// flattens highlights.
     HueClip,
+    /// Extended Reinhard on luminance: `L' = L (1 + L / white²) / (1 +
+    /// L)`, with the colour scaled by `L' / L`. Never clips luminance
+    /// (it reaches 1 exactly at `white`), and keeps hue; `HueClip`
+    /// catches a saturated colour whose channels still go over 1.
+    /// Flattens contrast in the mid-tones unless exposure is raised.
+    Reinhard { white: f64 },
+    /// AgX, Blender's default view transform since 4.0, in the
+    /// analytic form three.js and Filament use: sRGB to Rec. 2020, the
+    /// AgX inset matrix, a log2 encoding over [-12.47, 4.03] stops, a
+    /// polynomial fit of the AgX sigmoid, the outset matrix, a 2.2
+    /// power back to linear, and Rec. 2020 back to sRGB. Bright colours
+    /// fade gradually toward white without skewing hue. Base look only.
+    AgX,
+}
+
+/// Reinhard's default white point: luminance 4 (two stops over 1) maps
+/// to 1.
+pub const DEFAULT_REINHARD_WHITE: f64 = 4.0;
+
+// ---------------------------------------------------------------------
+// AgX constants.
+//
+// The inset and outset matrices, the EV range and the sigmoid
+// polynomial are from three.js's `AgXToneMapping`
+// (src/renderers/shaders/ShaderChunk/tonemapping_pars_fragment.glsl.js,
+// MIT licence), which cites Filament's implementation
+// (github.com/google/filament/pull/7236, Apache 2.0) and the "minimal
+// AgX" write-up (iolite-engine.com/blog_posts/minimal_agx_implementation),
+// both derived from Troy Sobotka's AgX and EaryChow's AgX_LUT_Gen. The
+// matrices are written here as rows (each row sums to 1, so white
+// stays white; `agx_matrices_preserve_white` checks it).
+//
+// The sRGB <-> Rec. 2020 matrices are computed from the two standards'
+// primaries and the D65 white point (three.js rounds them to four
+// places).
+// ---------------------------------------------------------------------
+
+const SRGB_TO_REC2020: [[f64; 3]; 3] = [
+    [0.627403895934699, 0.32928303837788375, 0.04331306568741722],
+    [0.06909728935823198, 0.9195403950754586, 0.011362315566309171],
+    [0.01639143887515023, 0.08801330787722578, 0.895595253247624],
+];
+
+const REC2020_TO_SRGB: [[f64; 3]; 3] = [
+    [1.6604910021084343, -0.5876411387885497, -0.07284986331988486],
+    [-0.1245504745215906, 1.1328998971259605, -0.00834942260436948],
+    [-0.018150763354905224, -0.10057889800800744, 1.1187296613629125],
+];
+
+const AGX_INSET: [[f64; 3]; 3] = [
+    [0.856627153315983, 0.0951212405381588, 0.0482516061458583],
+    [0.137318972929847, 0.761241990602591, 0.101439036467562],
+    [0.11189821299995, 0.0767994186031903, 0.811302368396859],
+];
+
+const AGX_OUTSET: [[f64; 3]; 3] = [
+    [1.1271005818144368, -0.11060664309660323, -0.016493938717834573],
+    [-0.1413297634984383, 1.157823702216272, -0.016493938717834257],
+    [-0.14132976349843826, -0.11060664309660294, 1.2519364065950405],
+];
+
+const AGX_MIN_EV: f64 = -12.47393;
+const AGX_MAX_EV: f64 = 4.026069;
+
+fn mat_mul(m: &[[f64; 3]; 3], c: LinearColor) -> LinearColor {
+    [
+        m[0][0] * c[0] + m[0][1] * c[1] + m[0][2] * c[2],
+        m[1][0] * c[0] + m[1][1] * c[1] + m[1][2] * c[2],
+        m[2][0] * c[0] + m[2][1] * c[1] + m[2][2] * c[2],
+    ]
+}
+
+/// The polynomial fit of AgX's default-contrast sigmoid, on `[0, 1]`.
+fn agx_contrast(x: f64) -> f64 {
+    let x2 = x * x;
+    let x4 = x2 * x2;
+    15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x
+        - 0.00232
+}
+
+fn agx(c: LinearColor) -> LinearColor {
+    let c = mat_mul(&AGX_INSET, mat_mul(&SRGB_TO_REC2020, c));
+    let mut v = [0.0; 3];
+    for i in 0..3 {
+        // `max` also turns NaN into the floor.
+        let e = (c[i].max(1e-10).log2() - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
+        v[i] = agx_contrast(e.clamp(0.0, 1.0));
+    }
+    let v = mat_mul(&AGX_OUTSET, v);
+    let v = [v[0].max(0.0).powf(2.2), v[1].max(0.0).powf(2.2), v[2].max(0.0).powf(2.2)];
+    let v = mat_mul(&REC2020_TO_SRGB, v);
+    [v[0].clamp(0.0, 1.0), v[1].clamp(0.0, 1.0), v[2].clamp(0.0, 1.0)]
+}
+
+/// Rec. 709 / sRGB luminance of a linear colour.
+fn luminance(c: LinearColor) -> f64 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+fn hue_clip(c: LinearColor) -> LinearColor {
+    let c = [nonneg(c[0]), nonneg(c[1]), nonneg(c[2])];
+    let m = c[0].max(c[1]).max(c[2]);
+    if m > 1.0 {
+        [c[0] / m, c[1] / m, c[2] / m]
+    } else {
+        c
+    }
+}
+
+fn reinhard(c: LinearColor, white: f64) -> LinearColor {
+    let c = [nonneg(c[0]), nonneg(c[1]), nonneg(c[2])];
+    let l = luminance(c);
+    if l <= 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    let mapped = l * (1.0 + l / (white * white)) / (1.0 + l);
+    let k = mapped / l;
+    hue_clip([c[0] * k, c[1] * k, c[2] * k])
 }
 
 impl ToneCurve {
     /// Every curve, for listing in messages.
-    pub const NAMES: [&'static str; 2] = ["clip", "hue-clip"];
+    pub const NAMES: [&'static str; 4] = ["clip", "hue-clip", "reinhard", "agx"];
 
     /// The curve's name in the SDL (`:clip`) and in `RAYTRACER_CURVE`.
     pub fn name(&self) -> &'static str {
         match self {
             ToneCurve::Clip => "clip",
             ToneCurve::HueClip => "hue-clip",
+            ToneCurve::Reinhard { .. } => "reinhard",
+            ToneCurve::AgX => "agx",
         }
     }
 
-    /// The curve for a name, or `None` if there's no such curve.
+    /// The curve for a name, with default parameters (Reinhard's white
+    /// point is `DEFAULT_REINHARD_WHITE`), or `None` if there's no such
+    /// curve.
     pub fn from_name(name: &str) -> Option<ToneCurve> {
         match name {
             "clip" => Some(ToneCurve::Clip),
             "hue-clip" => Some(ToneCurve::HueClip),
+            "reinhard" => Some(ToneCurve::Reinhard { white: DEFAULT_REINHARD_WHITE }),
+            "agx" => Some(ToneCurve::AgX),
             _ => None,
         }
     }
@@ -71,18 +195,30 @@ impl ToneCurve {
         match self {
             ToneCurve::Clip => 0,
             ToneCurve::HueClip => 1,
+            ToneCurve::Reinhard { .. } => 2,
+            ToneCurve::AgX => 3,
         }
     }
 
-    /// The curve's parameters on the wire (none yet).
+    /// The curve's parameters on the wire: Reinhard's white point.
     fn wire_params(&self) -> Vec<f32> {
-        Vec::new()
+        match self {
+            ToneCurve::Reinhard { white } => vec![*white as f32],
+            _ => Vec::new(),
+        }
     }
 
     fn from_wire(id: u32, params: &[f32]) -> io::Result<ToneCurve> {
         let curve = match id {
             0 => ToneCurve::Clip,
             1 => ToneCurve::HueClip,
+            2 => match params {
+                [white] if white.is_finite() && *white > 0.0 => {
+                    ToneCurve::Reinhard { white: *white as f64 }
+                }
+                _ => return Err(invalid(format!("bad reinhard parameters {:?}", params))),
+            },
+            3 => ToneCurve::AgX,
             other => return Err(invalid(format!("unknown tone curve id {}", other))),
         };
         if params.len() != curve.wire_params().len() {
@@ -100,15 +236,9 @@ impl ToneCurve {
     pub fn apply(&self, c: LinearColor) -> LinearColor {
         match self {
             ToneCurve::Clip => [clamp01(c[0]), clamp01(c[1]), clamp01(c[2])],
-            ToneCurve::HueClip => {
-                let c = [nonneg(c[0]), nonneg(c[1]), nonneg(c[2])];
-                let m = c[0].max(c[1]).max(c[2]);
-                if m > 1.0 {
-                    [c[0] / m, c[1] / m, c[2] / m]
-                } else {
-                    c
-                }
-            }
+            ToneCurve::HueClip => hue_clip(c),
+            ToneCurve::Reinhard { white } => reinhard(c, *white),
+            ToneCurve::AgX => agx(c),
         }
     }
 }
@@ -164,7 +294,8 @@ impl ViewTransform {
         encode_display(self.curve.apply(exposed))
     }
 
-    /// The view-transform block for the stream: curve id (`u32`),
+    /// The view-transform block for the stream: curve id (`u32`; 0
+    /// clip, 1 hue-clip, 2 reinhard, 3 agx),
     /// exposure (`f32`), parameter count (`u32`), then the parameters
     /// (`f32` each), all little-endian.
     pub fn write_wire(&self, out: &mut Vec<u8>) {
@@ -339,6 +470,10 @@ mod tests {
         for name in ToneCurve::NAMES.iter() {
             assert_eq!(ToneCurve::from_name(name).unwrap().name(), *name);
         }
+        assert_eq!(
+            ToneCurve::from_name("reinhard"),
+            Some(ToneCurve::Reinhard { white: DEFAULT_REINHARD_WHITE })
+        );
         assert_eq!(ToneCurve::from_name("filmic"), None);
     }
 
@@ -373,5 +508,163 @@ mod tests {
         assert!(ViewTransform::read_wire(&mut &block(0, 1)[..]).is_err());
         assert!(ViewTransform::read_wire(&mut &block(0, 1000)[..]).is_err());
         assert!(ViewTransform::read_wire(&mut &block(0, 0)[..8]).is_err());
+    }
+
+    const ALL_CURVES: [ToneCurve; 4] = [
+        ToneCurve::Clip,
+        ToneCurve::HueClip,
+        ToneCurve::Reinhard { white: DEFAULT_REINHARD_WHITE },
+        ToneCurve::AgX,
+    ];
+
+    /// Grey levels from far below to far above 1.
+    fn grey_ramp() -> Vec<f64> {
+        (-60..=40).map(|i| (i as f64 * 0.25).exp2()).collect()
+    }
+
+    #[test]
+    fn curves_map_black_to_black_and_stay_in_range() {
+        for curve in ALL_CURVES.iter() {
+            assert_eq!(curve.apply([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0], "{:?}", curve);
+            for g in grey_ramp() {
+                for c in [[g, g, g], [g, 0.3 * g, 0.05 * g], [0.1 * g, 0.2 * g, g], [-g, g, 0.5 * g]] {
+                    let out = curve.apply(c);
+                    assert!(out.iter().all(|v| (0.0..=1.0).contains(v)), "{:?}({:?}) = {:?}", curve, c, out);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn curves_keep_greys_grey_and_rise_with_brightness() {
+        for curve in ALL_CURVES.iter() {
+            let mut last = -1.0;
+            for g in grey_ramp() {
+                let out = curve.apply([g, g, g]);
+                assert!(
+                    (out[0] - out[1]).abs() < 1e-9 && (out[1] - out[2]).abs() < 1e-9,
+                    "{:?} tints grey {}: {:?}",
+                    curve,
+                    g,
+                    out
+                );
+                assert!(out[0] >= last, "{:?} not monotonic at {}", curve, g);
+                last = out[0];
+            }
+            // A coloured ramp's luminance rises too.
+            let mut last = -1.0;
+            for g in grey_ramp() {
+                let l = luminance(curve.apply([g, 0.4 * g, 0.1 * g]));
+                assert!(l >= last - 1e-12, "{:?} luminance falls at {}", curve, g);
+                last = l;
+            }
+        }
+    }
+
+    #[test]
+    fn reinhard_reaches_white_at_its_white_point() {
+        for white in [1.5, 4.0, 10.0] {
+            let out = ToneCurve::Reinhard { white }.apply([white, white, white]);
+            assert!(out.iter().all(|v| (v - 1.0).abs() < 1e-12), "white {}: {:?}", white, out);
+            let below = ToneCurve::Reinhard { white }.apply([0.9 * white; 3]);
+            assert!(below[0] < 1.0);
+        }
+        // Small values pass nearly unchanged (L' ~ L for L << 1).
+        let out = ToneCurve::Reinhard { white: 4.0 }.apply([0.01, 0.01, 0.01]);
+        assert!((out[0] - 0.01).abs() < 2e-4, "{:?}", out);
+        // Hue is kept: channel ratios survive while nothing clips.
+        let out = ToneCurve::Reinhard { white: 4.0 }.apply([0.8, 0.4, 0.1]);
+        assert!((out[1] / out[0] - 0.5).abs() < 1e-12 && (out[2] / out[0] - 0.125).abs() < 1e-12);
+    }
+
+    /// Hue in degrees of a display-linear colour, from its sRGB encoding
+    /// (the usual HSV hexagon).
+    fn hue_deg(c: LinearColor) -> f64 {
+        let [r, g, b] = [linear_to_srgb(c[0]), linear_to_srgb(c[1]), linear_to_srgb(c[2])];
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let d = max - min;
+        if d <= 0.0 {
+            return 0.0;
+        }
+        let h = if max == r {
+            ((g - b) / d).rem_euclid(6.0)
+        } else if max == g {
+            (b - r) / d + 2.0
+        } else {
+            (r - g) / d + 4.0
+        };
+        60.0 * h
+    }
+
+    fn hue_shift(from: f64, to: f64) -> f64 {
+        ((to - from + 180.0).rem_euclid(360.0) - 180.0).abs()
+    }
+
+    #[test]
+    fn agx_keeps_hue_where_clipping_skews_it() {
+        // Warm, wood-like colours: AgX moves their hue a few degrees at
+        // most from 1x to 16x, where per-channel clipping swings them by
+        // 24-39 degrees (orange toward yellow and back).
+        for c in [[1.0, 0.5, 0.1], [0.9, 0.65, 0.3]] {
+            let h0 = hue_deg(c);
+            for k in [1.0, 4.0, 16.0] {
+                let bright = [c[0] * k, c[1] * k, c[2] * k];
+                let agx = hue_shift(h0, hue_deg(ToneCurve::AgX.apply(bright)));
+                assert!(agx < 5.0, "AgX moved {:?} x{} by {} degrees", c, k, agx);
+            }
+            let clip = hue_shift(h0, hue_deg(ToneCurve::Clip.apply([c[0] * 4.0, c[1] * 4.0, c[2] * 4.0])));
+            assert!(clip > 20.0, "clip only moved {:?} by {}", c, clip);
+        }
+        // A saturated blue: AgX rotates it moderately as it desaturates
+        // toward white (this is the AgX look), far less than clipping,
+        // which turns it cyan and then white.
+        let blue = [0.1, 0.2, 1.0];
+        let h0 = hue_deg(blue);
+        let agx = hue_shift(h0, hue_deg(ToneCurve::AgX.apply([1.6, 3.2, 16.0])));
+        let clip = hue_shift(h0, hue_deg(ToneCurve::Clip.apply([1.6, 3.2, 16.0])));
+        assert!(agx < 20.0 && clip > 100.0, "agx {} clip {}", agx, clip);
+    }
+
+    #[test]
+    fn agx_matrices_preserve_white() {
+        for m in [&SRGB_TO_REC2020, &REC2020_TO_SRGB, &AGX_INSET, &AGX_OUTSET] {
+            let w = mat_mul(m, [1.0, 1.0, 1.0]);
+            assert!(w.iter().all(|v| (v - 1.0).abs() < 1e-12), "{:?}", w);
+        }
+        // The two primaries conversions are inverses.
+        let c = [0.3, 0.6, 0.9];
+        let back = mat_mul(&REC2020_TO_SRGB, mat_mul(&SRGB_TO_REC2020, c));
+        assert!((0..3).all(|i| (back[i] - c[i]).abs() < 1e-12), "{:?}", back);
+        // Mid grey 0.18 lands near 0.21 display-linear, 1.0 near 0.59,
+        // and the curve saturates just short of 1.
+        let g = |x: f64| ToneCurve::AgX.apply([x, x, x])[0];
+        assert!((g(0.18) - 0.2145).abs() < 1e-3, "{}", g(0.18));
+        assert!((g(1.0) - 0.5902).abs() < 1e-3, "{}", g(1.0));
+        assert!(g(1.0e6) > 0.99 && g(1.0e6) < 1.0);
+    }
+
+    #[test]
+    fn reinhard_and_agx_round_trip_on_the_wire() {
+        for view in [
+            ViewTransform { exposure: 0.5, curve: ToneCurve::Reinhard { white: 6.0 } },
+            ViewTransform { exposure: -1.0, curve: ToneCurve::AgX },
+        ] {
+            let mut buf = Vec::new();
+            view.write_wire(&mut buf);
+            assert_eq!(ViewTransform::read_wire(&mut &buf[..]).unwrap(), view);
+        }
+        // Reinhard needs exactly one positive parameter.
+        let mut bad = Vec::new();
+        bad.extend_from_slice(&2u32.to_le_bytes());
+        bad.extend_from_slice(&0f32.to_le_bytes());
+        bad.extend_from_slice(&0u32.to_le_bytes());
+        assert!(ViewTransform::read_wire(&mut &bad[..]).is_err());
+        let mut bad = Vec::new();
+        bad.extend_from_slice(&2u32.to_le_bytes());
+        bad.extend_from_slice(&0f32.to_le_bytes());
+        bad.extend_from_slice(&1u32.to_le_bytes());
+        bad.extend_from_slice(&(-1f32).to_le_bytes());
+        assert!(ViewTransform::read_wire(&mut &bad[..]).is_err());
     }
 }

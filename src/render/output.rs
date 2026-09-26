@@ -297,7 +297,8 @@ impl RenderTarget for PngTarget {
 ///
 /// View-transform block (only when flags bit 0 is set; see
 /// `ViewTransform::write_wire`):
-///   curve    u32     0 clip, 1 hue-clip
+///   curve    u32     0 clip, 1 hue-clip, 2 reinhard (1 param:
+///                    white), 3 agx
 ///   exposure f32     stops
 ///   nparams  u32
 ///   params   [f32; nparams]

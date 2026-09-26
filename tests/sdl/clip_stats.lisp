@@ -64,3 +64,12 @@
 (assert (scene? (viewed-scene [0 0 0] {})))
 (assert (scene? (viewed-scene [0 0 0] {:curve :clip})))
 (assert (scene? (viewed-scene [0 0 0] {:curve :hue-clip :exposure -0.5})))
+(assert (scene? (viewed-scene [0 0 0] {:curve :reinhard})))
+(assert (scene? (viewed-scene [0 0 0] {:curve :reinhard :white 6 :exposure 1})))
+(assert (scene? (viewed-scene [0 0 0] {:curve :agx :exposure 0.5})))
+
+; The clip report is measured before the curve, so a tone curve doesn't
+; hide the over-bright pixels it had to compress.
+(def t5 (png-target 2 2))
+(render (viewed-scene [2.5 0.5 0] {:curve :agx}) t5 2 2)
+(assert= (get (clip-stats t5) :clipped) 4)

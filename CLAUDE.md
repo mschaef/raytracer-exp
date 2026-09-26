@@ -54,8 +54,8 @@ src/
                          lenp, normalizep, negp.
     render/color.rs      LinearColor and its arithmetic.
     render/view.rs       The view transform: exposure, tone curve
-                         (clip, hue-clip) and 8-bit sRGB encoding; its
-                         stream wire form.
+                         (clip, hue-clip, reinhard, agx) and 8-bit sRGB
+                         encoding; its stream wire form.
     render/transform.rs  Affine 3D transforms as (3×3 linear, 3-vec translation).
                          Mat3 type alias, mat3_apply/multiply/transpose/inverse,
                          and Affine constructors: identity, translation, scale,
@@ -2690,6 +2690,67 @@ Approximate order of recent commits, oldest first:
       - Every scene byte-identical.
       - 105 unit and 82 suite tests pass (stand-in libraries).
 
+57. **View transform, phase 4: Reinhard and AgX.** Renders are
+    byte-identical at the default.
+    - **`ToneCurve::Reinhard { white }`:** extended Reinhard on Rec. 709
+      luminance, `L' = L (1 + L / white²) / (1 + L)`, with the colour
+      scaled by `L'/L` and `hue_clip` as a backstop. The default white
+      is 4 (`DEFAULT_REINHARD_WHITE`).
+    - **`ToneCurve::AgX`:** the analytic AgX from three.js's
+      `AgXToneMapping` (MIT). It cites Filament (Apache 2.0) and the
+      iolite "minimal AgX" write-up, both derived from Troy Sobotka's
+      AgX and EaryChow's AgX_LUT_Gen. The citation is in `view.rs`.
+      - The steps: sRGB to Rec. 2020; the inset matrix; log2 over
+        [-12.47393, 4.026069] EV, normalised and clamped; the sigmoid
+        polynomial; the outset matrix; power 2.2; Rec. 2020 to sRGB;
+        clamp.
+      - The matrices are written as rows: each row sums to 1, which is
+        how the orientation was settled, and a test checks it.
+      - The sRGB/Rec. 2020 matrices are computed from the primaries and
+        D65, rather than three.js's four-place roundings.
+      - The constants came through a web fetch of three.js's source
+        (numbers only). A cross-check against another port (dmnsgn's
+        glsl-tone-map) matched.
+    - **Everywhere:**
+      - Names `reinhard` and `agx`, and wire ids 2 and 3. Reinhard sends
+        one parameter (white), and a non-positive white is rejected.
+      - The SDL takes `:view {:curve :reinhard :white 6}`. `:white` is
+        allowed only with `:reinhard`, and must be positive.
+      - `RAYTRACER_WHITE` sets the white point; it's an error unless the
+        curve is `reinhard`.
+      - The clip report still counts before the curve (a test renders
+        an AgX scene whose pixels are all over 1 and still reports all
+        of them).
+    - **Findings from the contact sheet** (`tone_curves.png`: nba, cpot,
+      xmastree, texaco, ornament, redball and gi_test under clip,
+      hue-clip, reinhard, agx and agx +1):
+      - **Both curves darken at exposure 0.** AgX maps 1.0 to about
+        0.59 display-linear, and mid grey 0.18 to 0.21. Reinhard with
+        white 4 maps 1.0 to about 0.53. The ports were lit for clipping,
+        so any curve needs its own exposure; AgX looks about right at
+        +1 stop.
+      - **AgX's base look desaturates noticeably.** Texaco's red goes
+        salmon and redball's green pastel. Warm woods keep their hue.
+        That is the AgX base look; Blender's "Punchy" look (the plan's
+        deferred looks item) restores saturation.
+      - **Reinhard keeps saturation** but greys the whites, unless
+        exposure goes up or white comes down.
+      - **Hue-clip** differs from clip only in small bright highlights.
+    - **Tests:**
+      - Every curve maps black to black, stays within [0, 1] for greys
+        and colours from 2^-15 to 2^10 (including negative channels),
+        keeps greys grey, and rises with brightness.
+      - Reinhard reaches exactly 1 at its white point and keeps hue.
+      - AgX moves warm colours by under 5° at 1×, 4× and 16×, where clip
+        moves them over 20°. A saturated blue moves under 20° in AgX
+        against over 100° in clip.
+      - The AgX matrices preserve white, and the primaries matrices are
+        inverses.
+      - AgX's grey response is pinned: 0.18 → 0.2145 and 1 → 0.5902.
+      - The wire round trip, and bad Reinhard parameters rejected.
+      - New SDL cases and five more `view_rejects_bad_keys` cases.
+      - 111 unit and 82 suite tests pass (stand-in libraries).
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -3964,6 +4025,10 @@ Done; see history entry 56.
   preserved), and values under 1 pass through unchanged.
 
 ### Phase 4: tone curves (`Reinhard`, `AgX`)
+
+Done; see history entry 57. Both curves darken at exposure 0 (1.0 goes
+to about 0.59 under AgX), and AgX's base look desaturates, both of which
+bear on phase 6.
 
 - **`Reinhard`:** luminance `L` from the Rec. 709 weights, then
   `L' = L (1 + L / white²) / (1 + L)`, and the colour is scaled by
