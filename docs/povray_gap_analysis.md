@@ -75,6 +75,10 @@ plans.
   through `:view`. The default is Reinhard with white point 4, so the
   ports now render darker and greyer until they're tuned: each port's
   tuning includes its `:view` exposure.
+- **Tuned: cpot, texaco and ornament** (CLAUDE.md entries 60–63),
+  after the reflection fix, back faces phases 1–2 and POV-style
+  transparency layering. Still to tune: nba, redball, xmastree, braids
+  and train.
 - **Next: the rest of the tuning pass, before snowman:** lighting
   balance and surfaces, judged by eye. Snowman waits until the current
   images look right.

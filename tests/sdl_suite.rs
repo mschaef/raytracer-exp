@@ -674,6 +674,38 @@ fn glass_shadows_attenuate_once_per_object() {
     assert_eq!(cylinder, boxed, "glass cylinder's shadow vs glass box's");
 }
 
+/// A transparent surface's reflection sits on top of its transparency
+/// blend at full strength, as in POV-Ray. A half-transparent mirror with
+/// nothing behind it reflects the green floor as brightly as an opaque
+/// one; before history entry 63 the reflection was scaled by `1 - T`
+/// and came out half as bright.
+#[test]
+fn transparency_does_not_dim_reflections() {
+    let pixel = |transparency: f64, tag: &str| {
+        let source = format!(
+            r#"
+(def s (scene {{:name "glass-mirror"
+               :camera (camera-looking-at [0 0 0] [0 1 0] [0 0 1] 1.0)
+               :background [0 0 0]
+               :min-samples 1 :max-samples 1
+               :view {{:curve :clip}}
+               :objects [(plane {{:normal (normalize [0 -1 -1]) :p0 [0 5 0]
+                                 :surface (surface {{:color [0 0 0] :ambient 0 :light 0
+                                                     :reflection 1.0 :transparency {}}})}})
+                         (plane {{:normal [0 0 1] :p0 [0 0 -20]
+                                 :surface (surface {{:color [0 1 0] :ambient 1 :light 0}})}})]}}))
+(def t (png-target 5 5))
+(render s t 5 5)
+(save-png t PATH)
+"#,
+            transparency
+        );
+        render_to_image(&source, tag).get_pixel(2, 2).0
+    };
+    assert_eq!(pixel(0.0, "mirror_opaque"), [0, 255, 0]);
+    assert_eq!(pixel(0.5, "mirror_glass"), [0, 255, 0]);
+}
+
 /// A surface's `:pigment` map rejects malformed or contradictory keys.
 #[test]
 fn pigment_rejects_bad_keys() {

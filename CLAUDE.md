@@ -2948,6 +2948,49 @@ Approximate order of recent commits, oldest first:
         face-forward shading now lights.
       - 117 unit, 1 main and 86 suite tests pass.
 
+63. **Transparency layering like POV's; cpot, texaco and ornament
+    tuned.**
+    - **Renderer: highlights and reflections sit on top of transparency.**
+      - `shade_pixel` keeps diffuse and specular light in separate sums,
+        next to the existing combined `light` (so opaque surfaces shade
+        byte-identically).
+      - A transparent surface now composes as
+        `(1 - T)·(ambient + diffuse + indirect) + T·beyond + reflection
+        + specular`, as POV does.
+      - Before, the whole shaded result was scaled by `1 - T`, leaving
+        glass with a quarter-strength highlight and about 6% reflection
+        (0.25 × 0.25), so its outline hardly showed.
+      - Changed renders: cpot, csg_test and transparency_test only.
+      - New suite test `transparency_does_not_dim_reflections`: a
+        half-transparent mirror reflects the green floor at full
+        brightness.
+    - **cpot:**
+      - `pov-chrome` in `_pov.lisp` is now tuned chrome rather than
+        Chrome_Texture's numbers: grey 0.8, ambient 0.02, diffuse 0.15,
+        specular 0.9, reflection 0.8. It's not `:metallic`, whose zero
+        diffuse turned the lid black where it reflects the black sky.
+      - The glass keeps T_Glass4's values. With the layering fix its
+        rims, lip and walls read clearly, and its inner walls no longer
+        compete (entry 62).
+      - Exposure stays at 0: 0.1% clipped. Mike's 384×384 `:size` is
+        kept.
+    - **texaco:**
+      - Compared with `texaco.gif` (a band around the bowl rim): the red
+        came out at a median of 213 against the reference's 142.
+      - `:view {:exposure -1.25}` gives 152 with a similar spread and
+        nothing clipped.
+      - `:metallic` variants matched the level but lost the reflections'
+        variation, so they weren't used.
+      - The star, flat mid grey under `pov-metal-a`, gets its own
+        brighter surface: ambient 0.6, diffuse 0.7, specular 0.8,
+        reflection 0.15.
+      - `texaco_frames` inherits both through `texaco-at`.
+    - **ornament:** `:view {:exposure 0.5}` brightens the yellow frame and
+      the grey backdrop, with 0.3% clipped (smokestack highlights). A
+      full stop clipped 3.8%.
+    - **Tests:** 117 unit, 1 main and 87 suite tests pass. Result sheet:
+      `tuning_cpot_texaco_ornament.png`.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the

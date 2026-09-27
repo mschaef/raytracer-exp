@@ -25,6 +25,10 @@
      :size       [800 600]
      :camera     (pov-camera [2 2 20] [2 0 0])
      :background pov-black
+     ; Half a stop up: the default Reinhard curve otherwise leaves the
+     ; yellow frame and the 0.4 grey backdrop dull. 0.3% of pixels clip
+     ; (smokestack highlights); a full stop clipped 3.8%.
+     :view       {:exposure 0.5}
      :objects
      [(light-white [16 16 16])
       (light-white [-16 16 16])

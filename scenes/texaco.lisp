@@ -57,7 +57,11 @@
 ;; --------------------------------------------------------------------
 
 (def surface-bowl (pov-metal-c pov-red))
-(def surface-star (pov-metal-a pov-white))
+; POV's T_Silver/Metal A finish (`pov-metal-a`) left the star a flat mid
+; grey next to the references' near-white star. Brighter body, same
+; highlight, a little more reflection; tuned by eye.
+(def surface-star
+  (surface {:color (srgb pov-white) :ambient 0.6 :light 0.7 :specular 0.8 :reflection 0.15}))
 
 ; A hemispherical shell open toward the camera (-z): a unit sphere,
 ; minus a sphere 0.001 smaller, minus a cylinder covering the near half.
@@ -95,6 +99,10 @@
      :camera        (pov-camera [0 0 -2.2] [0 0 0])
      :background    pov-black
      :reflect-limit 3
+     ; A stop and a quarter down brings the bowl's red to the references'
+     ; crimson (its rim band's median red is 152 here against 142 in
+     ; texaco.gif) with no pixel over 1.
+     :view          {:exposure -1.25}
      :objects
      (if backdrop?
        [(light-white [3.25 3.25 -4]) (texaco-hemi-logo angle) backdrop]

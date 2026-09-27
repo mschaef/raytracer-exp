@@ -1599,6 +1599,12 @@ fn shade_pixel(
     // gives a pure ambient + reflection render, useful as a debug
     // mode.
     let mut light: LinearColor = [0.0, 0.0, 0.0];
+    // The same contributions split into diffuse and specular, for a
+    // transparent surface, whose highlights sit on top of the blend
+    // (see `combined` below). `light` itself keeps its own running sum
+    // so opaque surfaces shade exactly as before.
+    let mut light_diffuse: LinearColor = [0.0, 0.0, 0.0];
+    let mut light_specular: LinearColor = [0.0, 0.0, 0.0];
     for l in lights {
         if let Some((lv, transmittance)) = light_vector(&hit.hit_point, scene, l, light_coord) {
             let lambert = dotp(normal, negp(lv.delta));
@@ -1667,6 +1673,8 @@ fn shade_pixel(
             );
 
             light = add_linear_color(&light, &contribution);
+            light_diffuse = add_linear_color(&light_diffuse, &scale_linear_color(&diff_term, transmittance));
+            light_specular = add_linear_color(&light_specular, &scale_linear_color(&spec_term, transmittance));
         }
     }
 
@@ -1738,11 +1746,21 @@ fn shade_pixel(
     // `(1 - 0) * opaque + 0 * [0,0,0]` simplifies to `opaque`).
     // So byte-pinned tests against opaque scenes don't see the
     // refactor.
+    // A transparent surface trades only its body colour (ambient,
+    // diffuse, indirect) for what shows through it; its reflection and
+    // highlights sit on top at full strength, as in POV-Ray. Scaling
+    // those by `1 - t` too (as before history entry 63) left glass with
+    // a quarter-strength highlight and almost no reflection, so its
+    // outline hardly showed.
     let combined = if transmitted_alpha > EPSILON {
         let t = transmitted_alpha;
+        let body = add_linear_color(&add_linear_color(&ambient, &light_diffuse), &indirect);
         add_linear_color(
-            &scale_linear_color(&opaque, 1.0 - t),
-            &scale_linear_color(&transmitted_color, t),
+            &add_linear_color(
+                &scale_linear_color(&body, 1.0 - t),
+                &scale_linear_color(&transmitted_color, t),
+            ),
+            &add_linear_color(&reflected, &light_specular),
         )
     } else {
         opaque

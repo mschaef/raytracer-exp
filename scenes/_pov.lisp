@@ -265,11 +265,15 @@
    :turbulence 0.2
    :color-map  [[0.8 [0.43 0.24 0.05]] [0.8 [0.40 0.33 0.06]] [1.0 [0.20 0.03 0.03]]]})
 
-; textures.inc's Chrome_Texture: grey, ambient 0.3, diffuse 0.7,
-; reflection 0.15, specular 0.8.
+; Chrome, for cpot's pot. textures.inc's Chrome_Texture is grey 0.66
+; with ambient 0.3, diffuse 0.7, reflection 0.15 and specular 0.8, which
+; is 85% matte paint: here it read as white ceramic (history entry 60).
+; Tuned by eye instead: mostly mirror (reflection 0.8) over a little
+; light grey diffuse, with a strong highlight. Not `:metallic`, whose
+; zero diffuse left the lid black where it reflects the black sky.
 (def pov-chrome
-  (surface {:color (srgb [0.658824 0.658824 0.658824])
-            :ambient 0.3 :light 0.7 :specular 0.8 :reflection 0.15}))
+  (surface {:color (srgb [0.8 0.8 0.8])
+            :ambient 0.02 :light 0.15 :specular 0.9 :reflection 0.8}))
 
 ; glass_old.inc's T_Glass4: rgbf <0.98, 1, 0.99, 0.75> with F_Glass4
 ; (ambient 0.1, diffuse 0.1, reflection 0.25, specular 1). POV's filter
