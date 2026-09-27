@@ -498,15 +498,21 @@ fn light_rejects_bad_keys() {
     }
 }
 
-/// A light behind a surface contributes nothing: a plane lit only from
-/// behind (with a specular term, so a spurious highlight would show)
-/// must render exactly like the same plane with no light at all. Found
-/// porting redball.pov, whose self-lit backdrop is lit from behind: the
-/// unclamped Lambert term went negative and darkened it, and the even
+/// A light on the far side of a surface from the viewer contributes
+/// nothing: a plane lit only from behind (with a specular term, so a
+/// spurious highlight would show) must render exactly like the same
+/// plane with no light at all. Found porting redball.pov: the unclamped
+/// Lambert term went negative and darkened the backdrop, and the even
 /// specular exponent turned a negative half-vector dot product into a
 /// highlight. Closed objects mostly hide this because a point facing
 /// away from a light is in its own object's shadow; shadowless lights
 /// and open surfaces don't.
+///
+/// Since back faces phase 1 (history entry 62), "behind" means behind
+/// relative to the viewer: shading turns the normal toward the ray, so
+/// the camera here sees the plane's back and the lights sit beyond it.
+/// (Before, the lights were on the camera's side, behind the plane's
+/// normal, and that plane now lights up, as POV's two-sided planes do.)
 #[test]
 fn back_lit_surfaces_get_no_light() {
     let env = sdl::default_env();
@@ -529,8 +535,8 @@ fn back_lit_surfaces_get_no_light() {
           :max-samples 1
           :objects (conj lights wall)}))
 (def t-a (png-target 24 24))
-(render (make-scene [(light-white [4 4 -4])
-                     (light {:location [-2 1 -1] :shadowless true})]) t-a 24 24)
+(render (make-scene [(light-white [4 4 14])
+                     (light {:location [-2 1 11] :shadowless true})]) t-a 24 24)
 (save-png t-a PATH-A)
 (def t-b (png-target 24 24))
 (render (make-scene []) t-b 24 24)
@@ -578,6 +584,94 @@ fn mirror_reflects_the_right_way() {
     let centre = img.get_pixel(2, 2).0;
     assert_eq!(centre, [0, 255, 0], "the mirror should show the green floor, got {:?}", centre);
     let _ = fs::remove_file(&path);
+}
+
+/// Render `source` (which must `(save-png t PATH)`) and return the
+/// image, for tests that compare pixels.
+fn render_to_image(source: &str, tag: &str) -> image::RgbImage {
+    let env = sdl::default_env();
+    let path = std::env::temp_dir().join(format!("sdl_{}_{}.png", tag, std::process::id()));
+    let _ = fs::remove_file(&path);
+    env.borrow_mut().define("PATH", Value::String(Rc::new(path.to_string_lossy().to_string())));
+    sdl::eval_source(source, &format!("{}.lisp", tag), &env);
+    let img = image::open(&path).unwrap_or_else(|e| panic!("decode {}: {}", tag, e)).to_rgb8();
+    let _ = fs::remove_file(&path);
+    img
+}
+
+/// Back faces phase 2: a transparent object is applied once, where the
+/// ray enters. Looking straight down the axis of a glass cylinder, and
+/// of the same cylinder built with CSG, must give the same colour as a
+/// glass box whose front face sits at the same place: one blend of the
+/// front face with what's behind. Before, the cylinder and the CSG
+/// shape were also blended at their far end (an exit), so they came out
+/// denser than the box.
+#[test]
+fn glass_is_blended_once_per_object() {
+    let pixel = |object: &str, tag: &str| {
+        let source = format!(
+            r#"
+(def glass (surface {{:color [0.2 0.4 0.9] :ambient 0.2 :light 0.5 :transparency 0.6}}))
+(def s (scene {{:name "glass"
+               :camera (camera-looking-at [0 0 -5] [0 0 0] [0 1 0] 1.0)
+               :background [1 0 0]
+               :min-samples 1 :max-samples 1
+               :view {{:curve :clip}}
+               :objects [(light-white [0 0 -10])
+                         (with-surface glass {})]}}))
+(def t (png-target 5 5))
+(render s t 5 5)
+(save-png t PATH)
+"#,
+            object
+        );
+        render_to_image(&source, tag).get_pixel(2, 2).0
+    };
+    let boxed = pixel("(cuboid {:center [0 0 1] :size [2 2 2]})", "glass_box");
+    let cylinder = pixel("(cylinder {:p0 [0 0 0] :p1 [0 0 2] :r 1})", "glass_cyl");
+    let csg = pixel(
+        "(intersection (cylinder {:p0 [0 0 0] :p1 [0 0 2] :r 1}) (cuboid {:center [0 0 1] :size [4 4 4]}))",
+        "glass_csg",
+    );
+    assert_eq!(cylinder, boxed, "glass cylinder vs glass box");
+    assert_eq!(csg, boxed, "glass CSG vs glass box");
+    // And it is a blend: some of the red background shows through.
+    assert!(boxed[0] > boxed[2] / 2 && boxed != [255, 0, 0], "{:?}", boxed);
+}
+
+/// Back faces phase 2, shadows: a shadow ray through a glass object is
+/// attenuated once (on entry), so a glass cylinder between a light and a
+/// wall darkens it exactly as much as a glass box does. The camera looks
+/// at the wall from the side, past the glass, so only the shadow ray
+/// crosses it.
+#[test]
+fn glass_shadows_attenuate_once_per_object() {
+    let pixel = |object: &str, tag: &str| {
+        let source = format!(
+            r#"
+(def glass (surface {{:color [1 1 1] :ambient 0 :light 0 :transparency 0.5}}))
+(def s (scene {{:name "glass-shadow"
+               :camera (camera-looking-at [3 4 -5] [3 0 5] [0 1 0] 10.0)
+               :background [0 0 0]
+               :min-samples 1 :max-samples 1
+               :view {{:curve :clip}}
+               :objects [(light-white [3 0 -10])
+                         (plane {{:normal [0 0 -1] :p0 [0 0 5]
+                                 :surface (surface {{:color [1 1 1] :ambient 0 :light 0.8}})}})
+                         {}]}}))
+(def t (png-target 5 5))
+(render s t 5 5)
+(save-png t PATH)
+"#,
+            object
+        );
+        render_to_image(&source, tag).get_pixel(2, 2).0
+    };
+    let nothing = pixel("(sphere {:center [100 100 100] :r 0.1 :surface glass})", "shadow_none");
+    let boxed = pixel("(with-surface glass (cuboid {:center [3 0 1] :size [1 1 2]}))", "shadow_box");
+    let cylinder = pixel("(with-surface glass (cylinder {:p0 [3 0 0] :p1 [3 0 2] :r 0.5}))", "shadow_cyl");
+    assert!(boxed[0] < nothing[0] && boxed[0] > 0, "box {:?} vs unshadowed {:?}", boxed, nothing);
+    assert_eq!(cylinder, boxed, "glass cylinder's shadow vs glass box's");
 }
 
 /// A surface's `:pigment` map rejects malformed or contradictory keys.

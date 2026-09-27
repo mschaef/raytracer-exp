@@ -108,7 +108,7 @@
 (def cpot-scene
   (scene
     {:name       "Coffee Pot"
-     :size       [800 600]
+     :size       [384 384]
      :camera     (pov-camera [6 13 12] [0 3 3])
      :background pov-black
      :objects

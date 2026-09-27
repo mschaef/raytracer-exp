@@ -2891,6 +2891,63 @@ Approximate order of recent commits, oldest first:
       `:size` case in `bindings_scene.lisp`. 114 unit, 1 main and 84
       suite tests pass.
 
+62. **Back faces, phases 1 and 2.** An intended image change for four
+    scenes.
+    - **Phase 1: the entering flag and face-forward shading.**
+      - `RayHit::entering` is true when the geometric normal faces the
+        ray. Sphere, cuboid, cylinder, cone, torus and plane each
+        compare their normal with the ray. A plane is a half-space, as
+        in its spans.
+      - `Triangle` is always entering. `Transformed` carries the child's
+        flag through, which keeps triangles right under a transform.
+        `first_span_hit` sets it from whether the endpoint is a span's
+        enter or exit. `Surfaced`, `Bounded` and the BVH pass the hit
+        through.
+      - `shade_pixel` shades with `normal`: `hit.normal` turned toward
+        the ray. It's used for Lambert, the half vector and the
+        path-tracing hemisphere. `reflect` keeps `hit.normal`, whose sign
+        cancels.
+    - **Phase 2: the exit policy.**
+      - **Pass-through:** when `!hit.entering`, the surface is
+        transparent and it isn't metallic, `shade_pixel` returns the
+        continued ray (same direction, from the hit point). It counts on
+        the new `Depth::pass`, capped at `PASS_THROUGH_LIMIT` (64); past
+        the cap an exit is shaded normally. `transmit` isn't spent.
+      - **Shadow walk:** `shadow_ray_walk` steps past exiting hits, so
+        only entering crossings attenuate (by `T`) or block. A light
+        inside a closed marker still escapes it.
+    - **Changed renders** (4 of 34), compared with entry 61 at a fixed
+      size:
+      - **cpot:** the cups are blended once per object, so they're
+        lighter and their inner walls no longer weigh as much as the
+        outside.
+      - **csg_test:** its CSG glass lightens to a single blend.
+      - **redball:** the backdrop, seen from behind its normal, is now
+        lit, as POV's two-sided planes are, and shows the ball's shadow.
+      - **teapot:** its back-facing triangles are lit.
+      - Before/after sheet: `backfaces_before_after.png`.
+      - `transform_test` and `moravian_star`, which the plan flagged,
+        came out unchanged.
+    - **The cups' outline is still faint.** That needs the other two
+      fixes from the cpot glass investigation: reflection and highlights
+      not scaled by transparency (POV's layering), and Fresnel
+      reflection.
+    - **Tests:**
+      - Units: `entering_from_outside_and_inside_each_primitive`,
+        `entering_survives_a_non_uniform_transform` and
+        `entering_on_csg_follows_the_span_endpoint` (including 500
+        random rays through a CSG tube, each checked against the
+        geometric test).
+      - Suite: `glass_is_blended_once_per_object` (a cylinder and a CSG
+        cylinder match a glass box) and
+        `glass_shadows_attenuate_once_per_object`. Both fail with phase
+        2 disabled (checked).
+      - `back_lit_surfaces_get_no_light` now puts the lights beyond the
+        plane relative to the viewer. Its old setup, with the lights on
+        the camera's side behind the plane's normal, is exactly what
+        face-forward shading now lights.
+      - 117 unit, 1 main and 86 suite tests pass.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
@@ -3891,6 +3948,8 @@ problems, each with its own fix:
 
 ### Phase 1 — Entering flag and face-forward shading
 
+Done; see history entry 62.
+
 - `RayHit` gains `entering: bool`. Set it wherever a `RayHit` is built:
   - Primitives compare the geometric normal with the ray direction.
     `Triangle` is always `true`.
@@ -3917,6 +3976,8 @@ problems, each with its own fix:
     they're opaque and everything is seen from the front.
 
 ### Phase 2 — Exit policy for transparency and shadows
+
+Done; see history entry 62.
 
 - **Pass-through.** In `shade_pixel` (or at the top of `ray_color`
   after the hit), when `!hit.entering` and the surface is transparent

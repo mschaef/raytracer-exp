@@ -966,6 +966,10 @@ impl Transformed {
                 texture_point,
                 normal: world_normal,
                 surface: hit.surface,
+                // A transform can't change which side of a surface the
+                // ray is on, and carrying the flag keeps triangles (always
+                // entering) right.
+                entering: hit.entering,
             }
         })
     }
@@ -1036,6 +1040,9 @@ impl Hittable for Triangle {
             texture_point: ray_location(ray, t),
             normal,
             surface: self.surface,
+            // A triangle has no inside, so every hit is on its front as
+            // far as transparency and shadows are concerned.
+            entering: true,
         })
     }
 }
@@ -1348,7 +1355,8 @@ impl Hittable for Sphere {
                 hit_point,
                 texture_point: hit_point,
                 normal: normalizep(subp(hit_point, self.center)),
-                surface: self.surface
+                surface: self.surface,
+                entering: dotp(subp(hit_point, self.center), ray.delta) < 0.0,
             })
         }
     }
@@ -1374,7 +1382,10 @@ impl Hittable for Plane {
                     hit_point,
                     texture_point: hit_point,
                     normal: self.normal,
-                    surface: self.surface
+                    surface: self.surface,
+                    // A plane is a half-space (as in its CSG spans): a ray
+                    // meeting it from the normal's side enters.
+                    entering: dotp(self.normal, ray.delta) < 0.0,
                 })
             }
         }
@@ -1472,6 +1483,9 @@ impl Hittable for Cuboid {
             texture_point: hit_point,
             normal,
             surface: self.surface,
+            // Cuboids report only the entry face (see the back-faces
+            // plan's Phase 3), so this is true in practice.
+            entering: dotp(normal, ray.delta) < 0.0,
         })
     }
 }
@@ -1605,6 +1619,7 @@ impl Hittable for Cylinder {
             texture_point: ray_location(ray, t),
             normal,
             surface: self.surface,
+            entering: dotp(normal, ray.delta) < 0.0,
         })
     }
 }
@@ -1749,6 +1764,7 @@ impl Hittable for Cone {
             texture_point: ray_location(ray, t),
             normal,
             surface: self.surface,
+            entering: dotp(normal, ray.delta) < 0.0,
         })
     }
 }
@@ -1906,6 +1922,7 @@ impl Hittable for Torus {
                 texture_point: ray_location(ray, t),
                 normal: self.normal_at(&lr, lr.point(t)),
                 surface: self.surface,
+                entering: dotp(self.normal_at(&lr, lr.point(t)), ray.delta) < 0.0,
             })
     }
 }
@@ -2166,7 +2183,7 @@ impl Csg {
 /// `Csg::hit_test` is this applied to the node's spans.
 pub fn first_span_hit(spans: &[Span], ray: &Vector) -> Option<RayHit> {
     for span in spans {
-        for end in [span.enter, span.exit] {
+        for (end, is_enter) in [(span.enter, true), (span.exit, false)] {
             if end.t > EPSILON && end.t.is_finite() {
                 return Some(RayHit {
                     distance: end.t,
@@ -2174,6 +2191,9 @@ pub fn first_span_hit(spans: &[Span], ray: &Vector) -> Option<RayHit> {
                     texture_point: end.point,
                     normal: end.normal,
                     surface: end.surface,
+                    // The span's own start is where the ray enters the
+                    // solid; its end is where it leaves.
+                    entering: is_enter,
                 });
             }
         }
@@ -3348,5 +3368,98 @@ mod span_tests {
         // the inner sphere, whose normal must face back toward -z.
         let hit = first_span_hit(&bowl, &r).unwrap();
         assert!(close_p(hit.normal, [0.0, 0.0, -1.0]));
+    }
+
+    // --- Back faces: the entering flag -------------------------------
+
+    fn entering(shape: &Shape, start: Point, delta: Point) -> bool {
+        shape.hit_test(&ray(start, normalizep(delta))).unwrap_or_else(|| panic!("expected a hit on {:?} from {:?} along {:?}", shape, start, delta)).entering
+    }
+
+    #[test]
+    fn entering_from_outside_and_inside_each_primitive() {
+        let out = [0.0, 0.0, -5.0];
+        let inside = [0.0, 0.0, 0.0];
+        let dz = [0.0, 0.0, 1.0];
+        // From outside, every solid is entered.
+        for s in [
+            sphere([0.0, 0.0, 0.0], 1.0),
+            cuboid([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]),
+            cylinder([0.0, 0.0, -1.0], [0.0, 0.0, 1.0], 1.0),
+            cone([0.0, 0.0, -1.0], [0.0, 0.0, 1.0], 1.0),
+        ] {
+            assert!(entering(&s, out, dz), "{:?}", s);
+        }
+        // From inside, the solids that report a back face report an
+        // exit. (Sphere and cuboid don't report one yet; see the
+        // back-faces plan's Phase 3.)
+        // (Off the axis: straight up the cone's axis runs into its apex,
+        // a degenerate point.)
+        for s in [
+            cylinder([0.0, 0.0, -1.0], [0.0, 0.0, 1.0], 1.0),
+            cone([0.0, 0.0, -1.0], [0.0, 0.0, 1.0], 1.0),
+        ] {
+            assert!(!entering(&s, inside, [0.2, 0.1, 1.0]), "{:?}", s);
+            assert!(!entering(&s, inside, [1.0, 0.3, 0.0]), "{:?}", s);
+        }
+        // A torus: in through the tube from outside, out from inside it.
+        let t = torus([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 2.0, 0.5);
+        assert!(entering(&t, [2.0, 0.0, -5.0], dz));
+        assert!(!entering(&t, [2.0, 0.0, 0.0], dz));
+        // A plane is a half-space: from the normal's side it's entered,
+        // from behind it's left.
+        let p = plane([0.0, 0.0, -1.0], [0.0, 0.0, 0.0]);
+        assert!(entering(&p, out, dz));
+        assert!(!entering(&p, [0.0, 0.0, 5.0], [0.0, 0.0, -1.0]));
+        // A triangle has no inside: always entering, from either side.
+        let tri = Shape::Triangle(Triangle {
+            vertices: [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: [[0.0, 0.0, -1.0]; 3],
+            surface: None,
+        });
+        assert!(entering(&tri, out, dz));
+        assert!(entering(&tri, [0.0, 0.0, 5.0], [0.0, 0.0, -1.0]));
+    }
+
+    #[test]
+    fn entering_survives_a_non_uniform_transform() {
+        let s = rotate_y(0.7, scale([3.0, 0.5, 1.5], cylinder([0.0, 0.0, -1.0], [0.0, 0.0, 1.0], 1.0)));
+        assert!(entering(&s, [0.0, 0.0, -20.0], [0.0, 0.0, 1.0]));
+        assert!(!entering(&s, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]));
+        assert!(!entering(&s, [0.0, 0.0, 0.0], [0.3, 0.2, -1.0]));
+        // A triangle stays "entering" through a transform, even from
+        // behind, where its transformed normal faces away.
+        let tri = scale([2.0, 1.0, 1.0], Shape::Triangle(Triangle {
+            vertices: [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: [[0.0, 0.0, -1.0]; 3],
+            surface: None,
+        }));
+        assert!(entering(&tri, [0.0, 0.0, 5.0], [0.0, 0.0, -1.0]));
+    }
+
+    #[test]
+    fn entering_on_csg_follows_the_span_endpoint() {
+        // A tube: cylinder minus a thinner cylinder. From outside the ray
+        // enters the outer wall; from inside the wall material it leaves
+        // through the inner wall (a cut face); from the hollow middle it
+        // enters the wall again.
+        let tube = difference(
+            cylinder([0.0, 0.0, -1.0], [0.0, 0.0, 1.0], 1.0),
+            cylinder([0.0, 0.0, -2.0], [0.0, 0.0, 2.0], 0.8),
+        );
+        let dx = [1.0, 0.0, 0.0];
+        assert!(entering(&tube, [-5.0, 0.0, 0.0], dx));
+        assert!(!entering(&tube, [-0.9, 0.0, 0.0], dx));
+        assert!(entering(&tube, [0.0, 0.0, 0.0], dx));
+        assert!(!entering(&tube, [0.9, 0.0, 0.0], dx));
+        // And the flag agrees with the geometric test everywhere.
+        let mut rng = Rng(0xbf);
+        for _ in 0..500 {
+            let start = [rng.in_range(-2.0, 2.0), rng.in_range(-2.0, 2.0), rng.in_range(-2.0, 2.0)];
+            let dir = normalizep([rng.in_range(-1.0, 1.0), rng.in_range(-1.0, 1.0), rng.in_range(-1.0, 1.0)]);
+            if let Some(h) = tube.hit_test(&ray(start, dir)) {
+                assert_eq!(h.entering, dotp(h.normal, dir) < 0.0, "from {:?} along {:?}", start, dir);
+            }
+        }
     }
 }

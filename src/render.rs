@@ -804,6 +804,13 @@ pub struct RayHit {
     /// construction); `shade_pixel` carries a defensive hot-pink
     /// fallback for malformed input as a safety net.
     pub surface: Option<Surface>,
+    /// Whether the ray is entering the solid here (the geometric normal
+    /// faces the ray) rather than leaving it. Triangles have no inside
+    /// and always enter. Shading turns the normal toward the ray either
+    /// way; transparency and shadows use this to apply a transparent
+    /// surface once per object, on entry (see "Back faces: implementation
+    /// plan" in CLAUDE.md).
+    pub entering: bool,
 }
 
 impl PartialOrd for RayHit {
@@ -926,6 +933,19 @@ fn shadow_ray_walk(origin: Point, target: &Point, scene: &Scene) -> Option<(Vect
 
         match scene.root.hit_test(&segment) {
             Some(hit) => {
+                // Back faces, phase 2: only entering crossings shade.
+                // Stepping past an exit keeps one factor of `T` per
+                // transparent object, and lets a light inside a small
+                // closed marker or shade escape it, as before.
+                if !hit.entering {
+                    let dist_from_origin = lenp(subp(hit.hit_point, ray.start));
+                    if dist_from_origin > distance - EPSILON {
+                        break;
+                    }
+                    cursor = hit.hit_point;
+                    continue;
+                }
+
                 // Distance of this hit measured from `origin` along
                 // the (unit-length) ray direction. Every hit point
                 // lies on the original ray line, so this is just the
@@ -1262,13 +1282,23 @@ struct Depth {
     reflect: u32,
     transmit: u32,
     indirect: u32,
+    /// Exits through transparent surfaces passed so far (see
+    /// `shade_pixel`'s pass-through). Counted apart from `transmit`, so
+    /// a stack of N glass objects spends N transmissions, not 2N, and
+    /// capped at `PASS_THROUGH_LIMIT` against degenerate geometry.
+    pass: u32,
 }
+
+/// The most transparent exits one ray may pass through before an exit
+/// is shaded like any other surface (a guard against degenerate
+/// geometry, not a quality knob).
+const PASS_THROUGH_LIMIT: u32 = 64;
 
 impl Depth {
     /// The starting budget for a primary (camera) ray: no reflection,
     /// transmission, or indirect bounces spent yet.
     fn zero() -> Depth {
-        Depth { reflect: 0, transmit: 0, indirect: 0 }
+        Depth { reflect: 0, transmit: 0, indirect: 0, pass: 0 }
     }
 }
 
@@ -1323,6 +1353,33 @@ fn shade_pixel(
     // it past validation. Every subsequent reference to surface
     // fields goes through this local rather than `hit.surface`.
     let surface = hit.surface.unwrap_or(MISSING_SURFACE);
+
+    // Back faces, phase 2: a transparent surface's appearance (its blend,
+    // highlight and reflection) applies once per object, where the ray
+    // enters. Where it leaves, the ray just carries on in the same
+    // direction, so a ray through a glass cylinder or CSG glass is
+    // blended once, as through a sphere, rather than once per wall it
+    // crosses.
+    if !hit.entering
+        && surface.transparency > EPSILON
+        && !surface.metallic
+        && depth.pass < PASS_THROUGH_LIMIT
+    {
+        return ray_color(
+            &Vector { start: hit.hit_point, delta: ray.delta },
+            scene,
+            lights,
+            Depth { pass: depth.pass + 1, ..depth },
+            light_coord,
+            indirect_coord,
+        );
+    }
+
+    // Back faces, phase 1: shade with the normal turned toward the ray,
+    // so a surface seen from behind or from inside a solid is lit like
+    // one seen from the front. The reflection keeps `hit.normal`: the
+    // formula uses the normal twice, so its sign cancels.
+    let normal = if dotp(hit.normal, ray.delta) > 0.0 { negp(hit.normal) } else { hit.normal };
 
     let scolor = if let Some(pigment) = surface.pigment {
         pigment.color_at(hit.texture_point)
@@ -1486,10 +1543,10 @@ fn shade_pixel(
             // The local z = up is the surface's outward normal in
             // world space; the local x and y span the tangent
             // plane.
-            let (basis_u, basis_v) = sampler::hemisphere_basis(hit.normal);
+            let (basis_u, basis_v) = sampler::hemisphere_basis(normal);
             let dir = addp(
                 addp(scalep(basis_u, lx), scalep(basis_v, ly)),
-                scalep(hit.normal, lz),
+                scalep(normal, lz),
             );
 
             // Cast the bounce ray. Self-intersection: every
@@ -1544,7 +1601,7 @@ fn shade_pixel(
     let mut light: LinearColor = [0.0, 0.0, 0.0];
     for l in lights {
         if let Some((lv, transmittance)) = light_vector(&hit.hit_point, scene, l, light_coord) {
-            let lambert = dotp(hit.normal, negp(lv.delta));
+            let lambert = dotp(normal, negp(lv.delta));
             // A light behind the surface contributes nothing. Without
             // this check the Lambert factor goes negative and darkens
             // the surface below its ambient level, and the specular
@@ -1561,7 +1618,7 @@ fn shade_pixel(
             // `normalize(ray.delta + lv.delta)`, since both of those point
             // *away from* the light and viewer. The even exponent used to
             // hide the sign; clamping needs it the right way round.
-            let half_dot = -dotp(hit.normal, normalizep(addp(ray.delta, lv.delta)));
+            let half_dot = -dotp(normal, normalizep(addp(ray.delta, lv.delta)));
             let kspecular = f64::powf(half_dot.max(0.0), 50.0);
 
             // Per-light tint that scales every contribution by this
