@@ -3019,6 +3019,25 @@ Approximate order of recent commits, oldest first:
         Punchy compresses.
     - The lights are unchanged: raising exposure and brightening the
       lights are the same thing in linear light.
+65. **xmastree tuned: metallic ornaments and `:view {:exposure 1}`.**
+    The changes are in the scene only; the shared `xmas-lights` and
+    `xmas-ground` in `_pov.lisp` (also used by braids and train) are
+    unchanged.
+    - **Ornaments:** the balls used `pov-metal-c` (F_MetalC, reflection
+      0.5, not metallic). Reflecting the white ground and background at
+      0.5 washed every ball out to pastel pink, lilac and cream. A new
+      `surface-ornament` is F_MetalC with `:metallic true`, so each ball
+      reflects in its own colour and reads as a red, blue, gold or
+      yellow bauble, as in the xmastree.pov thumbnail. The hooks stay
+      `pov-metal-c` silver.
+      - Our `:metallic` also drops the diffuse term, so the red and blue
+        balls look a little flat; acceptable for now.
+    - **Exposure +1**, chosen by eye over 0, +0.5 and AgX Punchy +0.5:
+      under the default Reinhard (white 4) the ground and background
+      read mid-grey; at +1 they read white, closer to the reference.
+      The clip report shows 50% of pixels over 1.0 before the curve
+      (maximum 4.5), mostly the ground and sky, which Reinhard rolls off.
+    - Before/after: `Claude outputs/xmastree_tuned.png`.
 
 ## Pitfalls and conventions
 

@@ -68,6 +68,14 @@
 ; makeOrnamentByID pairs these pigments with F_MetalC.
 (def ornament-colors [pov-gold3 pov-red pov-silver3 pov-yellow pov-blue])
 
+; F_MetalC, flagged metallic (tuning pass). With plain pov-metal-c the
+; 0.5 reflection of the white ground and background washed every ball
+; out to pastel; as metals they reflect in their own colour and read as
+; red, blue and gold baubles, as in xmastree.pov's render.
+(defn surface-ornament [color]
+  (surface {:color (srgb color) :ambient 0.25 :light 0.5 :specular 0.8
+            :reflection 0.5 :metallic true}))
+
 ;; --------------------------------------------------------------------
 ;; Ornaments
 ;; --------------------------------------------------------------------
@@ -114,7 +122,7 @@
                                         (cylinder {:p0 [0 0 0] :p1 [0 0.6 0] :r 0.12})))
                            (cylinder {:p0 [0 0 0] :p1 [0 (+ 0.6 eps) 0] :r 0.1}))
                (group (ball-body style)))]
-    (group [(with-surface (pov-metal-c color) body)
+    (group [(with-surface (surface-ornament color) body)
             (translate [0 0.5 0] (ornament-hook has-cap))])))
 
 ; trainorn.inc's frame in yellow_wood (`make-frame` in _trainorn.lisp).
@@ -305,6 +313,9 @@
      ; direction 2*z (zoom 2).
      :camera        (camera-looking-at [46 26.4 24] [-14 7 0] [0 1 0] 2.0)
      :background    pov-white
+     ; +1 stop, chosen by eye: the ground and background read white
+     ; rather than grey under the default Reinhard (white 4) roll-off.
+     :view          {:exposure 1}
      :reflect-limit 2
      ; The default 4 samples per pixel leaves the soft shadows of the
      ; thin bead chains grainy: the direction to the area light changes

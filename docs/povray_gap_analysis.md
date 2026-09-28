@@ -77,8 +77,9 @@ plans.
   tuning includes its `:view` exposure.
 - **Tuned: cpot, texaco and ornament** (CLAUDE.md entries 60–63),
   after the reflection fix, back faces phases 1–2 and POV-style
-  transparency layering. nba tuned too (entry 64: AgX Punchy, +1.5).
-  Still to tune: redball, xmastree, braids and train.
+  transparency layering. nba tuned too (entry 64: AgX Punchy, +1.5),
+  and xmastree (entry 65: metallic ornaments, +1).
+  Still to tune: redball, braids and train.
 - **Next: the rest of the tuning pass, before snowman:** lighting
   balance and surfaces, judged by eye. Snowman waits until the current
   images look right.
