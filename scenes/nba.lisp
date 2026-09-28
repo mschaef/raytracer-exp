@@ -32,6 +32,12 @@
      ; to right = +x, up = +z.
      :camera     (camera-looking-at [0 8 0] [0 0 0] [0 0 1] 1.0)
      :background pov-black
+     ; AgX Punchy at +1.5 stops, chosen by eye over clip (which matches
+     ; nba.tga's yellow pines only because clipping shifts orange toward
+     ; yellow) and Reinhard. The four lights push much of the image past
+     ; 1.0; Punchy rolls it off: pale pine, strong orange, near-white
+     ; squares.
+     :view       {:curve :agx-punchy :exposure 1.5}
      :objects
      [(light-white [4 5 4])
       (light-white [4 5 -4])

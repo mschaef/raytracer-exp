@@ -2991,6 +2991,35 @@ Approximate order of recent commits, oldest first:
     - **Tests:** 117 unit, 1 main and 87 suite tests pass. Result sheet:
       `tuning_cpot_texaco_ornament.png`.
 
+64. **nba tuned: `:view {:curve :agx-punchy :exposure 1.5}`.** The
+    change is in the scene only.
+    - **Compared with `nba.tga`** (medians of each block and of a white
+      square):
+      - The reference has yellow pines (255, 242, 139) and (255, 221,
+        123), an orange right block (225, 111, 28), and pure white
+        squares.
+      - The default (Reinhard white 4, exposure 0) gave muted peach
+        woods and grey squares (199).
+    - **Why the reference is yellow:** POV lit the woods in display
+      space with four lights (colour × about 1.8) and clipped each
+      channel. The red saturated and the green caught up, turning orange
+      into yellow.
+      - Only `:clip` at +0.75 reproduces it: (255, 249, 173) and (255,
+        228, 139), with 53% of pixels clipped.
+      - Every hue-preserving curve shows the woods' underlying peach and
+        orange instead: hue-clip, Reinhard at white 1.5, 2 and 3 with
+        +1, and AgX Punchy.
+    - **Mike chose AgX Punchy at +1.5** from a sheet of the reference,
+      clip +0.75, Reinhard white 2 +1, Punchy +1.5 and the default
+      (`nba_tuning_options.png`). The result is pale pine, a strong
+      orange right block, and near-white squares (228) with highlights
+      rolled off rather than clipped.
+      - The clip report says 64% of pixels are over 1.0 before the curve
+        (maximum 5.3). That's expected with four lights, and it's what
+        Punchy compresses.
+    - The lights are unchanged: raising exposure and brightening the
+      lights are the same thing in linear light.
+
 ## Pitfalls and conventions
 
 These are the things that have bitten or might bite someone working on the
