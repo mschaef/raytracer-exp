@@ -20,6 +20,13 @@
      ; POV's default camera shape: zoom 1.
      :camera     (pov-camera [0 0 -3] [0 0 0])
      :background pov-black
+     ; Hue-preserving clip, chosen by eye (tuning pass). The backdrop's
+     ; ambient 1 makes it exactly 1.0, which the default Reinhard (white
+     ; 4) greys to about 0.75 on screen and which clips to white here,
+     ; as in POV. The highlight, about 1.6, keeps its green tint instead
+     ; of rolling off to a grey smudge. (red.tga has a black backdrop,
+     ; which red.pov's plane contradicts; this follows red.pov.)
+     :view       {:curve :hue-clip}
      :objects
      [(light-white [4 4 -4])
       (sphere {:center [0 0 0] :r 1

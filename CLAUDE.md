@@ -3038,6 +3038,28 @@ Approximate order of recent commits, oldest first:
       The clip report shows 50% of pixels over 1.0 before the curve
       (maximum 4.5), mostly the ground and sky, which Reinhard rolls off.
     - Before/after: `Claude outputs/xmastree_tuned.png`.
+66. **redball, braids and train tuned; the tuning pass is complete.**
+    Each change is a `:view` in the scene only. Before/after:
+    `Claude outputs/redball_braids_train_tuned.png`.
+    - **redball: `{:curve :hue-clip}`.** The backdrop's ambient 1 makes
+      it exactly 1.0, which the default Reinhard (white 4) greyed to
+      about 0.75 on screen; hue-clip leaves it white, as in POV, and
+      the ball's highlight (about 1.6) keeps a green tint.
+      - `red.tga` has a black backdrop, which contradicts `red.pov`'s
+        ambient-1 white plane; the port follows `red.pov`.
+      - `brilliance 5` and `roughness 1/100` still aren't modelled
+        (the specular exponent is fixed at 50), so the ball is lighter
+        with a broader highlight than `red.tga`'s.
+    - **braids: `{:curve :agx-punchy :exposure 2}`.** The beads are pure
+      blue lit past 1.0; Reinhard, clip and hue-clip all flattened the
+      ropes into a solid blue band. Punchy rolls the blue off toward
+      azure, so the bead shading and twist show, and +2 brings the
+      ground near white.
+    - **train: `{:exposure 1.5}`**, so the ground reads near-white
+      rather than mid-grey.
+    - The three scenes sharing `xmas-lights` ended up at different
+      exposures (+1, +2, +1.5), chosen by eye: they frame different
+      parts of the spotlight's pool.
 
 ## Pitfalls and conventions
 

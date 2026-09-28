@@ -16,5 +16,8 @@
      ; location <1,1,1> * 10, look_at <0,0,0>, direction 2*z.
      :camera     (camera-looking-at [10 10 10] [0 0 0] [0 1 0] 2.0)
      :background pov-white
+     ; +1.5 stops, chosen by eye (tuning pass): the ground and background
+     ; read near-white instead of mid-grey under the default Reinhard.
+     :view       {:exposure 1.5}
      :objects    (concat (xmas-lights false)
                          [(translate [0 2 0] pov-compass) xmas-ground])}))

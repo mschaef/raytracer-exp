@@ -37,6 +37,11 @@
      ; gAngle 2: location <0,3,0> + 5, look_at <0,3,0>, direction 2*z.
      :camera      (camera-looking-at [5 8 5] [0 3 0] [0 1 0] 2.0)
      :background  pov-white
+     ; AgX Punchy at +2 stops, chosen by eye (tuning pass). The beads are
+     ; pure blue lit past 1.0, so Reinhard or clip flattens the ropes to
+     ; a solid blue band; Punchy rolls the blue off toward azure and the
+     ; bead shading and twist show. +2 brings the ground close to white.
+     :view        {:curve :agx-punchy :exposure 2}
      ; As in xmastree: the area light needs more than the default 4
      ; samples per pixel for clean soft shadows.
      :min-samples 16
