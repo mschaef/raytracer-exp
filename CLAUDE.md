@@ -697,7 +697,7 @@ Approximate order of recent commits, oldest first:
     in `let` and `fn`), `builtins.rs` (arithmetic + comparison with
     int/float promotion, vector and map ops, predicates, `assert` /
     `assert=`), `error.rs` (position-tagged panics via `sdl_panic!`;
-    see entries 78 and 80 for how the binaries report them).
+    see entry 78 for how the binaries report them).
     A small `sdl_run` binary in `src/bin/` evaluates ad-hoc scripts.
     Verification is a per-file test convention departing from the
     rest of the codebase: each `tests/sdl/<topic>.lisp` script becomes
@@ -3048,8 +3048,7 @@ Approximate order of recent commits, oldest first:
       about 0.75 on screen; hue-clip leaves it white, as in POV, and
       the ball's highlight (about 1.6) keeps a green tint.
       - `red.tga` has a black backdrop, which contradicts `red.pov`'s
-        ambient-1 white plane; the port follows `red.pov` (confirmed by
-        Mike, entry 81).
+        ambient-1 white plane; the port follows `red.pov`.
       - `brilliance 5` and `roughness 1/100` still aren't modelled
         (the specular exponent is fixed at 50), so the ball is lighter
         with a broader highlight than `red.tga`'s.
@@ -3550,204 +3549,6 @@ Approximate order of recent commits, oldest first:
       (one node, and hits match the unfolded chain for surfaced and
       unsurfaced leaves) and `transforms_separated_by_other_nodes_stay_separate`.
 
-80. **SDL errors report the SDL call stack, and optionally the Rust
-    backtrace.** A script error now prints the message followed by the
-    calls and loads that led to it, innermost first:
-
-    ```
-    eval error at helpers.lisp:2:4: * expected an integer, got "two" (string)
-      in scale-it, called at helpers.lisp:5:17
-      in fn defined at helpers.lisp:5:8, called at helpers.lisp:5:4
-      in map, called at helpers.lisp:5:4
-      in build, called at main_scene.lisp:3:13
-    ```
-
-    - `src/sdl/trace.rs`: a thread-local stack of frames. `apply_function`
-      pushes one per call (the `Rc<Function>` and the call-site
-      position) and `eval_load` one per `(load ...)`; a guard pops it on
-      return or unwind. Interpreted functions now carry the position of
-      their `fn` form (`FunctionKind::Interpreted::pos`), which names
-      anonymous functions.
-    - `catch_errors`' panic hook copies the stack (`trace::snapshot`)
-      when an SDL error panics, before unwinding pops it. It now returns
-      `Err(SdlFailure { message, trace, rust_backtrace })`; `Display` is
-      the full report, which `raytracer` and `sdl_run` print.
-    - The report leaves out the innermost frame when it's a native
-      function (the one that raised the error, at the message's
-      position), collapses runs of identical lines into one with a count
-      (`in down, called at deep.lisp:1:44 (40 times)`), and shows at
-      most 20 lines, the innermost and outermost 10.
-    - Errors inside a `(load ...)`ed file now show the loading file.
-      Only loads still running appear: a function defined in a loaded
-      file and called later shows its call chain, not the load.
-    - Desugared forms (`when`, `cond`, `->`, `->>`, `for`, destructuring
-      `let`) all report real positions. `for` shows its expansion as a
-      `mapcat` frame and an anonymous `fn` at the `for`'s position.
-    - `SDL_RUST_BACKTRACE=1` (any value but `0` or empty) appends the
-      Rust backtrace, captured in the hook, after the SDL stack; it
-      starts with a few frames of the panic machinery itself.
-    - A panic that isn't an SDL error (a renderer bug) still gets the
-      default report, now followed by the SDL call stack if a script
-      was running.
-    - Cost: scene loading about 10% slower on the heaviest scripts
-      (xmastree 500 -> 550 ms, braids 80 -> 87 ms); rendering unchanged,
-      all 39 scenes byte-identical at 48 px.
-    - Tests `catch_errors_reports_the_sdl_call_stack` (nested calls,
-      `map`, an anonymous `fn`, a load, and no stale frames after an
-      error), `catch_errors_shortens_recursive_call_stacks` and
-      `catch_errors_adds_the_rust_backtrace_on_request`.
-
-81. **Shared metal presets take metals.inc's full finishes; redball's
-    backdrop settled.** Two decisions from the backlog, both Mike's.
-    - `pov-metal-a`, `-c` and `-e` in `_pov.lisp` are now F_MetalA, C
-      and E in full: `:metallic true`, `:brilliance` 2 / 4 / 6 and
-      `:shininess` 20 / 80 / 120 (1/roughness), on top of the ambient,
-      diffuse, specular and reflection they had. xmastree's
-      `surface-ornament`, which already spelled out full F_MetalC
-      (entry 65), is now `(pov-metal-c color)`; renders byte-identically.
-    - What changed: texaco's bowl (F_MetalC red) now reflects in red,
-      so the star's reflections in it are red, as in `texaco.gif`,
-      instead of white-pink; the bowl reads a little darker than the
-      reference. xmastree's trunk and finial (T_Brass_3E) are brass
-      rather than pale grey, and the hooks (T_Silver_3C) reflect in
-      their own colour. `pov-metal-a` has no users (texaco's star was
-      tuned away from it in entry 63). No scene was retuned.
-    - Every other scene renders byte-identically.
-    - redball keeps `red.pov`'s white self-lit (ambient 1) plane rather
-      than `red.tga`'s black backdrop; no change.
-    - `Claude outputs/metal_presets_before_after.png`.
-
-82. **Scenes with area lights default to 8 samples minimum.** With a
-    minimum of 4, the adaptive sampler sometimes stopped where four
-    samples of a soft shadow happened to agree (entry 76 found it in
-    the snowman room and set 8 by hand there).
-    - `builtin_scene` collects the scene's lights; if any is an area
-      light (`LightKind::Area` or `Quad`), `:min-samples` defaults to
-      `AREA_LIGHT_MIN_SAMPLES` (8) instead of 4. An explicit
-      `:min-samples` always wins, and the maximum is unchanged (32).
-    - Only `area_light_test` and `soft_shadow_test` change: every other
-      scene with an area light (snowman_room, cornell_box, gi_test)
-      sets its own minimum. Against a 256-sample reference at 200 px:
-      area_light_test's RMS error 0.97 -> 0.42 levels at the same time
-      (1.47 s -> 1.48 s); soft_shadow_test 0.91 -> 0.60, 9% slower.
-    - Every other scene renders byte-identically.
-    - Test `area_lights_raise_the_default_min_samples` (point light 4;
-      area light 8, also inside a transformed group; explicit values
-      win).
-83. **Contribution cutoff (POV-Ray's `adc_bailout`).** Reflection and
-    transmission rays whose weight in the pixel would fall below
-    `Scene::contribution_cutoff` aren't traced and contribute black.
-    - `Depth` carries `weight`: 1 for a camera ray, times the
-      reflection coefficient at each reflection (times the surface
-      colour's largest channel for a metal, which tints what it
-      reflects) and the largest channel of `pass_tint` at each
-      transmission. Pass-through exits and indirect bounces leave it
-      unchanged (Russian roulette already ends indirect paths), which
-      keeps the cutoff conservative.
-    - A skipped transmission shows black, but the surface keeps its
-      transparency: its body is still weighted `1 - t`, as in POV. (At
-      `transmit_limit`, by contrast, a surface renders opaque.)
-    - SDL `:contribution-cutoff`, default `DEFAULT_CONTRIBUTION_CUTOFF`
-      = 1/255 (POV's default); 0 turns it off; negative is an error.
-    - **It changes nothing at the current recursion limits.** With the
-      cutoff at 0 every scene is byte-identical to before (checked);
-      at 1/255 every scene is still byte-identical at 64 px, and
-      texaco, cpot, snowman_avatar and transparency_test at 160 px,
-      with timings within noise. Reflection depth defaults to 2 (3 at
-      most in any scene) and transmission to 8, so a weight only falls
-      below 1/255 after two reflections of under 6% each or eight
-      passes through glass passing under 50%; the depth limits stop the
-      trees first.
-    - cpot with `:reflect-limit 5` (POV's default `max_trace_level`):
-      the cutoff saves 1.4% (7.06 -> 6.96 s at 200 px), differing by at
-      most 1 level in 89 of 40,000 pixels. Raising the limit from 2 to
-      5 costs cpot only 8% to begin with, so its ray trees aren't where
-      its time goes; the backlog's expectation of a cpot speedup was
-      wrong. What the cutoff buys is that deeper limits are safe to
-      set.
-    - Tests `contribution_cutoff_tests` (a skipped reflection equals no
-      reflection; a skipped transmission equals a black background;
-      weights multiply along the path) and `scene_contribution_cutoff`
-      (default, 0, negative rejected).
-
-84. **Profiling; shadow rays get a fast probe.** Profiled cpot and
-    snowman_room with callgrind (no `perf` in the cloud workspace;
-    64 px, the sequential stand-in `rayon`, a debuginfo release build).
-    - **Where the time went:** shadow rays (`light_ray`) were 62% of
-      cpot's instructions and 74% of the room's; CSG span computation
-      (`Csg::spans`, mostly under shadow rays) 44% and 26%; malloc/free
-      about 8% in cpot (span lists). The shadow walk asked for the
-      *nearest* hit at every step, with no distance limit.
-    - **`Shape::shadow_probe(ray, t_max, inherited)`** answers `Clear`
-      (no primitive's first crossing is in range), `Blocked` (an
-      entering crossing of an opaque surface is in range) or `Unsure`
-      (a transparent or filtering surface, or an exit, is in range). It
-      returns at the first opaque surface, skips bounding boxes that
-      start beyond `t_max`, and carries the `Surfaced` default down.
-      `shadow_ray_walk` asks it first and only runs the ordered walk
-      (now `ordered_shadow_walk`) for `Unsure`.
-    - **Speed** (128 px, best of 3, sequential): snowman_room -27.9%,
-      cpot -24.5%, nba -24.6%, braids -21.2%, snowman_avatar -17.7%,
-      ornament -16.4%, train -16.2%, snowman_room_props -13.7%,
-      snowman_sphere -12.0%, xmastree -9.4%, texaco -2.9%. Instructions
-      at 64 px: cpot 7.02 -> 5.79 billion, room 14.04 -> 10.46.
-    - **A bug it fixes:** the walk ignores crossings within `EPSILON`
-      of its last step, so an opaque surface coincident with a
-      transparent one could be stepped over and let light through.
-      cpot's coffee has the same radius as its cup's inner wall, and
-      the room mirror's silver shares faces with its glass box. The
-      probe blocks those rays, so cpot's cups are now shadowed by
-      their coffee (11,413 of 147,456 pixels change at 384 px;
-      `Claude outputs/shadow_probe_cpot.png`); snowman_room_props and
-      the room change in a handful of pixels. Every other scene is
-      byte-identical.
-    - **What's left** (64 px, after): shadow rays are still 55% (cpot)
-      and 65% (room), the probe itself 40-49%, much of it CSG: a CSG
-      hit test builds its full span lists (allocating) even when the
-      probe only needs "any crossing in range". Torus quartics are
-      about 10% of cpot; the room's bump normals and pigments (noise)
-      about 12-15%.
-    - Tests `shadow_probe_tests::probe_answers`,
-      `probe_agrees_with_the_walk` (1,200 light/point pairs around a
-      sphere, a glass sphere and a transformed CSG shell; every settled
-      answer matches the walk) and
-      `opaque_content_coincident_with_glass_casts_a_shadow`.
-
-85. **CSG and primitive spans: no heap allocation, smaller spans.**
-    Following entry 84's profile. All three changes leave every scene
-    byte-identical.
-    - **Candidate crossings on the stack.** Cylinders and cones gathered
-      their candidate crossings for `convex_span` in a new `Vec` on
-      every span query: 2.5 million allocations for cpot at 64 px. Now
-      a fixed `Candidates<N>` array.
-    - **Polynomial roots on the stack.** `solve_quadratic`, `solve_cubic`
-      and `solve_quartic`, `Torus::local_roots` and blob
-      `polynomial_roots` return `poly::Roots` (up to four values inline,
-      derefs to `[f64]`) instead of a `Vec`. Together with the
-      candidates, cpot's `malloc` cost fell from 176 million
-      instructions to 1.5 million.
-    - **Spans borrow their surface.** `SpanEnd<'a>` holds
-      `Option<&'a Surface>` instead of a 112-byte copy, so a `Span` is
-      128 bytes instead of 336; the surface is copied only into the
-      returned `RayHit`. `Shape::spans` takes `&'a self` and fills
-      `Vec<Span<'a>>`. The per-thread span buffer pool stores
-      `Vec<Span<'static>>` and relabels an *emptied* buffer to each
-      query's lifetime (`relabel`, one `unsafe` `from_raw_parts` with the
-      argument written next to it).
-    - Instructions at 64 px (callgrind): cpot 5.79 -> 5.12 -> 5.00
-      billion, room 10.46 -> 10.03 -> 9.91 (after entry 84; then after
-      the allocation changes; then after smaller spans).
-    - Render time at 128 px against entry 84 (best of 5, alternating
-      builds): texaco -14.9%, cpot -8.8% (-12.0% with the allocation
-      changes alone; the difference is within noise), snowman_room
-      -7.2%, snowman_avatar -5.6%, ornament -1.4%.
-    - **xmastree profile** (64 px): 46% is building the scene in the
-      SDL, a fixed ~0.5 s that's 1-2% of a full-size render (much of it
-      SipHash in environment lookups). The render half is BVH traversal:
-      `shadow_probe` 10.5%, `hit_test` 7.5%, `nearer_first_hit` 7.5% of
-      the whole, over 18,317 leaves. Its next gains would come from BVH
-      quality and layout, not CSG.
-
 
 ## Pitfalls and conventions
 
@@ -3885,7 +3686,6 @@ src/sdl/
   target.rs    SdlTarget — Arc-wrapped render-target value for the SDL.
   stdlib.lisp  In-language standard library, bundled via include_str!.
   error.rs     Error type with source positions; pretty printer.
-  trace.rs     The SDL call stack, for error reports (entry 80).
 ```
 
 The `render` module's public API is unchanged in shape; the SDL is a
@@ -4432,9 +4232,10 @@ Polish items, sized like Phase 3:
   bulb of a desk lamp). The cleanest path is probably an
   optional emissive surface on the disk, not a Light variant
   change.
-- ~~Guidance for `min_samples` when an area light is in the
-  scene.~~ Done (entry 82): a scene with an area light defaults to
-  `:min-samples 8`.
+- Guidance for `min_samples` when an area light is in the
+  scene. The default `min_samples = 4` may under-resolve
+  penumbra under some authoring choices; a per-scene
+  recommendation or auto-bump may earn its keep.
 
 ### Decisions still open
 
