@@ -404,6 +404,28 @@ fn scene_contribution_cutoff() {
     assert!(err.message.contains(":contribution-cutoff must be at least 0"), "{}", err.message);
 }
 
+/// `:ior` on a surface (refraction plan Phase 2, history entry 87):
+/// default 1 (no bending), any positive value accepted, including
+/// below 1 as POV allows; zero, negative and infinite values rejected.
+#[test]
+fn surface_ior() {
+    let ior = |extra: &str| {
+        let source = format!("(surface {{:color [1 1 1] :transparency 0.5 {}}})", extra);
+        sdl::catch_errors(|| match sdl::read_and_eval(&source, "ior_test.lisp") {
+            sdl::Value::Surface(s) => s.ior,
+            other => panic!("expected a surface, got {}", other),
+        })
+    };
+    assert_eq!(ior("").unwrap(), 1.0);
+    assert_eq!(ior(":ior 1.5").unwrap(), 1.5);
+    assert_eq!(ior(":ior 1").unwrap(), 1.0);
+    assert_eq!(ior(":ior 0.75").unwrap(), 0.75);
+    for bad in [":ior 0", ":ior -1.5"] {
+        let err = ior(bad).expect_err(bad);
+        assert!(err.message.contains("surface :ior must be a positive number"), "{}: {}", bad, err.message);
+    }
+}
+
 /// A panic that isn't an SDL error is a renderer bug, not a script
 /// mistake: `catch_errors` must let it carry on unwinding (with its
 /// usual report) rather than turn it into an error message.

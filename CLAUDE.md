@@ -3789,6 +3789,21 @@ Approximate order of recent commits, oldest first:
       its span's exit (same `t`, same normal), and a ray leaving from
       the surface sees nothing.
 
+87. **Refraction Phase 2: `:ior` as data.** `Surface::ior: f64`, the
+    index of refraction (POV's `ior`), default 1.0 = no bending. SDL
+    `(surface {... :ior 1.5})` accepts any positive, finite value;
+    below 1 is allowed, as in POV (Mike's decision: a less dense
+    medium, such as an air bubble in water). 0, negative and infinite
+    values are rejected like `:shininess` and `:brilliance`. Nothing
+    reads it yet; Phase 3 bends rays with it.
+    - `Surface` grows from 112 to 120 bytes (`RayHit` 200 -> 208);
+      spans borrow surfaces since entry 85, so they're unchanged at 128.
+    - Every `Surface` literal (the SDL binding, `MISSING_SURFACE`, test
+      helpers) sets it.
+    - Every scene byte-identical (40, including `back_faces_test`).
+    - Test `surface_ior` (default, 1.5, 1, 0.75 accepted; 0 and -1.5
+      rejected with a positioned error).
+
 
 ## Pitfalls and conventions
 
@@ -4986,9 +5001,11 @@ would escape through the far wall unbent.
 
 ### Phase 2 — `:ior` as data
 
-`Surface::ior` (default 1.0), SDL `(surface {... :ior 1.5})`, rejecting
-0 and negative values. Values below 1 are an open decision (below).
-Nothing reads it yet.
+Done (history entry 87).
+
+`Surface::ior` (default 1.0), SDL `(surface {... :ior 1.5})`, accepting
+any positive value (below 1 included, as in POV) and rejecting 0,
+negative and non-finite values. Nothing reads it yet.
 - **Acceptance:** every scene byte-identical.
 - Tests: the SDL binding (default, a value, a rejected value), and
   `surface?` / printing if they list fields.
@@ -5065,7 +5082,8 @@ directly into an opaque object it touches.
 
 ### Decisions still open
 
-- Whether `:ior` below 1 is allowed (POV allows it).
+- ~~Whether `:ior` below 1 is allowed.~~ Settled (entry 87): yes, any
+  positive value, as in POV.
 - Whether a totally internally reflected ray should also pick up the
   surface's own reflection tint. POV treats it as transmitted light
   redirected, so no.

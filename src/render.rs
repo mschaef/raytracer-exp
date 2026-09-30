@@ -87,6 +87,14 @@ pub struct Surface {
     /// the same way (history entry 71). `0.0` (the default) is no
     /// filter. Ignored, like `transparency`, on a metallic surface.
     pub filter: f64,
+    /// Index of refraction (POV-Ray's `ior`, which 3.7 puts in an
+    /// object's `interior`). `1.0`, the default, is no bending: the
+    /// transmitted ray goes straight on, as it did before refraction.
+    /// Any positive value is allowed, as in POV; below 1 models a
+    /// less dense medium, such as an air bubble in water. Only
+    /// meaningful on a see-through surface. Stored only, not yet used
+    /// (phase 2 of the refraction plan, history entry 87).
+    pub ior: f64,
     /// Metallic flag. `false` (the default for every pre-metallic
     /// scene) is an ordinary dielectric surface. When `true`, the
     /// mirror reflection and the specular highlight are both tinted
@@ -1404,6 +1412,7 @@ const MISSING_SURFACE: Surface = Surface {
     reflection: 0.0,
     transparency: 0.0,
     filter: 0.0,
+    ior: 1.0,
     metallic: false,
     shininess: 50.0,
     brilliance: 1.0,
@@ -2499,6 +2508,7 @@ mod light_tests {
             reflection: 0.0,
             transparency: 0.0,
             filter: 0.0,
+            ior: 1.0,
             metallic: false,
             shininess: 50.0,
             brilliance: 1.0,
@@ -2654,6 +2664,7 @@ mod contribution_cutoff_tests {
             reflection,
             transparency,
             filter: 0.0,
+            ior: 1.0,
             metallic: false,
             shininess: 50.0,
             brilliance: 1.0,
@@ -2764,6 +2775,7 @@ mod shadow_probe_tests {
             reflection: 0.0,
             transparency,
             filter,
+            ior: 1.0,
             metallic: false,
             shininess: 50.0,
             brilliance: 1.0,

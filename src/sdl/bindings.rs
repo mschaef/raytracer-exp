@@ -577,6 +577,10 @@ fn require_u32(v: &Value, ctx: &str, pos: &Position) -> u32 {
 /// `:transparency`, but what shows through (and the shadow cast) is
 /// tinted by the surface colour. `:transparency + :filter` is at most 1.
 ///
+/// `:ior` (default 1, any positive number) is the index of refraction
+/// (POV's `ior`). 1 is no bending. Stored only, until the refraction
+/// plan's Phase 3.
+///
 /// `:normal` tilts the shading normal with a pattern (POV's `normal { }`);
 /// see `build_normal`.
 fn builtin_surface(args: &[Value], pos: &Position) -> Value {
@@ -609,7 +613,8 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
     let metallic = maybe_key_bool(&map, "metallic", "surface", pos).unwrap_or(false);
     let shininess = maybe_key_number(&map, "shininess", "surface", pos).unwrap_or(50.0);
     let brilliance = maybe_key_number(&map, "brilliance", "surface", pos).unwrap_or(1.0);
-    for (key, value) in [("shininess", shininess), ("brilliance", brilliance)].iter() {
+    let ior = maybe_key_number(&map, "ior", "surface", pos).unwrap_or(1.0);
+    for (key, value) in [("shininess", shininess), ("brilliance", brilliance), ("ior", ior)].iter() {
         if !(*value > 0.0 && value.is_finite()) {
             sdl_panic!(pos.clone(), "surface :{} must be a positive number (got {})", key, value);
         }
@@ -624,6 +629,7 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
         reflection,
         transparency,
         filter,
+        ior,
         metallic,
         shininess,
         brilliance,
