@@ -169,8 +169,13 @@ fn load_scene(path: &Path) -> Scene {
     // cost being broken `(load ...)` resolution.
     let abs_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
+    // A mistake in the script (or anything it loads) prints the
+    // position-tagged message and exits, instead of a panic report.
     let env = sdl::default_env();
-    sdl::eval_source(&source, &abs_path.to_string_lossy(), &env);
+    if let Err(message) = sdl::catch_errors(|| sdl::eval_source(&source, &abs_path.to_string_lossy(), &env)) {
+        eprintln!("{}", message);
+        process::exit(1);
+    }
 
     let binding = binding_name_for(path);
     let value = env.borrow().lookup(&binding).unwrap_or_else(|| {

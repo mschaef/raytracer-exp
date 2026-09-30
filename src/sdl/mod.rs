@@ -38,7 +38,8 @@
 //!
 //! Errors are surfaced via panic with a source position, matching the
 //! rest of this codebase. The test harness in `tests/sdl_suite.rs`
-//! catches these via `std::panic::catch_unwind`.
+//! catches these via `std::panic::catch_unwind`; the binaries use
+//! [`catch_errors`], which turns them into a one-line message.
 
 pub mod ast;
 pub mod bindings;
@@ -55,8 +56,10 @@ pub use env::{EnvRef, Environment};
 pub use error::{Position, SdlError};
 pub use value::Value;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::panic;
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 
 thread_local! {
     /// Directory of the file currently being evaluated. Set by
@@ -105,6 +108,68 @@ impl Drop for CurrentDirGuard {
     fn drop(&mut self) {
         CURRENT_DIR.with(|c| *c.borrow_mut() = self.prev.take());
     }
+}
+
+thread_local! {
+    /// How many [`catch_errors`] calls are active on this thread.
+    /// While it's non-zero the panic hook stays quiet about SDL errors,
+    /// because the caller is about to report them itself.
+    static CATCHING: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Text of a panic payload, if it has any. `panic!("{}", ..)` gives a
+/// `String`; `panic!("literal")` gives a `&'static str`.
+fn payload_text(payload: &(dyn std::any::Any + Send)) -> Option<&str> {
+    payload
+        .downcast_ref::<String>()
+        .map(|s| s.as_str())
+        .or_else(|| payload.downcast_ref::<&'static str>().copied())
+}
+
+/// Run `f`, turning an SDL error (a mistake in a script) into
+/// `Err(message)`, where the message is the position-tagged text
+/// `sdl_panic!` built, e.g.
+/// `eval error at scenes/foo.lisp:12:5: + expected an integer, ...`.
+///
+/// Only SDL errors are caught. Any other panic is a bug in the
+/// renderer, so it keeps the default report (location and backtrace)
+/// and carries on unwinding.
+///
+/// A plain `catch_unwind` isn't enough: the panic hook prints the
+/// "thread 'main' panicked at ..." header and backtrace *before* the
+/// unwind reaches the catch. So this installs, once per process, a
+/// hook that skips SDL errors on threads inside `catch_errors` and
+/// hands everything else to the hook that was there before.
+pub fn catch_errors<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+    static INSTALL_HOOK: Once = Once::new();
+    INSTALL_HOOK.call_once(|| {
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            let quiet = CATCHING.with(|c| c.get()) > 0
+                && payload_text(info.payload()).map_or(false, error::is_sdl_error_message);
+            if !quiet {
+                previous(info);
+            }
+        }));
+    });
+
+    // Decrement on the way out, whether `f` returns or unwinds.
+    struct Catching;
+    impl Drop for Catching {
+        fn drop(&mut self) {
+            CATCHING.with(|c| c.set(c.get() - 1));
+        }
+    }
+    CATCHING.with(|c| c.set(c.get() + 1));
+    let result = {
+        let _catching = Catching;
+        panic::catch_unwind(panic::AssertUnwindSafe(f))
+    };
+
+    result.or_else(|payload| match payload_text(&*payload) {
+        Some(text) if error::is_sdl_error_message(text) => Err(text.to_string()),
+        _ => panic::resume_unwind(payload),
+    })
 }
 
 /// In-language standard library. Compiled into the binary so every

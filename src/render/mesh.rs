@@ -48,8 +48,16 @@ use crate::render::shapes::{Shape, Triangle};
 /// compute geometric face normals here and replicate them across each
 /// triangle's three vertex slots, which gives flat shading.
 ///
-/// Panics on I/O error, parse error, or malformed mesh data.
+/// Panics on I/O error, parse error, or malformed mesh data; see
+/// [`try_load_obj`] for a version that returns the load error.
 pub fn load_obj(path: impl AsRef<Path>, surface: Option<Surface>) -> Shape {
+    try_load_obj(path, surface).unwrap_or_else(|e| panic!("{}", e))
+}
+
+/// [`load_obj`], but a file that can't be read or parsed comes back as
+/// `Err(message)`, so the SDL binding can report it at the script's
+/// position.
+pub fn try_load_obj(path: impl AsRef<Path>, surface: Option<Surface>) -> Result<Shape, String> {
     let path_ref = path.as_ref();
 
     let load_options = tobj::LoadOptions {
@@ -65,7 +73,7 @@ pub fn load_obj(path: impl AsRef<Path>, surface: Option<Surface>) -> Shape {
     };
 
     let (models, _materials) = tobj::load_obj(path_ref, &load_options)
-        .unwrap_or_else(|e| panic!("Failed to load OBJ {:?}: {}", path_ref, e));
+        .map_err(|e| format!("Failed to load OBJ {:?}: {}", path_ref, e))?;
 
     let mut triangles: Vec<Shape> = Vec::new();
 
@@ -116,7 +124,7 @@ pub fn load_obj(path: impl AsRef<Path>, surface: Option<Surface>) -> Shape {
         }
     }
 
-    Shape::Group(triangles)
+    Ok(Shape::Group(triangles))
 }
 
 /// Pull the i-th 3-vector out of a flat `Vec<f32>` produced by tobj

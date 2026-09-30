@@ -696,7 +696,8 @@ Approximate order of recent commits, oldest first:
     function application with a recur loop, vector-pattern destructuring
     in `let` and `fn`), `builtins.rs` (arithmetic + comparison with
     int/float promotion, vector and map ops, predicates, `assert` /
-    `assert=`), `error.rs` (position-tagged panics via `sdl_panic!`).
+    `assert=`), `error.rs` (position-tagged panics via `sdl_panic!`;
+    see entry 78 for how the binaries report them).
     A small `sdl_run` binary in `src/bin/` evaluates ad-hoc scripts.
     Verification is a per-file test convention departing from the
     rest of the codebase: each `tests/sdl/<topic>.lisp` script becomes
@@ -3494,6 +3495,37 @@ Approximate order of recent commits, oldest first:
       and snowman_molding. Left out across them: refraction, the yard
       height field (PNG, and a missing yard.tga) and `image_map`
       pigments (commented out in sphere.pov).
+78. **SDL errors print one line instead of a panic report.** A mistake
+    in a scene script used to end with `thread 'main' panicked at
+    src/sdl/...`, the message, and a backtrace. `sdl_run` already
+    caught the panic, but the panic hook prints before the unwind
+    reaches the catch, so it showed the same report.
+    - `sdl::catch_errors(f) -> Result<T, String>` runs `f` and returns
+      an SDL error's position-tagged message as `Err`, e.g.
+      `eval error at scenes/foo.lisp:12:5: + expected an integer, ...`.
+      It installs a panic hook once per process that stays quiet about
+      SDL errors on a thread inside `catch_errors`, and passes
+      everything else to the previous hook.
+    - Only SDL errors are caught, recognised by the `read error at ` /
+      `eval error at ` prefix (`error::is_sdl_error_message`, next to
+      the `Display` impl that writes it). Any other panic is a renderer
+      bug: it keeps its full report and carries on unwinding.
+    - `main.rs` (`load_scene`) and `sdl_run` use it; both print the
+      message and exit with status 1. The test suite still uses
+      `catch_unwind` directly.
+    - Two script mistakes panicked in Rust code without a script
+      position, so they'd have counted as renderer bugs. Both are now
+      `sdl_panic!`s at the call: `load-obj` on a missing or unreadable
+      file (new `mesh::try_load_obj`, which `load_obj` wraps), and
+      `camera-looking-at` with the location equal to look-at or the
+      up-hint parallel to the view direction.
+    - An error in a `(load ...)`ed file names that file, not the file
+      that loaded it.
+    - Tests `catch_errors_returns_sdl_error_messages` and
+      `catch_errors_passes_other_panics_through`. Rendering is
+      unchanged: the 39 scenes with a scene binding render
+      byte-identically at 48 px.
+
 
 ## Pitfalls and conventions
 

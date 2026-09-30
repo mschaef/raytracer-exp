@@ -13,7 +13,8 @@
 //! Every AST node carries a [`Position`] tagging where it came from.
 //! Runtime errors panic with an [`SdlError`] formatted to include the
 //! position so failures are debuggable. The test harness catches the
-//! panic and reports the failing file.
+//! panic and reports the failing file; the binaries go through
+//! [`crate::sdl::catch_errors`], which prints just the message.
 
 use std::fmt;
 use std::rc::Rc;
@@ -87,13 +88,26 @@ impl SdlError {
     }
 }
 
+/// Prefixes the [`fmt::Display`] impl below puts on every SDL error.
+/// Kept next to it so the two can't drift apart.
+const READ_PREFIX: &str = "read error at ";
+const EVAL_PREFIX: &str = "eval error at ";
+
+/// True if `message` is a formatted [`SdlError`], i.e. the payload of
+/// an `sdl_panic!` or `sdl_read_panic!`. [`crate::sdl::catch_errors`]
+/// uses this to tell a mistake in a script (report it cleanly) from a
+/// bug in the renderer (keep the full panic report).
+pub fn is_sdl_error_message(message: &str) -> bool {
+    message.starts_with(READ_PREFIX) || message.starts_with(EVAL_PREFIX)
+}
+
 impl fmt::Display for SdlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let phase = match self.phase {
-            ErrorPhase::Read => "read error",
-            ErrorPhase::Eval => "eval error",
+            ErrorPhase::Read => READ_PREFIX,
+            ErrorPhase::Eval => EVAL_PREFIX,
         };
-        write!(f, "{} at {}: {}", phase, self.pos, self.message)
+        write!(f, "{}{}: {}", phase, self.pos, self.message)
     }
 }
 

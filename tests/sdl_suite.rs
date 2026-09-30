@@ -247,6 +247,50 @@ fn render_dispatch_save() {
 /// must `sdl-panic!` at scene-build time — `Shape::validate_surfaces`
 /// in the binding catches it before the scene is ever constructed.
 ///
+/// `sdl::catch_errors` is what `main` and `sdl_run` use to print a
+/// script error as one line instead of a panic report. It must hand
+/// back the position-tagged message for read and eval errors, and a
+/// normal result when nothing goes wrong.
+#[test]
+fn catch_errors_returns_sdl_error_messages() {
+    let eval = |source: &str| {
+        let env = sdl::default_env();
+        sdl::catch_errors(|| sdl::eval_source(source, "catch_errors_test.lisp", &env))
+    };
+    let cases: &[(&str, &str)] = &[
+        ("(def x 1)\n(+ x \"two\")", "eval error at catch_errors_test.lisp:2:2: + expected"),
+        ("(def x [1 2", "read error at catch_errors_test.lisp:1:8: unterminated vector"),
+        ("(load-obj \"no_such_mesh.obj\")", "load-obj: Failed to load OBJ"),
+        ("(camera-looking-at [0 5 0] [0 0 0] [0 1 0] 1.0)", "up-hint is parallel"),
+        ("(camera-looking-at [1 2 3] [1 2 3] [0 1 0] 1.0)", "are the same point"),
+    ];
+    for &(source, expected) in cases.iter() {
+        match eval(source) {
+            Ok(v) => panic!("{:?} should fail, got {}", source, v),
+            Err(message) => assert!(
+                message.contains(expected),
+                "{:?}: expected {:?} in {:?}",
+                source,
+                expected,
+                message
+            ),
+        }
+    }
+    assert!(matches!(eval("(+ 1 2)"), Ok(sdl::Value::Int(3))));
+}
+
+/// A panic that isn't an SDL error is a renderer bug, not a script
+/// mistake: `catch_errors` must let it carry on unwinding (with its
+/// usual report) rather than turn it into an error message.
+#[test]
+fn catch_errors_passes_other_panics_through() {
+    let outer = std::panic::catch_unwind(|| {
+        let _ = sdl::catch_errors(|| -> () { panic!("renderer bug") });
+    });
+    let payload = outer.expect_err("a non-SDL panic must propagate");
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&"renderer bug"));
+}
+
 /// The positive cases (unsurfaced leaves under a wrapper, mixed
 /// explicit and inherited surfaces) live in `tests/sdl/with_surface.lisp`
 /// and run through the `sdl_test!` harness. This test owns the

@@ -17,8 +17,8 @@
 //! ```
 //!
 //! Reads the file, evaluates every top-level form, and prints the
-//! value of the final form. Errors panic with a position-tagged
-//! message; the binary exits with status 1 in that case.
+//! value of the final form. A script error prints its position-tagged
+//! message and exits with status 1.
 
 use std::env;
 use std::fs;
@@ -40,19 +40,11 @@ fn main() {
             process::exit(1);
         }
     };
-    let result = std::panic::catch_unwind(|| sdl::read_and_eval(&source, path));
-    match result {
+    match sdl::catch_errors(|| sdl::read_and_eval(&source, path)) {
         Ok(Value::Nil) => {} // Don't print nil; it's noise for scripts run for side-effects.
         Ok(v) => println!("{}", v),
-        Err(e) => {
-            // The panic payload is a String produced by sdl_panic!.
-            if let Some(s) = e.downcast_ref::<String>() {
-                eprintln!("{}", s);
-            } else if let Some(s) = e.downcast_ref::<&'static str>() {
-                eprintln!("{}", s);
-            } else {
-                eprintln!("error: <non-string panic payload>");
-            }
+        Err(message) => {
+            eprintln!("{}", message);
             process::exit(1);
         }
     }

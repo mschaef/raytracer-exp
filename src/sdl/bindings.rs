@@ -37,8 +37,8 @@ use std::path::Path;
 use std::rc::Rc;
 
 use crate::render::color::LinearColor;
-use crate::render::geometry::{Point, lenp, normalizep, EPSILON};
-use crate::render::mesh::load_obj;
+use crate::render::geometry::{Point, crossp, lenp, normalizep, subp, EPSILON};
+use crate::render::mesh::try_load_obj;
 use crate::render::render;
 use crate::render::shapes::{
     bounded, bounded_with, bvh, difference, group, intersection, merge, rotate_axis,
@@ -1193,6 +1193,14 @@ fn builtin_camera_looking_at(args: &[Value], pos: &Position) -> Value {
     let look_at = require_point(&args[1], "camera-looking-at look-at", pos);
     let up_hint = require_point(&args[2], "camera-looking-at up-hint", pos);
     let zoom = require_number(&args[3], "camera-looking-at zoom", pos);
+    // Camera::looking_at panics on these without a script position.
+    let forward = subp(look_at, location);
+    if lenp(forward) < EPSILON {
+        sdl_panic!(pos, "camera-looking-at: location and look-at are the same point");
+    }
+    if lenp(crossp(up_hint, normalizep(forward))) < EPSILON {
+        sdl_panic!(pos, "camera-looking-at: up-hint is parallel to the view direction");
+    }
     Value::Camera(Camera::looking_at(location, look_at, up_hint, zoom))
 }
 
@@ -1486,7 +1494,8 @@ fn builtin_load_obj(args: &[Value], pos: &Position) -> Value {
         })
     };
 
-    Value::Shape(Rc::new(load_obj(&resolved, surface)))
+    let shape = try_load_obj(&resolved, surface).unwrap_or_else(|e| sdl_panic!(pos, "load-obj: {}", e));
+    Value::Shape(Rc::new(shape))
 }
 
 /// `(height-field {:image "file.tga" :water-level w :smooth b})` —
