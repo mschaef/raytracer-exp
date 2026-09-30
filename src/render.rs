@@ -17,6 +17,7 @@ pub mod output;
 pub mod sampler;
 pub mod poly;
 pub mod noise;
+pub mod normal;
 pub mod pigment;
 pub mod view;
 
@@ -27,6 +28,7 @@ use std::time::Instant;
 use shapes::Shape;
 use output::{RenderTarget, HeatmapTarget};
 use transform::Affine;
+use normal::NormalPattern;
 use pigment::LayeredPigment;
 
 use rayon::prelude::*;
@@ -105,6 +107,11 @@ pub struct Surface {
     /// `Surface` small and `Copy`; the leak is bounded by the number of
     /// pigmented surfaces a script creates.
     pub pigment: Option<&'static LayeredPigment>,
+    /// A normal perturbation (POV-Ray's `normal { bumps ... }`), built
+    /// and leaked like `pigment`. When set, it tilts the shading normal
+    /// at the hit's texture point, for lighting, reflection and indirect
+    /// bounces; the geometry is unchanged.
+    pub normal: Option<&'static NormalPattern>,
 }
 
 /// Per-variant data for a light source. Phase 1 of the "Light types:
@@ -1333,6 +1340,7 @@ const MISSING_SURFACE: Surface = Surface {
     shininess: 50.0,
     brilliance: 1.0,
     pigment: None,
+    normal: None,
 };
 
 /// The mirror reflection of the direction `d` (the way a ray travels)
@@ -1392,6 +1400,11 @@ fn shade_pixel(
     // one seen from the front. The reflection keeps `hit.normal`: the
     // formula uses the normal twice, so its sign cancels.
     let normal = if dotp(hit.normal, ray.delta) > 0.0 { negp(hit.normal) } else { hit.normal };
+    // Bump normals tilt the face-forward normal (history entry 70).
+    let normal = match surface.normal {
+        Some(bumps) => bumps.perturb(normal, hit.texture_point),
+        None => normal,
+    };
 
     let scolor = if let Some(pigment) = surface.pigment {
         pigment.color_at(hit.texture_point)
@@ -1408,7 +1421,9 @@ fn shade_pixel(
     let ambient: LinearColor = scale_linear_color(&scolor, surface.ambient);
 
     let reflected: LinearColor = if (surface.reflection > EPSILON) && (depth.reflect < scene.reflect_limit) {
-        let rvec = reflect(ray.delta, hit.normal);
+        // A bumped surface reflects about its tilted normal, as in
+        // POV-Ray; the sign of the normal cancels in the formula.
+        let rvec = reflect(ray.delta, if surface.normal.is_some() { normal } else { hit.normal });
 
         // Reuse the same `light_coord` and `indirect_coord` for
         // recursive rays rather than re-deriving them per bounce.
@@ -2365,6 +2380,7 @@ mod light_tests {
             shininess: 50.0,
             brilliance: 1.0,
             pigment: None,
+            normal: None,
         }
     }
 

@@ -2805,6 +2805,7 @@ mod span_tests {
             shininess: 50.0,
             brilliance: 1.0,
             pigment: None,
+            normal: None,
         }
     }
 

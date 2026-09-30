@@ -1396,3 +1396,45 @@ fn blob_renders_like_its_sphere() {
         .count();
     assert_eq!(diff, 0, "blob and sphere differ in {} channels", diff);
 }
+
+/// A `:normal` bump pattern makes an evenly lit sphere shade unevenly
+/// without changing its outline; with `:amount 0` it's the plain sphere.
+#[test]
+fn bump_normals_shade_but_keep_the_outline() {
+    let flat = lit_sphere("{:color [1 1 1] :ambient 0.05 :light 0.8}", "bump_none");
+    let zero = lit_sphere(
+        "{:color [1 1 1] :ambient 0.05 :light 0.8 :normal {:pattern :bumps :amount 0}}",
+        "bump_zero",
+    );
+    let bumped = lit_sphere(
+        "{:color [1 1 1] :ambient 0.05 :light 0.8
+          :normal {:pattern :wrinkles :amount 0.8 :transform (affine-scale [0.2 0.2 0.2])}}",
+        "bump_wrinkles",
+    );
+    assert_eq!(flat.as_raw(), zero.as_raw(), "amount 0 changes nothing");
+    let lit = |img: &image::RgbImage| img.as_raw().chunks(3).map(|p| p[0] > 0).collect::<Vec<_>>();
+    assert_eq!(lit(&flat), lit(&bumped), "same outline");
+    let changed = flat.as_raw().iter().zip(bumped.as_raw()).filter(|(a, b)| (**a as i32 - **b as i32).abs() > 8).count();
+    assert!(changed > 30, "the bumps show: {} channels changed", changed);
+}
+
+#[test]
+fn normal_rejects_bad_keys() {
+    let cases = [
+        ("(surface {:color [1 1 1] :normal {:pattern :dents :amount 1}})", ":bumps or :wrinkles"),
+        ("(surface {:color [1 1 1] :normal {:pattern :bumps}})", ":amount"),
+        ("(surface {:color [1 1 1] :normal {:amount 1}})", "missing :pattern"),
+        ("(surface {:color [1 1 1] :normal {:pattern :bumps :amount 1 :size 2}})", "unknown key :size"),
+    ];
+    for (source, expected) in cases.iter() {
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(source, "normal_bad.lisp", &env);
+        }));
+        let message = match result {
+            Ok(_) => panic!("must reject {}", source),
+            Err(p) => p.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        assert!(message.contains(expected), "{}: {}", source, message);
+    }
+}

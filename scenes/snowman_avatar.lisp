@@ -5,8 +5,7 @@
 ; The original renders at 65x75 (avatar.jpg); this keeps the shape at
 ; 520x600 (its :size); SIZE overrides.
 ;
-; See _snowman.lisp for the stand-ins still in place (bump normals,
-; filter colours).
+; See _snowman.lisp for the stand-in still in place (filter colours).
 
 (load "_snowman.lisp")
 

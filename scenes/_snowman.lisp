@@ -8,7 +8,6 @@
 ; ports; see _pov.lisp).
 ;
 ; Stand-ins still in place (see "Snowman port: plan" in CLAUDE.md):
-; - The `Dirty` and `Dirtier` bump normals are left out (phase 3).
 ; - `rgbf` filter colours are plain colours: every filter here is 0
 ;   apart from the mirror glass (phase 4).
 
@@ -18,27 +17,40 @@
 ;; Textures
 ;; --------------------------------------------------------------------
 
+; The two bump normals: Dirty (bumps 0.3, scale 0.1, turbulence 1) and
+; Dirtier (bumps 0.7, scale 0.15, turbulence 1.5).
+(def dirty
+  {:pattern :bumps :amount 0.3 :turbulence 1 :transform (affine-scale [0.1 0.1 0.1])})
+(def dirtier
+  {:pattern :bumps :amount 0.7 :turbulence 1.5 :transform (affine-scale [0.15 0.15 0.15])})
+
 ; MatteFinish: ambient 0.1, diffuse 1.5, specular 0.2 (POV's default
-; roughness 0.05 is :shininess 20).
+; roughness 0.05 is :shininess 20). `snow-matte-bumped` adds a bump
+; normal.
+(def matte-finish {:ambient 0.1 :light 1.5 :specular 0.2 :shininess 20})
 (defn snow-matte [color]
-  (surface {:color color :ambient 0.1 :light 1.5 :specular 0.2 :shininess 20}))
+  (surface (assoc matte-finish :color color)))
+(defn snow-matte-bumped [color normal]
+  (surface (assoc (assoc matte-finish :color color) :normal normal)))
 
 ; MetallicFinish: MatteFinish plus phong 0.9, phong_size 120,
 ; reflection 0.5 and metallic. The renderer has one highlight, so the
 ; phong highlight (much the stronger) stands in for both.
+(def metallic-finish {:ambient 0.1 :light 1.5 :specular 0.9 :shininess 120
+                      :reflection 0.5 :metallic true})
 (defn snow-metallic [color]
-  (surface {:color color :ambient 0.1 :light 1.5 :specular 0.9 :shininess 120
-            :reflection 0.5 :metallic true}))
+  (surface (assoc metallic-finish :color color)))
 
 (def matte-white  (snow-matte pov-white))
 (def matte-black  (snow-matte pov-black))
-(def matte-orange (snow-matte [1.0 0.5 0.0]))
-(def dirty-snow-white matte-white)        ; DirtySnowWhite, less its bumps
+(def matte-orange (snow-matte-bumped [1.0 0.5 0.0] dirtier))
+(def dirty-snow-white (snow-matte-bumped pov-white dirty))
 
 (def metallic-red   (snow-metallic pov-red))
 (def metallic-green (snow-metallic pov-green))
 (def metallic-blue  (snow-metallic pov-blue))
 (def metallic-black (snow-metallic pov-black))
+(def dirty-metallic-red (surface (assoc (assoc metallic-finish :color pov-red) :normal dirtier)))
 
 ;; --------------------------------------------------------------------
 ;; The snowman (snowman.inc's `snowman` macro)
@@ -83,8 +95,8 @@
   (transform (pov-transform [[:rotate [10 0 -20]] [:translate [0.2 3.1 0.15]]])
     (group [(with-surface matte-black (unit-cylinder [0.5 1 0.5]))
             (with-surface matte-black (unit-cylinder [0.75 0.1 0.75]))
-            ; The band, DirtyMetallicRed less its bumps.
-            (with-surface metallic-red
+            ; The band.
+            (with-surface dirty-metallic-red
               (translate [0 0.1 0] (unit-cylinder [0.501 0.2 0.501])))])))
 
 ; The left arm (avatar.pov only).

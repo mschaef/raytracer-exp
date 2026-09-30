@@ -48,6 +48,7 @@ use crate::render::shapes::{
 use crate::render::transform::Affine;
 use crate::render::noise::Octaves;
 use crate::render::pigment::{LayeredPigment, Pattern, Pigment, Rgbt, Wave};
+use crate::render::normal::{Bump, NormalPattern};
 use crate::render::view::{ToneCurve, ViewTransform};
 use crate::render::{Camera, HeatmapTargets, Light, LightKind, Scene, SpotCone, Surface, ViewMode};
 
@@ -546,7 +547,7 @@ fn require_u32(v: &Value, ctx: &str, pos: &Position) -> u32 {
 
 /// `(surface {:color [r g b] :ambient n :specular n :light n :checked b
 ///            :reflection n :transparency n :metallic b
-///            :shininess n :brilliance n})`
+///            :shininess n :brilliance n :normal {...}})`
 ///
 /// All keys except `:color` have defaults. The defaults match an
 /// uninteresting matte surface so that omitting a key gives a
@@ -569,11 +570,15 @@ fn require_u32(v: &Value, ctx: &str, pos: &Position) -> u32 {
 /// exponent; POV's `roughness r` is `1/r`. `:brilliance` (default 1,
 /// positive) raises the diffuse Lambert factor to that power, like
 /// POV's `brilliance`.
+///
+/// `:normal` tilts the shading normal with a pattern (POV's `normal { }`);
+/// see `build_normal`.
 fn builtin_surface(args: &[Value], pos: &Position) -> Value {
     require_arity(args, 1, "surface", pos);
     let map = require_map(&args[0], "surface", pos);
 
     let pigment = map.get("pigment").map(|v| build_layered_pigment(v, pos));
+    let normal = map.get("normal").map(|v| &*Box::leak(Box::new(build_normal(v, pos))));
     // With a pigment, :color is optional: the pigment gives the colour.
     let color: LinearColor = if pigment.is_some() {
         maybe_key_point(&map, "color", "surface", pos).unwrap_or([0.5, 0.5, 0.5])
@@ -607,6 +612,7 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
         shininess,
         brilliance,
         pigment,
+        normal,
     })
 }
 
@@ -779,6 +785,58 @@ fn build_pigment(v: &Value, pos: &Position) -> Pigment {
         color_map,
         from_texture: transform.inverse(),
     }
+}
+
+/// Build a surface's `:normal` from its SDL map (POV-Ray's
+/// `normal { bumps 0.3 scale 0.1 turbulence 1 }`):
+///
+/// - `:pattern` — `:bumps` (smooth noise) or `:wrinkles` (crinkled).
+/// - `:amount` — how strongly the normal tilts (POV's bump amount).
+/// - `:turbulence`, `:octaves`, `:omega`, `:lambda` and `:transform` as
+///   for a pigment.
+fn build_normal(v: &Value, pos: &Position) -> NormalPattern {
+    let map = require_map(v, "surface :normal", pos);
+    const KEYS: [&str; 7] = ["pattern", "amount", "turbulence", "octaves", "omega", "lambda", "transform"];
+    for k in map.keys() {
+        if !KEYS.contains(&k.as_str()) {
+            sdl_panic!(pos, "normal: unknown key :{} (expected one of :{})", k, KEYS.join(" :"));
+        }
+    }
+    let bump = match map.get("pattern") {
+        Some(Value::Keyword(k)) => match k.as_str() {
+            "bumps" => Bump::Bumps,
+            "wrinkles" => Bump::Wrinkles,
+            other => sdl_panic!(pos, "normal: unknown :pattern :{} (expected :bumps or :wrinkles)", other),
+        },
+        Some(other) => sdl_panic!(pos, "normal :pattern must be a keyword (got {})", other),
+        None => sdl_panic!(pos, "normal: missing :pattern"),
+    };
+    let amount = require_key_number(&map, "amount", "normal", pos);
+    let defaults = Octaves::default();
+    let octaves = Octaves {
+        octaves: match map.get("octaves") {
+            Some(v) => {
+                let n = require_int(v, "normal :octaves", pos);
+                if !(1..=10).contains(&n) {
+                    sdl_panic!(pos, "normal: :octaves must be between 1 and 10 (got {})", n);
+                }
+                n as u32
+            }
+            None => defaults.octaves,
+        },
+        omega: maybe_key_number(&map, "omega", "normal", pos).unwrap_or(defaults.omega),
+        lambda: maybe_key_number(&map, "lambda", "normal", pos).unwrap_or(defaults.lambda),
+    };
+    let transform = map
+        .get("transform")
+        .map(|v| require_affine(v, "normal :transform", pos))
+        .unwrap_or_else(Affine::identity);
+    let turbulence = match map.get("turbulence") {
+        None => [0.0; 3],
+        Some(v @ Value::Vec(_)) => require_point(v, "normal :turbulence", pos),
+        Some(v) => [require_number(v, "normal :turbulence", pos); 3],
+    };
+    NormalPattern { bump, amount, turbulence, octaves, from_texture: transform.inverse() }
 }
 
 // ---------------------------------------------------------------------------

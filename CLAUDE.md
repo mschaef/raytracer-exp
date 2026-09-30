@@ -3190,6 +3190,42 @@ Approximate order of recent commits, oldest first:
       inside exits), and in the suite `blob_rejects_bad_values` and
       `blob_renders_like_its_sphere`. Other scenes unchanged.
     - The avatar renders at 260x300 in 4.9 s, up from 3.2 s.
+70. **Snowman phase 3: bump normals.**
+    - `src/render/normal.rs`: `NormalPattern { bump, amount, turbulence,
+      octaves, from_texture }`, POV-Ray's `normal { bumps | wrinkles }`.
+      - `Bumps` tilts the normal by `amount` times `vector_noise` (the
+        same noise as the pigments' turbulence, sized like POV's
+        `DNoise`).
+      - `Wrinkles` sums nine octaves of absolute vector noise, each at
+        twice the frequency and half the weight, as POV's does.
+      - It's evaluated at the hit's texture point through its own
+        transform and turbulence, like a pigment. The tilt is added to
+        the normal and renormalized.
+    - `Surface.normal: Option<&'static NormalPattern>`, leaked at
+      construction like `pigment`, so `Surface` stays `Copy`.
+    - `shade_pixel` tilts the face-forward normal, which then drives
+      lighting, the indirect bounce and (on a bumped surface only) the
+      reflection direction. An unbumped surface reflects about
+      `hit.normal` as before, so every other scene is byte-identical.
+    - SDL: surface `:normal {:pattern :bumps|:wrinkles :amount n}` with
+      optional `:turbulence`, `:octaves`, `:omega`, `:lambda` and
+      `:transform`; unknown keys are rejected.
+    - `_snowman.lisp`: `Dirty` (bumps 0.3, scale 0.1, turbulence 1) on
+      the snow, and `Dirtier` (bumps 0.7, scale 0.15, turbulence 1.5)
+      on the nose and the hat band (`dirty-metallic-red`).
+    - **Amounts are POV's, uncalibrated.** At 520x600 the bumps are
+      broad, soft mottling, far milder than avatar.jpg's grain. But
+      rendered like the original (65x75, one sample a pixel, no
+      anti-aliasing) the grain matches avatar.jpg closely: the
+      reference's speckle is the bumps aliased at that resolution.
+      Doubling the amounts looked no closer, so they stay as POV wrote
+      them. See `Claude outputs/snowman_phase3_bumps.png`.
+    - Tests: `normal::tests` (unit, varying normals; amount 0 is a
+      no-op; larger amounts tilt further), and in the suite
+      `bump_normals_shade_but_keep_the_outline` and
+      `normal_rejects_bad_keys`.
+    - The avatar renders at 260x300 in 6.9 s, up from 4.9 s: the
+      turbulence is six octaves of noise per shading point.
 
 ## Pitfalls and conventions
 
@@ -4589,7 +4625,7 @@ interval, so the existing quartic solver applies, piecewise). Normal
 from the field gradient. Spans for CSG. Replaces the sphere stand-in,
 giving the snowman its smooth neck and eye sockets.
 
-### Phase 3 — Bump normals
+### Phase 3 — Bump normals (done, entry 70)
 
 `normal { bumps | wrinkles amount scale turbulence }`: perturb the
 shading normal by the gradient of object-space noise, using the pigment
