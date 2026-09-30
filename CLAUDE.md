@@ -3526,6 +3526,29 @@ Approximate order of recent commits, oldest first:
       unchanged: the 39 scenes with a scene binding render
       byte-identically at 48 px.
 
+79. **Transform collapsing.** `shapes::transform` folds a transform
+    directly around another into one node with the composed affine, so
+    `translate(rotate(scale(leaf)))` costs one ray transform instead of
+    three. Every transform constructor (Rust helpers and the SDL's
+    `translate`/`rotate`/`scale`/`transform`) goes through it. The
+    inverse is composed from the cached inverses, not re-inverted.
+    - Only direct nesting folds. A `Surfaced`, `Bounded`, group or CSG
+      node in between keeps both transforms: moving a transform across
+      a `Surfaced` would change the pigment's texture space.
+    - Directly nested transforms before, after: xmastree 870 of 2046
+      nodes folded (1176 left), texaco 12 of 24, cpot 6 of 15,
+      snowman_room 14 of 682, snowman_avatar 3 of 10. Most transforms
+      sit above groups, so they can't fold.
+    - Render time, 160 px, best of 3 (sequential cloud build): texaco
+      -14.5%, cpot -5.0%, xmastree -3.7%. Scenes with few folds are
+      within noise (snowman_avatar -1.8%, snowman_sphere +1.6%).
+    - Output: all 39 scenes byte-identical at 64 px. At 160 px xmastree
+      has 5 pixels (of 25,600) one level off, from rounding in the
+      composed matrix; the other timed scenes are identical.
+    - Tests `transform_fold_tests::nested_transforms_fold_into_one_node`
+      (one node, and hits match the unfolded chain for surfaced and
+      unsurfaced leaves) and `transforms_separated_by_other_nodes_stay_separate`.
+
 
 ## Pitfalls and conventions
 
@@ -3725,9 +3748,8 @@ scene-definition mechanism.
 
 **Phase 9+ (deferred).** Heatmap target binding; animation
 (timestep loops, a video or sequence-of-PNGs target, per-frame
-mutation of geometry); interpreter optimizations; transform
-collapsing (see "Future directions" — first perf item to tackle
-now that SDL parity is complete).
+mutation of geometry); interpreter optimizations. Transform collapsing is
+done (entry 79).
 
 ### `defn` and the desugaring pass
 
@@ -5005,17 +5027,12 @@ scene ever needs them: a surface-area-heuristic (SAH) split for
 unevenly distributed geometry, and a flatter node layout to cut the
 per-node `Box` indirection.
 
-**Transform collapsing.** A nested `translate(rotate(scale(leaf)))` produces
-three separate `Transform` nodes, each doing its own ray-transform on the way
-down. `transform()` could peek at its child and, if it's already a
-`Shape::Transform`, multiply the inverse affines and skip a level. Trivial
-local optimization. **Explicitly on the radar** — flagged after Phase 6 as
-the next perf item to tackle once SDL parity is complete and the Rust
-scene definitions are gone (deeper transform stacks will be more common
-as SDL scenes get richer, since the SDL constructor functions don't
-currently fold). Work item lives here in the plan rather than in
-"Phases" because it's a self-contained optimization, not a sequenced
-SDL milestone.
+**Transform collapsing.** Done (entry 79): directly nested transforms
+fold into one node. Not done, because they aren't equivalent: folding
+across a `Surfaced` (changes texture space), pushing a transform down
+into a group's children (more nodes per ray, not fewer), and baking
+transforms into primitives (e.g. moving a sphere's centre, which
+would also move a surfaced leaf's pigment).
 
 **CSG.** Planned — see "CSG: implementation plan" above. First
 step of the POV-Ray port (`docs/povray_gap_analysis.md`).

@@ -1343,14 +1343,25 @@ fn auto_bound(shape: Shape) -> Shape {
 }
 
 pub fn transform(forward: Affine, child: impl Into<Shape>) -> Shape {
-    let inverse = forward.inverse();
+    // A transform directly around another transform folds into one node:
+    // `translate(rotate(scale(leaf)))` becomes a single `Transform`, so a
+    // ray is transformed once on the way down instead of once per level.
+    // The inverse composes from the cached inverses (inner's after
+    // outer's) rather than inverting the product.
+    let (forward, inverse, child) = match child.into() {
+        Shape::Transform(inner) => {
+            let Transformed { forward: inner_forward, inverse: inner_inverse, child, .. } = *inner;
+            (forward.compose(inner_forward), inner_inverse.compose(forward.inverse()), child)
+        }
+        other => (forward, forward.inverse(), other),
+    };
     // normal_xform = (forward.linear)^{-T} = transpose(inverse.linear)
     let normal_xform = mat3_transpose(inverse.linear);
     Shape::Transform(Box::new(Transformed {
         forward,
         inverse,
         normal_xform,
-        child: child.into(),
+        child,
     }))
 }
 
@@ -3847,6 +3858,103 @@ mod small_triangle_tests {
             // Still misses beside it, and misses a ray in its plane.
             assert!(t.hit_test(&Vector { start: [size * 2.0, size * 2.0, -1.0], delta: [0.0, 0.0, 1.0] }).is_none());
             assert!(t.hit_test(&Vector { start: [-1.0, size * 0.25, 0.0], delta: [1.0, 0.0, 0.0] }).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod transform_fold_tests {
+    use super::*;
+
+    fn surface() -> Surface {
+        Surface {
+            color: [1.0, 0.0, 0.0],
+            ambient: 0.2,
+            specular: 0.5,
+            light: 0.6,
+            checked: false,
+            reflection: 0.0,
+            transparency: 0.0,
+            filter: 0.0,
+            metallic: false,
+            shininess: 50.0,
+            brilliance: 1.0,
+            pigment: None,
+            normal: None,
+        }
+    }
+
+    /// A `Transform` node built without folding, as `transform` did
+    /// before history entry 79.
+    fn unfolded(forward: Affine, child: Shape) -> Shape {
+        let inverse = forward.inverse();
+        Shape::Transform(Box::new(Transformed {
+            forward,
+            inverse,
+            normal_xform: mat3_transpose(inverse.linear),
+            child,
+        }))
+    }
+
+    fn close(a: Point, b: Point) -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() < 1e-9)
+    }
+
+    /// `translate(rotate(scale(leaf)))` is one node, and it hits exactly
+    /// where the three nested nodes do: same distance, point, normal,
+    /// texture point and side, for a surfaced leaf (texture point in the
+    /// leaf's space) and an unsurfaced one (texture point in world space).
+    #[test]
+    fn nested_transforms_fold_into_one_node() {
+        let t = Affine::translation([1.0, -2.0, 3.0]);
+        let r = Affine::rotation_axis([1.0, 2.0, 0.5], 0.7);
+        let s = Affine::scale([2.0, 0.5, 1.5]);
+        for leaf_surface in [Some(surface()), None] {
+            let leaf = Shape::Sphere(Sphere { center: [0.2, 0.0, -0.1], r: 1.0, surface: leaf_surface });
+            let folded = transform(t, transform(r, transform(s, leaf.clone())));
+            match &folded {
+                Shape::Transform(node) => assert!(matches!(node.child, Shape::Sphere(_)), "not folded: {:?}", node.child),
+                other => panic!("expected a Transform, got {:?}", other),
+            }
+            let nested = unfolded(t, unfolded(r, unfolded(s, leaf)));
+
+            let mut hits = 0;
+            for i in 0..200 {
+                let a = i as f64 * 0.37;
+                let start = [8.0 * a.cos(), 3.0 * (a * 1.3).sin(), 8.0 * a.sin()];
+                let aim = [1.0 + 1.5 * (a * 2.1).sin(), -2.0 + 1.5 * (a * 1.7).cos(), 3.0];
+                let ray = Vector { start, delta: subp(aim, start) };
+                match (folded.hit_test(&ray), nested.hit_test(&ray)) {
+                    (None, None) => {}
+                    (Some(f), Some(n)) => {
+                        hits += 1;
+                        assert!((f.distance - n.distance).abs() < 1e-9);
+                        assert!(close(f.hit_point, n.hit_point));
+                        assert!(close(f.normal, n.normal));
+                        assert!(close(f.texture_point, n.texture_point));
+                        assert_eq!(f.entering, n.entering);
+                    }
+                    (f, n) => panic!("ray {}: folded {:?} vs nested {:?}", i, f.map(|h| h.distance), n.map(|h| h.distance)),
+                }
+            }
+            assert!(hits > 50, "only {} of 200 rays hit; the test isn't exercising much", hits);
+        }
+    }
+
+    /// Only a transform *directly* around another folds. Anything in
+    /// between (a surface, a bound, a group) keeps both nodes, since
+    /// moving a transform across it would change texture space or bounds.
+    #[test]
+    fn transforms_separated_by_other_nodes_stay_separate() {
+        let leaf = Shape::Sphere(Sphere { center: [0.0; 3], r: 1.0, surface: None });
+        let inner = translate([1.0, 0.0, 0.0], leaf);
+        let shape = translate([0.0, 1.0, 0.0], surfaced(surface(), inner));
+        match shape {
+            Shape::Transform(node) => match &node.child {
+                Shape::Surfaced(s) => assert!(matches!(s.child, Shape::Transform(_))),
+                other => panic!("expected Surfaced, got {:?}", other),
+            },
+            other => panic!("expected a Transform, got {:?}", other),
         }
     }
 }
