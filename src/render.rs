@@ -1469,6 +1469,34 @@ pub fn reflect(d: Point, n: Point) -> Point {
     subp(d, scalep(n, 2.0 * dotp(d, n)))
 }
 
+/// Snell's law: the direction a ray travelling along `d` takes after
+/// crossing a surface with normal `n`, where `eta` is the ratio of the
+/// indices of refraction, the side it comes from over the side it goes
+/// into (`1 / ior` entering glass from air, `ior` leaving it). `d` and
+/// `n` are unit vectors with `n` facing the ray (`d . n < 0`). `None`
+/// past the critical angle: total internal reflection.
+pub fn refract(d: Point, n: Point, eta: f64) -> Option<Point> {
+    let cos_i = -dotp(d, n);
+    let k = 1.0 - eta * eta * (1.0 - cos_i * cos_i);
+    if k < 0.0 {
+        None
+    } else {
+        Some(addp(scalep(d, eta), scalep(n, eta * cos_i - k.sqrt())))
+    }
+}
+
+/// Where transmitted light goes at a crossing of a surface with index
+/// `ior` (refraction plan Phase 3, history entry 88): bent by Snell's
+/// law, or, past the critical angle, reflected back the way it came
+/// (total internal reflection). `entering` says which side the ray
+/// comes from. `d` is the ray's direction (any length) and `n` the
+/// face-forward shading normal, the one reflection uses.
+fn bend(d: Point, n: Point, ior: f64, entering: bool) -> Point {
+    let d = normalizep(d);
+    let eta = if entering { 1.0 / ior } else { ior };
+    refract(d, n, eta).unwrap_or_else(|| reflect(d, n))
+}
+
 fn shade_pixel(
     ray: &Vector,
     scene: &Scene,
@@ -1493,12 +1521,27 @@ fn shade_pixel(
     // direction, so a ray through a glass cylinder or CSG glass is
     // blended once, as through a sphere, rather than once per wall it
     // crosses.
+    //
+    // Leaving a refractive surface (`ior != 1`), the ray bends back out,
+    // or reflects back inside past the critical angle (history entry
+    // 88). Total internal reflection can bounce a ray around inside a
+    // glass object; `PASS_THROUGH_LIMIT` bounds that too.
     if !hit.entering
         && see_through(&surface) > EPSILON
         && depth.pass < PASS_THROUGH_LIMIT
     {
+        let delta = if surface.ior == 1.0 {
+            ray.delta
+        } else {
+            let facing = if dotp(hit.normal, ray.delta) > 0.0 { negp(hit.normal) } else { hit.normal };
+            let facing = match surface.normal {
+                Some(bumps) => bumps.perturb(facing, hit.texture_point),
+                None => facing,
+            };
+            bend(ray.delta, facing, surface.ior, false)
+        };
         return ray_color(
-            &Vector { start: hit.hit_point, delta: ray.delta },
+            &Vector { start: hit.hit_point, delta },
             scene,
             lights,
             Depth { pass: depth.pass + 1, ..depth },
@@ -1866,10 +1909,17 @@ fn shade_pixel(
         {
             ([0.0, 0.0, 0.0], see_through(&surface))
         } else if (see_through(&surface) > EPSILON) && (depth.transmit < scene.transmit_limit) {
+            // A refractive surface bends the transmitted ray on the way
+            // in (history entry 88); `ior` 1 leaves it as it was.
+            let delta = if surface.ior == 1.0 {
+                ray.delta
+            } else {
+                bend(ray.delta, normal, surface.ior, hit.entering)
+            };
             let transmitted = ray_color(
                 &Vector {
                     start: hit.hit_point,
-                    delta: ray.delta,
+                    delta,
                 },
                 scene,
                 lights,
@@ -2898,5 +2948,106 @@ mod shadow_probe_tests {
         assert_eq!(probe(&sc, light, point), ShadowProbe::Blocked);
         assert!(walk(&sc, light, point).is_some(), "the walk alone lets light through");
         assert!(shadow_ray_walk(light, &point, &sc).is_none());
+    }
+}
+
+#[cfg(test)]
+mod refraction_tests {
+    use super::*;
+    use crate::render::shapes::{Cuboid, Sphere};
+
+    const TOL: f64 = 1e-12;
+
+    fn close(a: Point, b: Point, tol: f64) -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() < tol)
+    }
+
+    /// A unit direction `deg` degrees off straight down (-z), leaning +x.
+    fn incoming(deg: f64) -> Point {
+        let r = deg.to_radians();
+        [r.sin(), 0.0, -r.cos()]
+    }
+
+    const UP: Point = [0.0, 0.0, 1.0];
+
+    #[test]
+    fn refract_follows_snells_law() {
+        for eta in [1.0 / 1.5, 1.0 / 1.33, 1.5, 0.75] {
+            for deg in [0.0, 10.0, 25.0, 40.0] {
+                let d = incoming(deg);
+                let sin_i = deg.to_radians().sin();
+                if eta * sin_i > 1.0 {
+                    continue;
+                }
+                let t = refract(d, UP, eta).unwrap();
+                assert!((lenp(t) - 1.0).abs() < TOL, "unit length");
+                assert!(t[2] < 0.0, "carries on through the surface");
+                assert!((t[0] - eta * sin_i).abs() < TOL, "sin t = eta sin i: {} {} {:?}", eta, deg, t);
+                assert!(t[1].abs() < TOL, "stays in the plane of incidence");
+            }
+        }
+    }
+
+    #[test]
+    fn total_internal_reflection_past_the_critical_angle() {
+        // Leaving glass of index 1.5: the critical angle is asin(1/1.5),
+        // about 41.8 degrees.
+        let critical = (1.0f64 / 1.5).asin().to_degrees();
+        assert!((critical - 41.81).abs() < 0.01);
+        assert!(refract(incoming(critical - 0.1), UP, 1.5).is_some());
+        assert!(refract(incoming(critical + 0.1), UP, 1.5).is_none());
+        // `bend` turns it into a mirror reflection, back inside.
+        let d = incoming(60.0);
+        assert!(close(bend(d, UP, 1.5, false), reflect(d, UP), TOL));
+        // Entering a denser medium never reflects totally.
+        assert!(refract(incoming(89.0), UP, 1.0 / 1.5).is_some());
+    }
+
+    #[test]
+    fn index_one_leaves_the_ray_unchanged() {
+        for deg in [0.0, 30.0, 75.0] {
+            let d = incoming(deg);
+            assert!(close(refract(d, UP, 1.0).unwrap(), d, TOL));
+        }
+    }
+
+    /// Through a flat slab the ray comes out parallel to how it went in,
+    /// shifted sideways by thickness * (tan i - tan t).
+    #[test]
+    fn a_slab_shifts_but_does_not_turn_the_ray() {
+        let slab = Cuboid { center: [0.0; 3], size: [20.0, 20.0, 1.0], surface: None };
+        let (deg, ior) = (30.0f64, 1.5);
+        let d = incoming(deg);
+        let start = [0.0, 0.0, 5.0];
+        let entry = slab.hit_test(&Vector { start, delta: d }).unwrap();
+        assert!(entry.entering);
+        let inside = bend(d, entry.normal, ior, true);
+        let exit = slab.hit_test(&Vector { start: entry.hit_point, delta: inside }).unwrap();
+        assert!(!exit.entering, "the far face, from inside");
+        let out = bend(inside, negp(exit.normal), ior, false);
+        assert!(close(out, d, 1e-12), "parallel to the incoming ray: {:?}", out);
+        // Where the straight ray would have left the slab, and where the
+        // bent one did.
+        let straight_x = entry.hit_point[0] + deg.to_radians().tan();
+        let t_angle = (deg.to_radians().sin() / ior).asin();
+        let shift = straight_x - exit.hit_point[0];
+        assert!((shift - (deg.to_radians().tan() - t_angle.tan())).abs() < 1e-9, "shift {}", shift);
+    }
+
+    /// A ray through a glass sphere's centre isn't bent; one off-centre
+    /// bends toward the axis on the way in.
+    #[test]
+    fn a_sphere_bends_rays_toward_its_axis() {
+        let ball = Sphere { center: [0.0; 3], r: 1.0, surface: None };
+        let down = [0.0, 0.0, -1.0];
+        let hit = ball.hit_test(&Vector { start: [0.0, 0.0, 5.0], delta: down }).unwrap();
+        assert!(close(bend(down, hit.normal, 1.5, true), down, TOL));
+        let hit = ball.hit_test(&Vector { start: [0.5, 0.0, 5.0], delta: down }).unwrap();
+        let inside = bend(down, hit.normal, 1.5, true);
+        assert!(inside[0] < -1e-3, "toward the axis: {:?}", inside);
+        let out_hit = ball.hit_test(&Vector { start: hit.hit_point, delta: inside }).unwrap();
+        assert!(!out_hit.entering);
+        let out = bend(inside, negp(out_hit.normal), 1.5, false);
+        assert!(out[0] < inside[0], "and more so on the way out: {:?}", out);
     }
 }

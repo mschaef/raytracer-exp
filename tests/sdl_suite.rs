@@ -1195,6 +1195,11 @@ fn back_faces_test_scene_loads() {
 }
 
 #[test]
+fn refraction_test_scene_loads() {
+    assert_scene_loads("refraction_test.lisp", "refraction-test-scene");
+}
+
+#[test]
 fn axis_spheres_scene_loads() {
     assert_scene_loads("axis_spheres.lisp", "axis-spheres-scene");
 }

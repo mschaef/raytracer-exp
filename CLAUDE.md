@@ -3804,6 +3804,49 @@ Approximate order of recent commits, oldest first:
     - Test `surface_ior` (default, 1.5, 1, 0.75 accepted; 0 and -1.5
       rejected with a positioned error).
 
+88. **Refraction Phase 3: Snell's law and total internal reflection.**
+    Transparent surfaces with `:ior` other than 1 bend the light through
+    them.
+    - `render::refract(d, n, eta)`: the vector form of Snell's law, `d`
+      and `n` unit with `n` facing the ray, `eta` = index on the side
+      the ray comes from over the side it goes into; `None` past the
+      critical angle. `bend(d, n, ior, entering)` picks
+      `eta = 1/ior` entering and `ior` leaving, and turns a `None` into
+      `reflect(d, n)`: total internal reflection.
+    - **Entering:** `shade_pixel`'s transmission ray takes
+      `bend(d, normal, ior, true)` instead of `d`, with `normal` the
+      face-forward shading normal (bump-tilted, as for reflection).
+      Blend, filter tint, weights (entry 83) and budgets are unchanged.
+    - **Leaving:** the back-face pass-through at the top of
+      `shade_pixel` continues along `bend(d, facing, ior, false)`,
+      which bends the ray back out or, past the critical angle, sends it
+      back inside to meet the wall again; `PASS_THROUGH_LIMIT` bounds
+      rays trapped by total internal reflection. The exit still isn't
+      shaded (appearance applies once per object, on entry).
+    - `ior == 1.0` takes exactly the old code path (the ray's own
+      `delta`, unnormalized), so every scene without `:ior` is
+      byte-identical (all 40 checked). Shadow rays stay straight, as in
+      POV without photons.
+    - Totally reflected light doesn't take the surface's reflection
+      tint (settled, as POV).
+    - **New scene `scenes/refraction_test.lisp`:** glass spheres at
+      ior 1.0, 1.33 and 1.5 and a slab at 1.5 turned 35 degrees, in
+      front of a checked wall and floor. The spheres shrink and invert
+      what's behind them, more at higher index; the slab shifts it
+      sideways. 640x400 in 1.4 s. `Claude outputs/refraction_test.png`
+      (before: `:ior` ignored; after). Test
+      `refraction_test_scene_loads`.
+    - Its checks are offset half a cell from the planes they're on:
+      exactly on a cell boundary they speckled (see Pitfalls).
+    - Tests `refraction_tests`: `refract` against Snell's law at several
+      angles and ratios (unit length, in the plane of incidence);
+      total internal reflection either side of the 41.8-degree critical
+      angle at 1.5, and `bend` reflecting there; `eta` 1 unchanged; a
+      slab leaves the ray parallel, shifted by
+      `thickness * (tan i - tan t)`; a sphere doesn't bend a ray through
+      its centre and bends an off-centre one toward its axis, more on
+      the way out.
+
 
 ## Pitfalls and conventions
 
@@ -3842,6 +3885,13 @@ correctness. When changing the renderer or a `scenes/*.lisp` file, the
 smell test is "does the output look the same as before for cases that
 shouldn't have changed, and right for cases that should?" Render the
 same scene before and after the change and diff the outputs.
+
+**Don't put a checker exactly on a cell boundary.** The checker is a
+3D pattern (`floor(x) + floor(y) + floor(z)`), so a plane at an integer
+coordinate (a floor at `z = 0`, a wall at `y = 4`) sits on a boundary
+and rounding flips points between the two colours, speckling it. Shift
+the pigment half a cell off the plane, e.g. `:transform
+(affine-translation [0 0 0.5])` (entry 88), as POV scenes do.
 
 **Build long vectors in one pass, not with `conj`.** `conj` copies its
 vector every call, so `(reduce conj [] xs)` is quadratic: about 9 s for
@@ -5012,6 +5062,8 @@ negative and non-finite values. Nothing reads it yet.
 
 ### Phase 3 — Refraction and total internal reflection
 
+Done (history entry 88).
+
 In `shade_pixel`:
 - **Entering a see-through surface with `ior != 1`:** the transmission
   ray's direction becomes `refract(d, n, 1 / ior)` instead of `d`. The
@@ -5084,9 +5136,9 @@ directly into an opaque object it touches.
 
 - ~~Whether `:ior` below 1 is allowed.~~ Settled (entry 87): yes, any
   positive value, as in POV.
-- Whether a totally internally reflected ray should also pick up the
-  surface's own reflection tint. POV treats it as transmitted light
-  redirected, so no.
+- ~~Whether a totally internally reflected ray should also pick up the
+  surface's own reflection tint.~~ Settled (entry 88): no, as in POV;
+  it's transmitted light redirected, weighted as transmitted light.
 
 ## View transform (tone mapping): implementation plan
 
