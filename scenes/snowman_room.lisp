@@ -11,7 +11,9 @@
 ; switches for modelling; the finished render has them all on, and so
 ; does this port by default (`room-lights?`, `room-area?`, `room-glass?`
 ; below). With the lights off the room is as sphere2.pov renders by
-; default: POV's ambient light at 1 and the clock's red light.
+; default: POV's ambient light at 1 and the clock's red light. The
+; lights-on render adds some ambient light; see the tuning notes in the
+; scene.
 ; DO_HEIGHT_FIELD's yard isn't ported (it names yard.tga, which isn't
 ; in the repo; there's a yard.png).
 ;
@@ -130,7 +132,24 @@
      ; direction 1.5*z (zoom 1.5), up y, right x: a square frame.
      :camera        (camera-looking-at [26 62 36] [-56 36 -36] [0 1 0] 1.5)
      :sky           room-sky
-     :ambient-light (if room-lights? 0 1)
+     ; Tuning (phase 6f), chosen by eye from a sheet of variants: with
+     ; the lights on, sphere2.pov's ambient_light 0 leaves everything
+     ; the lights miss pure black (the desk shades the back wall and the
+     ; floor under it from both lights). 0.3 shows what's there and
+     ; keeps the shadows; 0.5 flattened them. The default view (Reinhard,
+     ; white 4) suits it; +0.5 stops blew out the lit wall. With the
+     ; lights off it's sphere2.pov's ambient_light 1, which is very dim
+     ; (nothing above about 0.23), so that diagnostic mode is shown 2
+     ; stops brighter.
+     :ambient-light (if room-lights? 0.3 1)
+     :view          (if room-lights? {} {:exposure 2})
+     ; 8 to 16 samples a pixel. The soft shadows of the moon and the
+     ; spotlight are noisy, and with the default minimum of 4 the
+     ; adaptive sampler sometimes stops where four samples happen to
+     ; agree: against a 128-sample reference, 8-16 was cleaner (RMS
+     ; error 2.7 levels) than 4-32 (3.5) in about 60% of the time.
+     :min-samples   8
+     :max-samples   16
      :objects
      (concat room-light-list
              [; The snowy ground outside.

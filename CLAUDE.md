@@ -3449,6 +3449,31 @@ Approximate order of recent commits, oldest first:
       no single prop dominates. Sampling settings are for 6f.
     - Renders: `Claude outputs/snowman_room_lights.png` and
       `snowman_room_ambient.png`. Test `snowman_room_scene_loads`.
+76. **Snowman phase 6f: the room's lighting tuned.** Scene-only changes
+    to `scenes/snowman_room.lisp`.
+    - **Ambient light 0.3 with the lights on** (sphere2.pov has 0).
+      With none, everything the lights miss was pure black: the desk
+      shades the back wall and floor under it from both the spotlight
+      and the front light. Chosen by eye from a sheet of ambient 0,
+      0.3 and 0.5, and 0.3 with +0.5 stops, AgX Punchy +0.5 and clip
+      (`Claude outputs/snowman_room_tuning_options.png`): 0.3 shows
+      what's under the desk and keeps the shadows; 0.5 flattened them;
+      +0.5 stops blew out the lit wall. The default view (Reinhard,
+      white 4) stays.
+    - **The lights-off mode is shown 2 stops brighter**
+      (`:view {:exposure 2}`): with POV's ambient light 1 and ambient
+      0.1 finishes nothing gets above about 0.23. It's the modelling
+      preview, so it should be readable.
+    - **8 to 16 samples a pixel.** Against a 128-sample reference at
+      400x400 (515 s), the default 4 to 32 had an RMS error of 3.5
+      levels (110 s), 4 to 16 had 4.0 (57 s), and 8 to 16 had 2.7
+      (64 s). With a minimum of 4, the adaptive sampler sometimes stops
+      where four samples of the two area lights' soft shadows happen to
+      agree; 8 fixes that. The lights-on render at 800x800 is now 3 m
+      55 s (was 7 min); lights off 73 s.
+    - Renders: `Claude outputs/snowman_room_lights.png` and
+      `snowman_room_ambient.png`.
+    - sphere2.pov is done. Left out: the yard height field, refraction.
 
 ## Pitfalls and conventions
 
@@ -4869,7 +4894,7 @@ at load time: heights from the image's luminance or palette index,
 `water_level`, and `smooth` normals. Needs an image reader for TGA (and
 PNG for yard.png; the tga the scene names isn't in the repo).
 
-### Phase 6 — sphere2.pov: the room
+### Phase 6 — sphere2.pov: the room (done, entries 73–76)
 
 sphere2.pov's `DO_*` switches were Mike's quality toggles while
 modelling (lower fidelity to tune shapes). The final render has them all
@@ -4891,7 +4916,7 @@ with the as-written ambient-plus-clock-light mode as a flag.
   time and bounding (a BVH per window of blinds). Kept as written: the
   bowtie isn't moved with the snowman, and Wood_Floor's scale is
   commented out (big boards).
-- **6f — Lighting and tuning.** Flags for lights, area lighting and
+- **6f — Lighting and tuning (done, entry 76).** Flags for lights, area lighting and
   glass (all on by default); tune both lighting modes by eye (no
   reference render).
 - Left out: the yard height field (needs PNG, and yard.tga isn't in the
