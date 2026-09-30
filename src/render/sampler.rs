@@ -487,6 +487,94 @@ pub fn hemisphere_basis(normal: Point) -> (Point, Point) {
     (u, v)
 }
 
+// ---------------------------------------------------------------------------
+// Per-bounce samples: Owen-scrambled Sobol (history entry 67)
+// ---------------------------------------------------------------------------
+//
+// A path-tracing bounce needs a fresh 2D point at every depth, and the
+// points at one depth must be stratified across the pixel's samples but
+// independent of every other depth. A Halton pair per depth would need
+// ever larger bases, whose low-count patterns correlate badly; instead
+// each depth reuses the same 2D Sobol set (dimensions 0 and 1, a
+// (0, 2)-sequence), made independent by its own seed through Owen
+// scrambling of the values and a scrambled shuffle of the sample index.
+// This is Burley's "Practical Hash-based Owen Scrambling" (JCGT 2020),
+// with an improved Laine-Karras hash.
+
+/// A 32-bit integer hash with good avalanche (Wellons' "lowbias32").
+pub fn hash32(mut x: u32) -> u32 {
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7feb_352d);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846c_a68b);
+    x ^= x >> 16;
+    x
+}
+
+/// A per-pixel seed, the root of every bounce's scramble seed.
+pub fn pixel_seed(x: u32, y: u32) -> u32 {
+    let (a, _) = cp_hash(x, y, 4);
+    (a * (1u64 << 32) as f64) as u32
+}
+
+/// The scramble seed for bounce depth `depth` and `stream` (0 for the
+/// area-light coordinate, 1 for the bounce direction) of a pixel.
+pub fn bounce_seed(pixel_seed: u32, depth: u32, stream: u32) -> u32 {
+    hash32(pixel_seed ^ hash32(depth.wrapping_mul(2).wrapping_add(stream).wrapping_add(0x9e37_79b9)))
+}
+
+/// A Laine-Karras-style hash, which permutes a bit-reversed value so
+/// that each output bit depends only on the input bits below it.
+/// Vegdahl's improved constants ("Building a Better LK Hash", 2021):
+/// the original Laine-Karras ones left visible correlation between
+/// seeds.
+fn laine_karras(mut x: u32, seed: u32) -> u32 {
+    x ^= x.wrapping_mul(0x3d20_adea);
+    x = x.wrapping_add(seed);
+    x = x.wrapping_mul((seed >> 16) | 1);
+    x ^= x.wrapping_mul(0x0552_6c56);
+    x ^= x.wrapping_mul(0x53a2_2864);
+    x
+}
+
+/// Owen (nested uniform) scrambling in base 2, via Laine-Karras on the
+/// bit-reversed value.
+fn nested_uniform_scramble(x: u32, seed: u32) -> u32 {
+    laine_karras(x.reverse_bits(), seed).reverse_bits()
+}
+
+/// Sobol dimension 0: the base-2 van der Corput sequence.
+fn sobol_0(i: u32) -> u32 {
+    i.reverse_bits()
+}
+
+/// Sobol dimension 1 (primitive polynomial x + 1).
+fn sobol_1(mut i: u32) -> u32 {
+    let mut r = 0u32;
+    let mut v = 1u32 << 31;
+    while i != 0 {
+        if i & 1 != 0 {
+            r ^= v;
+        }
+        i >>= 1;
+        v ^= v >> 1;
+    }
+    r
+}
+
+/// Point `index` of the 2D Sobol set scrambled by `seed`, in `[0, 1)²`.
+///
+/// The index is shuffled by an Owen scramble too, which permutes it
+/// only within aligned power-of-two blocks, so any prefix of 2^k
+/// samples is still one whole stratified set.
+pub fn owen_sobol_2d(index: u32, seed: u32) -> (f64, f64) {
+    let i = nested_uniform_scramble(index, seed);
+    let x = nested_uniform_scramble(sobol_0(i), hash32(seed ^ 0xa511_e9b3));
+    let y = nested_uniform_scramble(sobol_1(i), hash32(seed ^ 0x63d8_3595));
+    let denom = (1u64 << 32) as f64;
+    (x as f64 / denom, y as f64 / denom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1018,5 +1106,59 @@ mod tests {
         let c = rr_sample((0.2, 0.2), 0);
         assert!((a - b).abs() > 1e-6, "rr_sample varying iv collides: {} == {}", a, b);
         assert!((a - c).abs() > 1e-6, "rr_sample varying iu collides: {} == {}", a, c);
+    }
+
+    #[test]
+    fn owen_sobol_is_stratified_per_power_of_two_prefix() {
+        // Each prefix of 2^k points is a (0, m, 2)-net: every elementary
+        // interval of area 1/2^k holds exactly one point.
+        for seed in [0u32, 1, 12345, 0xdead_beef].iter() {
+            for &n in [4u32, 16, 64].iter() {
+                let pts: Vec<(f64, f64)> = (0..n).map(|i| owen_sobol_2d(i, *seed)).collect();
+                let m = n.trailing_zeros();
+                for a in 0..=m {
+                    let (cols, rows) = (1u32 << a, 1u32 << (m - a));
+                    let mut seen = vec![false; n as usize];
+                    for &(x, y) in pts.iter() {
+                        assert!((0.0..1.0).contains(&x) && (0.0..1.0).contains(&y));
+                        let c = (x * cols as f64) as u32 + cols * (y * rows as f64) as u32;
+                        assert!(!seen[c as usize], "seed {} n {} {}x{}", seed, n, cols, rows);
+                        seen[c as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn owen_sobol_seeds_decorrelate() {
+        // Two seeds give different point orders: the pairing between
+        // them isn't a fixed shift, so one depth doesn't copy another.
+        let a: Vec<(f64, f64)> = (0..16).map(|i| owen_sobol_2d(i, bounce_seed(7, 1, 1))).collect();
+        let b: Vec<(f64, f64)> = (0..16).map(|i| owen_sobol_2d(i, bounce_seed(7, 2, 1))).collect();
+        let c: Vec<(f64, f64)> = (0..16).map(|i| owen_sobol_2d(i, bounce_seed(7, 1, 0))).collect();
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        // Sample correlation of the x coordinates across depths is small.
+        let corr = |p: &[(f64, f64)], q: &[(f64, f64)]| {
+            let n = p.len() as f64;
+            let (mp, mq) = (p.iter().map(|v| v.0).sum::<f64>() / n, q.iter().map(|v| v.0).sum::<f64>() / n);
+            let cov: f64 = p.iter().zip(q).map(|(u, v)| (u.0 - mp) * (v.0 - mq)).sum();
+            let vp: f64 = p.iter().map(|u| (u.0 - mp).powi(2)).sum();
+            let vq: f64 = q.iter().map(|v| (v.0 - mq).powi(2)).sum();
+            cov / (vp * vq).sqrt()
+        };
+        // Averaged over many pixels, it's close to zero (independent
+        // 64-point sets give a spread of about 1/8 per pixel).
+        let mut total = 0.0;
+        let pixels = 200u32;
+        for px in 0..pixels {
+            let seed = pixel_seed(px, 3 * px + 1);
+            let a: Vec<(f64, f64)> = (0..64).map(|i| owen_sobol_2d(i, bounce_seed(seed, 1, 1))).collect();
+            let b: Vec<(f64, f64)> = (0..64).map(|i| owen_sobol_2d(i, bounce_seed(seed, 2, 1))).collect();
+            total += corr(&a, &b);
+        }
+        let mean = total / pixels as f64;
+        assert!(mean.abs() < 0.03, "mean corr {}", mean);
     }
 }

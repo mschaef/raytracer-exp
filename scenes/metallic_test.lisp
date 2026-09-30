@@ -2,8 +2,8 @@
 ;
 ; Three metal spheres — gold, silver, copper — on the reflective
 ; checker ground. The :metallic flag tells the renderer to tint each
-; sphere's mirror reflection and specular highlight by its body color
-; and to suppress the diffuse term, so the spheres take their
+; sphere's mirror reflection and specular highlight by its body color,
+; and the `metallic` helper gives them no diffuse term (:light 0), so the spheres take their
 ; appearance from what they reflect (each other, the checker floor)
 ; rather than from a flat diffuse body color. Contrast with a plain
 ; (glossy ...) sphere, which is lit primarily by its diffuse term.

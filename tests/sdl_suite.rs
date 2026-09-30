@@ -1099,6 +1099,11 @@ fn group_test_scene_loads() {
 }
 
 #[test]
+fn snowman_avatar_scene_loads() {
+    assert_scene_loads("snowman_avatar.lisp", "snowman-avatar-scene");
+}
+
+#[test]
 fn metallic_test_scene_loads() {
     assert_scene_loads("metallic_test.lisp", "metallic-test-scene");
 }
@@ -1217,4 +1222,121 @@ fn all_scripts_have_a_test() {
         }
         panic!("test declarations out of sync with tests/sdl/:{}", msg);
     }
+}
+
+/// Renders a unit sphere lit from the camera with `surface` (an SDL
+/// surface map) at 21x21, one sample, clip curve.
+fn lit_sphere(surface: &str, tag: &str) -> image::RgbImage {
+    let source = format!(
+        r#"
+(def s (scene {{:name "sphere"
+               :camera (camera-looking-at [0 0 -4] [0 0 0] [0 1 0] 1.0)
+               :background [0 0 0]
+               :min-samples 1 :max-samples 1
+               :view {{:curve :clip}}
+               :objects [(light-white [0 0 -4])
+                         (sphere {{:center [0 0 0] :r 1 :surface (surface {})}})]}}))
+(def t (png-target 21 21))
+(render s t 21 21)
+(save-png t PATH)
+"#,
+        surface
+    );
+    render_to_image(&source, tag)
+}
+
+/// History entry 67: `:metallic` tints the highlight and reflection but
+/// keeps the diffuse term, which `:light` controls as for any surface.
+/// Before, a metallic surface had no diffuse at all.
+#[test]
+fn metallic_keeps_its_diffuse() {
+    let dim = "{:color [0.8 0.4 0.2] :ambient 0.0 :light 0.0 :metallic true}";
+    let lit = "{:color [0.8 0.4 0.2] :ambient 0.0 :light 0.6 :metallic true}";
+    let a = lit_sphere(dim, "metal_nodiffuse").get_pixel(10, 7).0;
+    let b = lit_sphere(lit, "metal_diffuse").get_pixel(10, 7).0;
+    assert_eq!(a, [0, 0, 0], "no diffuse, no highlight: black");
+    assert!(b[0] > 100 && b[0] > b[2], "diffuse keeps the body colour: {:?}", b);
+}
+
+/// `:shininess` is the highlight's exponent: a larger one gives a
+/// smaller highlight. The default (50) is the old fixed exponent.
+#[test]
+fn shininess_tightens_the_highlight() {
+    let spot = |shininess: &str, tag: &str| {
+        let surface = format!(
+            "{{:color [1 1 1] :ambient 0.0 :light 0.0 :specular 1.0 {}}}",
+            shininess
+        );
+        let img = lit_sphere(&surface, tag);
+        img.as_raw().chunks(3).filter(|p| p[0] > 64).count()
+    };
+    let broad = spot(":shininess 5", "shiny_5");
+    let default = spot("", "shiny_default");
+    let fifty = spot(":shininess 50", "shiny_50");
+    let tight = spot(":shininess 500", "shiny_500");
+    assert_eq!(default, fifty, "the default is 50");
+    assert!(broad > default && default > tight && tight > 0, "{} {} {}", broad, default, tight);
+}
+
+/// `:brilliance` raises the Lambert factor to a power: the point facing
+/// the light is unchanged, and the falloff toward the edge is darker.
+#[test]
+fn brilliance_darkens_the_falloff() {
+    let plain = lit_sphere("{:color [1 1 1] :ambient 0.0 :light 0.8}", "brill_1");
+    let hard = lit_sphere("{:color [1 1 1] :ambient 0.0 :light 0.8 :brilliance 5}", "brill_5");
+    // The centre pixel's sample is a hair off-axis, so allow a little.
+    let (pc, hc) = (plain.get_pixel(10, 10).0[0] as i32, hard.get_pixel(10, 10).0[0] as i32);
+    assert!((pc - hc).abs() <= 6, "facing the light: plain {} vs brilliance 5 {}", pc, hc);
+    // Near the top edge (the sphere covers rows 6 to 16).
+    let (p, h) = (plain.get_pixel(10, 7).0[0], hard.get_pixel(10, 7).0[0]);
+    assert!(h + 20 < p, "off-centre: plain {} vs brilliance 5 {}", p, h);
+}
+
+#[test]
+fn surface_rejects_bad_exponents() {
+    for (key, value) in [("shininess", "0"), ("shininess", "-2"), ("brilliance", "0"), ("brilliance", "-1")].iter() {
+        let source = format!("(surface {{:color [1 1 1] :{} {}}})", key, value);
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(&source, "surface_bad.lisp", &env);
+        }));
+        let message = match result {
+            Ok(_) => panic!("must reject :{} {}", key, value),
+            Err(p) => p.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        assert!(message.contains("positive"), "{}: {}", source, message);
+    }
+}
+
+/// `pov-cone` (_pov.lisp) with two non-zero radii is a truncated cone:
+/// radius 1 at y = -1 narrowing to 0.5 at y = 1, flat at both ends. Seen
+/// from far down +z (nearly orthographic), with 0.1 units per pixel.
+#[test]
+fn pov_cone_truncates() {
+    let pov = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenes").join("_pov.lisp");
+    let source = format!(
+        r#"
+(load "{}")
+(def s (scene {{:name "frustum"
+               :camera (camera-looking-at [0 0 100] [0 0 0] [0 1 0] 25)
+               :background [0 0 0]
+               :min-samples 1 :max-samples 1
+               :view {{:curve :clip}}
+               :objects [(with-surface (surface {{:color [1 1 1] :ambient 1.0 :light 0.0}})
+                           (pov-cone [0 -1 0] 1 [0 1 0] 0.5))]}}))
+(def t (png-target 41 41))
+(render s t 41 41)
+(save-png t PATH)
+"#,
+        pov.to_string_lossy()
+    );
+    let img = render_to_image(&source, "pov_cone");
+    // Pixel for world (x, y): column 20 + 10x, row 20 - 10y.
+    let at = |x: f64, y: f64| img.get_pixel((20.0 + 10.0 * x).round() as u32, (20.0 - 10.0 * y).round() as u32).0[0];
+    // Near the top the radius is about 0.53; near the bottom about 0.98.
+    assert!(at(0.4, 0.9) > 200 && at(0.7, 0.9) < 50, "top: {} {}", at(0.4, 0.9), at(0.7, 0.9));
+    assert!(at(0.9, -0.9) > 200 && at(1.2, -0.9) < 50, "bottom: {} {}", at(0.9, -0.9), at(1.2, -0.9));
+    // Flat ends: nothing above y = 1 or below y = -1.
+    assert!(at(0.0, 1.2) < 50 && at(0.0, -1.2) < 50, "ends: {} {}", at(0.0, 1.2), at(0.0, -1.2));
+    assert!(at(0.0, 0.0) > 200);
 }

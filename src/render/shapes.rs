@@ -2564,6 +2564,8 @@ mod span_tests {
             reflection: 0.0,
             transparency: 0.0,
             metallic: false,
+            shininess: 50.0,
+            brilliance: 1.0,
             pigment: None,
         }
     }

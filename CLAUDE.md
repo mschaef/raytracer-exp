@@ -3060,6 +3060,97 @@ Approximate order of recent commits, oldest first:
     - The three scenes sharing `xmas-lights` ended up at different
       exposures (+1, +2, +1.5), chosen by eye: they frame different
       parts of the spotlight's pool.
+67. **Three renderer gaps from the tuning pass: highlight exponent and
+    brilliance, metallic keeps its diffuse, per-bounce path samples.**
+    - **`:shininess` and `:brilliance`** (new `Surface` fields, SDL
+      surface keys, both positive):
+      - `:shininess` is the Blinn-Phong highlight exponent, which was
+        fixed at 50. The default is 50; POV's `roughness r` is `1/r`.
+      - `:brilliance` raises the diffuse Lambert factor to that power,
+        as POV's `brilliance` does. The default is 1 (plain Lambert,
+        computed without `powf` so defaults are byte-identical).
+    - **`:metallic` keeps the diffuse term.** It still tints the
+      reflection and highlight by the surface colour and forces the
+      surface opaque, but the diffuse is now `:light`, as for any
+      surface; POV's metal finishes keep theirs. The indirect bounce's
+      `!metallic` guard went with it (a metal with some diffuse bounces
+      like any surface).
+      - The `metallic` helper in `_common.lisp` now passes `:light 0`,
+        so metallic_test and everything built on it render
+        byte-identically.
+    - **Per-bounce path samples.** Every path-tracing bounce used to
+      reuse the camera hit's `indirect_coord` (and `light_coord`), so a
+      path's second bounce went in the same local direction as its
+      first. That's biased: the Cornell box rendered about 5% dark.
+      - `ray_color` / `shade_pixel` now take a `PathSample { light,
+        indirect, index, pixel_seed }` in place of the two coordinates.
+        `PathSample::for_bounce(d)` gives a bounce to indirect depth `d`
+        fresh coordinates from `sampler::owen_sobol_2d`: 2D Sobol with
+        hash-based Owen scrambling and index shuffling (Burley, JCGT
+        2020, with Vegdahl's improved Laine-Karras hash), seeded by
+        `bounce_seed(pixel_seed, depth, stream)`.
+      - Depth 0 is unchanged (R2 and Halton (17, 19) with CP rotation),
+        so scenes without multi-bounce GI are byte-identical.
+      - Reflection, transmission and pass-through rays keep the
+        coordinates they arrive with, as before.
+      - Checked against a reference that uses independent hashed random
+        numbers per bounce (cornell_box, 160x160, 1024 samples a
+        pixel): the new mean matches it to 0.01 of a display level; the
+        old was 5.6 levels dark.
+      - It is slower (cornell_box 33 s to 51 s at 160x160): paths are
+        no longer correlated, so they wander further. Every pixel was
+        already at the 1024-sample cap, so it isn't extra samples.
+      - The original Laine-Karras constants left a correlation of about
+        0.24 between depths in 256 points; Vegdahl's don't
+        (`owen_sobol_seeds_decorrelate`).
+    - **Scenes:**
+      - redball uses its full finish (`:metallic true :shininess 100
+        :brilliance 5`) and now matches red.tga's darker body and small
+        green highlight.
+      - xmastree's `surface-ornament` is F_MetalC in full (brilliance
+        4, shininess 80), so the balls keep their colour now that
+        metallic has diffuse.
+      - The `pov-metal-*` helpers are unchanged (still without
+        metallic, brilliance and roughness), so texaco and xmastree's
+        trunk and hooks are unchanged.
+    - Byte-identical at 48x36 across every scene except cornell_box,
+      gi_test, redball and xmastree.
+    - Tests: `owen_sobol_is_stratified_per_power_of_two_prefix`,
+      `owen_sobol_seeds_decorrelate`, and in the suite
+      `metallic_keeps_its_diffuse`, `shininess_tightens_the_highlight`,
+      `brilliance_darkens_the_falloff` and
+      `surface_rejects_bad_exponents`.
+68. **Snowman phase 1: the avatar, with stand-ins.** See "Snowman port:
+    plan" below.
+    - `scenes/_snowman.lisp` has the shared textures (MatteFinish and
+      MetallicFinish surfaces), the snowman and the bowtie.
+      `scenes/snowman_avatar.lisp` is avatar.pov at 520x600 (avatar.jpg
+      is 65x75).
+    - Snowman sets `assumed_gamma 1.0`, so its colours are used as
+      written (no `srgb`).
+    - `pov-cone` in `_pov.lisp` is POV's `cone { p0, r0, p1, r1 }`: a
+      point at either end, a cylinder for equal radii, and a truncated
+      cone for two non-zero radii, built in the SDL as the full cone to
+      its apex intersected with the cylinder between the end planes. No
+      renderer change; test `pov_cone_truncates`.
+    - The top hat's crown has `scale <0.5, 0, 0.5>`; POV changes a zero
+      scale to 1, so the crown is 1 tall, which avatar.jpg confirms.
+    - **Stand-ins** (each a later phase):
+      - The blob body is a union of spheres at the radius where each
+        component alone reaches the threshold, `R sqrt(1 - sqrt(t/s))`,
+        less two small spheres for the eye sockets. No smooth neck.
+      - No bump normals (`Dirty`, `Dirtier`) on the snow, nose and hat
+        band.
+      - The mirror glass is untinted (its `rgbf <0, 0, 0.1, 0.9>`
+        filter).
+      - MetallicFinish's `specular 0.2` plus `phong 0.9 phong_size 120`
+        is one highlight (`:specular 0.9 :shininess 120`).
+    - Against avatar.jpg the framing, hat, band, nose, mouth, eyes and
+      bowtie line up. The differences are the stand-ins: the snow is
+      smooth, the neck is creased, and the floor at lower left is grey
+      rather than dark blue. No `:view` yet (tuned at the end).
+    - Test `snowman_avatar_scene_loads`. Comparison:
+      `Claude outputs/snowman_avatar_phase1.png`.
 
 ## Pitfalls and conventions
 
@@ -4421,6 +4512,86 @@ Done; see history entry 59. The default is Reinhard with white point 4.
 - Unit tests per curve as above.
 - The clip report checked against a hand-computed scene.
 - At phase 6, contact sheets of every candidate on the same scenes.
+
+## Snowman port: plan
+
+The snowman project (`snowman/snowman_avatar`; `snowman_workdir` is a
+copy) has four scenes and six includes:
+
+- `avatar.pov`: the snowman close up, with a bowtie, on a glass-covered
+  mirror. The reference is `avatar.jpg` (65x75).
+- `sphere.pov`: the same snowman and mirror, from further away, plus a
+  height field from `imap.tga` (256x170).
+- `sphere2.pov`: a room: walls with window openings, a `Wood_Floor`,
+  quarter-round molding, two windows (glass panes, frames, blinds), an
+  IKEA desk, a mirror, the snowman on the desk, wall outlets, a clock,
+  a cross, a `sky_sphere` gradient outside, an optional `yard.tga`
+  height field, and three lighting set-ups (`DO_LIGHTS`,
+  `DO_AREA_LIGHTING`). Uses furniture.inc, utilities.inc, window.inc,
+  snowman.inc and materials.inc.
+- `moldingtest.pov`: a fence of clipped boards in `Yellow_Pine`.
+
+The features beyond what the other ports needed, in the order they earn
+their keep (see the gap analysis §6):
+
+### Phase 1 — avatar.pov with stand-ins (done, entry 68)
+
+Truncated cones (in the SDL), the shared textures, snowman and bowtie,
+and stand-ins for the blob, bumps and filter colours.
+
+### Phase 2 — Blob (metaballs)
+
+A `blob` primitive: components `{center, radius, strength}` and a
+threshold; the field is `sum s (1 - d²/R²)²` over the components in
+range. Ray intersection by bounding each component's sphere, collecting
+the intervals where the ray is in range, and root finding on the field
+within them (the field along a ray is a polynomial of degree 4 per
+interval, so the existing quartic solver applies, piecewise). Normal
+from the field gradient. Spans for CSG. Replaces the sphere stand-in,
+giving the snowman its smooth neck and eye sockets.
+
+### Phase 3 — Bump normals
+
+`normal { bumps | wrinkles amount scale turbulence }`: perturb the
+shading normal by the gradient of object-space noise, using the pigment
+noise and turbulence. A surface `:normal` map; applies after
+face-forward shading. The snow (`Dirty`), the nose and hat band
+(`Dirtier`) and the room's walls (`wrinkles`).
+
+### Phase 4 — Filter transparency
+
+`rgbf` filter: light through a transparent surface tinted by its
+colour. For the mirror glass here, window glass in sphere2 and T_Glass4
+in cpot. Then tune avatar.pov against avatar.jpg and give it a `:view`.
+
+### Phase 5 — sphere.pov: height fields
+
+`height_field` from an image, generated as a triangle mesh (with a BVH)
+at load time: heights from the image's luminance or palette index,
+`water_level`, and `smooth` normals. Needs an image reader for TGA (and
+PNG for yard.png; the tga the scene names isn't in the repo).
+
+### Phase 6 — sphere2.pov: the room
+
+The includes (furniture, window, utilities) as SDL, `sky_sphere` with a
+`gradient` colour map, the `brick` pattern choosing textures (Wood_Floor),
+`Whitewash_Pine` and `EMBWood1`, and the lighting set-ups. The largest
+phase; likely split once its includes are read.
+
+### Phase 7 — moldingtest.pov
+
+The fence: CSG boards clipped by rotated boxes, `Yellow_Pine`. Small once
+phase 6's wood textures exist.
+
+### Deferred
+
+Refraction (`ior`), which the glass would want but none of the scenes
+depends on.
+
+### Pause points
+
+Each phase ends with a render compared against the reference where there
+is one, and waits for Mike before the next.
 
 ## Future directions
 

@@ -105,6 +105,26 @@
     (group [(cylinder {:p0 start :p1 mid :r diameter})
             (cone     {:p0 mid :p1 end :r (* diameter arrow-scale 1.5)})])))
 
+;; POV `cone { p0, r0, p1, r1 }`, unsurfaced. Either end may be the
+;; point (radius 0): the renderer's cone takes its base first. With two
+;; non-zero radii it's a truncated cone (the snowman's nose), built as
+;; the full cone out to its apex, cut by the cylinder between the two
+;; end planes; equal radii make a cylinder.
+(defn pov-cone [p0 r0 p1 r1]
+  (cond
+    (= r1 0) (cone {:p0 p0 :p1 p1 :r r0})
+    (= r0 0) (cone {:p0 p1 :p1 p0 :r r1})
+    (= r0 r1) (cylinder {:p0 p0 :p1 p1 :r r0})
+    :else
+    (let [big-first (> r0 r1)
+          pb (if big-first p0 p1)
+          rb (if big-first r0 r1)
+          ps (if big-first p1 p0)
+          rs (if big-first r1 r0)
+          apex (p+ pb (p* (p- ps pb) (/ rb (- rb rs))))]
+      (intersection (cone {:p0 pb :p1 apex :r rb})
+                    (cylinder {:p0 pb :p1 ps :r rb})))))
+
 ;; --------------------------------------------------------------------
 ;; Camera
 ;; --------------------------------------------------------------------
@@ -297,10 +317,11 @@
 ; Starting points for metals.inc's F_MetalA ("very soft and dull"),
 ; F_MetalC ("medium reflectivity, holds color well") and F_MetalE
 ; (below), using their
-; ambient, diffuse (:light), specular and reflection numbers. These
-; are *not* flagged :metallic: this renderer's metallic model drops the
-; diffuse term, and POV's metal finishes keep theirs. Switch to the
-; `metallic` helper in _common.lisp if a harder metal look is wanted.
+; ambient, diffuse (:light), specular and reflection numbers. They
+; leave out the finishes' metallic, brilliance and roughness, which the
+; renderer supports since history entry 67 (:metallic keeps the
+; diffuse, :brilliance, :shininess = 1/roughness); xmastree's
+; `surface-ornament` and redball use the full finish.
 (defn pov-metal-a [color]
   (surface {:color (srgb color) :ambient 0.35 :light 0.3 :specular 0.8 :reflection 0.1}))
 

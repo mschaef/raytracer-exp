@@ -66,8 +66,8 @@
 
 ;; `metallic` builds a metal surface: the :metallic flag tells the
 ;; renderer to tint both the mirror reflection and the specular
-;; highlight by the body color and to suppress the Lambertian diffuse
-;; term entirely (metals have essentially no diffuse lobe). A metallic
+;; highlight by the body color, and :light 0 leaves out the Lambertian
+;; diffuse term (metals have essentially no diffuse lobe). A metallic
 ;; surface is always opaque — :transparency is ignored when :metallic
 ;; is true. Takes the reflection strength as a parameter since
 ;; polished-vs-dull is the main knob worth varying.
@@ -76,7 +76,7 @@
   (surface {:color      color
             :ambient    ambient
             :specular   specular
-            :light      light
+            :light      0.0
             :checked    false
             :reflection reflection
             :metallic   true}))

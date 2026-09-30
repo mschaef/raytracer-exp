@@ -544,7 +544,8 @@ fn require_u32(v: &Value, ctx: &str, pos: &Position) -> u32 {
 // ---------------------------------------------------------------------------
 
 /// `(surface {:color [r g b] :ambient n :specular n :light n :checked b
-///            :reflection n :transparency n :metallic b})`
+///            :reflection n :transparency n :metallic b
+///            :shininess n :brilliance n})`
 ///
 /// All keys except `:color` have defaults. The defaults match an
 /// uninteresting matte surface so that omitting a key gives a
@@ -558,9 +559,15 @@ fn require_u32(v: &Value, ctx: &str, pos: &Position) -> u32 {
 ///
 /// `:metallic` (default `false`) flags a metal surface. When `true`,
 /// the renderer tints the mirror reflection and specular highlight by
-/// the surface `color` and suppresses the diffuse term; the surface
-/// is also forced opaque (`:transparency` is ignored). Omitting it
+/// the surface `color`; the surface is also forced opaque
+/// (`:transparency` is ignored). Its diffuse term is `:light`, as for
+/// any surface, so a hard metal says `:light 0`. Omitting it
 /// reproduces every pre-metallic scene exactly.
+///
+/// `:shininess` (default 50, positive) is the highlight's Blinn-Phong
+/// exponent; POV's `roughness r` is `1/r`. `:brilliance` (default 1,
+/// positive) raises the diffuse Lambert factor to that power, like
+/// POV's `brilliance`.
 fn builtin_surface(args: &[Value], pos: &Position) -> Value {
     require_arity(args, 1, "surface", pos);
     let map = require_map(&args[0], "surface", pos);
@@ -579,6 +586,13 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
     let reflection = maybe_key_number(&map, "reflection", "surface", pos).unwrap_or(0.0);
     let transparency = maybe_key_number(&map, "transparency", "surface", pos).unwrap_or(0.0);
     let metallic = maybe_key_bool(&map, "metallic", "surface", pos).unwrap_or(false);
+    let shininess = maybe_key_number(&map, "shininess", "surface", pos).unwrap_or(50.0);
+    let brilliance = maybe_key_number(&map, "brilliance", "surface", pos).unwrap_or(1.0);
+    for (key, value) in [("shininess", shininess), ("brilliance", brilliance)].iter() {
+        if !(*value > 0.0 && value.is_finite()) {
+            sdl_panic!(pos.clone(), "surface :{} must be a positive number (got {})", key, value);
+        }
+    }
 
     Value::Surface(Surface {
         color,
@@ -589,6 +603,8 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
         reflection,
         transparency,
         metallic,
+        shininess,
+        brilliance,
         pigment,
     })
 }

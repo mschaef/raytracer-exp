@@ -76,18 +76,28 @@ pub struct Surface {
     /// shadow; that's Phase 2.
     pub transparency: f64,
     /// Metallic flag. `false` (the default for every pre-metallic
-    /// scene) is an ordinary dielectric surface. When `true`,
-    /// `shade_pixel` reinterprets the existing fields the way a metal
-    /// behaves: the mirror reflection and the specular highlight are
-    /// both tinted component-wise by the surface `color` (a gold
-    /// surface reflects gold-tinted, not chrome-white), and the
-    /// Lambertian diffuse term is suppressed entirely (metals have
-    /// essentially no diffuse lobe). A metallic surface is always
+    /// scene) is an ordinary dielectric surface. When `true`, the
+    /// mirror reflection and the specular highlight are both tinted
+    /// component-wise by the surface `color` (a gold surface reflects
+    /// gold-tinted, not chrome-white). A metallic surface is always
     /// opaque: `transparency` is ignored when `metallic` is `true`.
-    /// This is the simplified "metalness" workflow — one base color
-    /// drives body, reflection, and highlight. Rough/glossy metal
-    /// (scattered reflections) is a deferred follow-on.
+    ///
+    /// The diffuse term is `light`, as for any surface. Until history
+    /// entry 67 `metallic` also dropped it; a hard metal with no
+    /// diffuse lobe now says `light 0` (the `metallic` helper in
+    /// `_common.lisp` does), and one like POV's metal finishes keeps
+    /// some. Rough/glossy metal (scattered reflections) is a deferred
+    /// follow-on.
     pub metallic: bool,
+    /// Blinn-Phong exponent of the specular highlight: larger is
+    /// tighter and glossier. `50.0` is the renderer's long-standing
+    /// fixed value and the default. POV's `roughness r` is `1/r`.
+    pub shininess: f64,
+    /// Exponent on the diffuse Lambert factor, like POV's
+    /// `brilliance`: `1.0` (the default) is plain Lambert; larger
+    /// values darken the diffuse falloff away from the light, so the
+    /// surface looks harder and more metallic.
+    pub brilliance: f64,
     /// A procedural pigment, possibly layered. When set, it replaces
     /// `color` (and the `checked` pattern) as the surface colour,
     /// evaluated at the hit's texture point. Pigments are built once, when a scene is
@@ -1320,6 +1330,8 @@ const MISSING_SURFACE: Surface = Surface {
     reflection: 0.0,
     transparency: 0.0,
     metallic: false,
+    shininess: 50.0,
+    brilliance: 1.0,
     pigment: None,
 };
 
@@ -1343,9 +1355,10 @@ fn shade_pixel(
     lights: &[Light],
     hit: &RayHit,
     depth: Depth,
-    light_coord: (f64, f64),
-    indirect_coord: (f64, f64),
+    sample: PathSample,
 ) -> LinearColor {
+    let light_coord = sample.light;
+    let indirect_coord = sample.indirect;
     // https://en.wikipedia.org/wiki/Lambertian_reflectance
 
     // Unwrap the leaf's surface once at the top, falling back to
@@ -1370,8 +1383,7 @@ fn shade_pixel(
             scene,
             lights,
             Depth { pass: depth.pass + 1, ..depth },
-            light_coord,
-            indirect_coord,
+            sample,
         );
     }
 
@@ -1407,7 +1419,7 @@ fn shade_pixel(
         let rcolor = ray_color(&Vector {
             start: hit.hit_point,
             delta: normalizep(rvec)
-        }, scene, lights, Depth { reflect: depth.reflect + 1, ..depth }, light_coord, indirect_coord);
+        }, scene, lights, Depth { reflect: depth.reflect + 1, ..depth }, sample);
 
         let scaled = scale_linear_color(&rcolor, surface.reflection);
 
@@ -1474,15 +1486,14 @@ fn shade_pixel(
     // collapses to the pre-GI form, and existing byte-pinned
     // tests stay bit-identical via `x + 0.0 == x`.
     //
-    // Why guard on `surface.light > EPSILON` and `!surface.metallic`:
-    // a perfect-mirror dielectric (`light == 0`) has no diffuse
-    // lobe; a metal is similarly suppressed at the direct-lighting
-    // level. Either way the bounce would multiply by zero, so
-    // skipping the recursive `ray_color` entirely is a free win.
+    // Why guard on `surface.light > EPSILON`: a surface with no
+    // diffuse lobe (a perfect mirror, or a hard metal) would multiply
+    // the bounce by zero, so skipping the recursive `ray_color`
+    // entirely is a free win. Metals with some diffuse (history entry
+    // 67) bounce like any other surface.
     let indirect: LinearColor = if scene.indirect_limit > 0
         && depth.indirect < scene.indirect_limit
         && surface.light > EPSILON
-        && !surface.metallic
     {
         // Russian-roulette survival probability. Take the maximum
         // channel of the local throughput `surface.light * scolor`
@@ -1552,20 +1563,18 @@ fn shade_pixel(
             // Cast the bounce ray. Self-intersection: every
             // primitive's `hit_test` rejects `t <= EPSILON`, so
             // the surface we're leaving is discarded — same guard
-            // the reflection and transmission branches use. Reuse
-            // the pixel sample's `light_coord` and `indirect_coord`
-            // for the recursion; per-bounce sampler state would
-            // mean threading sampler state through recursion
-            // proper. RR survival, on the other hand, *is*
-            // decorrelated per bounce via `rr_sample`'s
-            // golden-ratio depth offset.
+            // the reflection and transmission branches use. The
+            // recursion gets fresh area-light and bounce coordinates
+            // for its depth (`PathSample::for_bounce`), so the next
+            // bounce's direction and shadow sample aren't a copy of
+            // this one's (history entry 67; until then every bounce
+            // reused the camera hit's coordinates).
             let incoming = ray_color(
                 &Vector { start: hit.hit_point, delta: dir },
                 scene,
                 lights,
-                Depth { indirect: depth.indirect + 1, ..depth },
-                light_coord,
-                indirect_coord,
+                Depth { indirect: new_depth, ..depth },
+                sample.for_bounce(new_depth),
             );
 
             // Modulate the incoming radiance by the diffuse
@@ -1625,7 +1634,7 @@ fn shade_pixel(
             // *away from* the light and viewer. The even exponent used to
             // hide the sign; clamping needs it the right way round.
             let half_dot = -dotp(normal, normalizep(addp(ray.delta, lv.delta)));
-            let kspecular = f64::powf(half_dot.max(0.0), 50.0);
+            let kspecular = f64::powf(half_dot.max(0.0), surface.shininess);
 
             // Per-light tint that scales every contribution by this
             // light's color and intensity.
@@ -1646,20 +1655,19 @@ fn shade_pixel(
             };
 
             // Diffuse: surface color is modulated by light color
-            // (component-wise), then scaled by the Lambert factor and
-            // the surface's diffuse coefficient. Metals have
-            // essentially no diffuse lobe — all their apparent color
-            // comes from the tinted reflection and specular terms —
-            // so the diffuse contribution is suppressed entirely for
-            // a metallic surface.
-            let diff_term = if surface.metallic {
-                [0.0, 0.0, 0.0]
+            // (component-wise), then scaled by the Lambert factor
+            // (raised to the surface's brilliance) and the surface's
+            // diffuse coefficient. This applies to metals too: a hard
+            // metal sets `light` to 0 (history entry 67).
+            let falloff = if surface.brilliance == 1.0 {
+                lambert
             } else {
-                scale_linear_color(
-                    &multiply_linear_color(&scolor, &light_tint),
-                    surface.light * lambert,
-                )
+                lambert.powf(surface.brilliance)
             };
+            let diff_term = scale_linear_color(
+                &multiply_linear_color(&scolor, &light_tint),
+                surface.light * falloff,
+            );
 
             // Scale this light's full contribution by the shadow-ray
             // transmittance: `1.0` for an unobstructed light (the
@@ -1730,8 +1738,7 @@ fn shade_pixel(
                 scene,
                 lights,
                 Depth { transmit: depth.transmit + 1, ..depth },
-                light_coord,
-                indirect_coord,
+                sample,
             );
             (transmitted, surface.transparency)
         } else {
@@ -1803,16 +1810,51 @@ fn shade_pixel(
     }
 }
 
+/// One pixel sample's coordinates for the sampled dimensions that
+/// `shade_pixel` consumes, plus what it needs to derive fresh ones at
+/// each path-tracing bounce.
+///
+/// At the camera hit (`Depth::zero()`), `light` and `indirect` are the
+/// pixel's rotated R2 and Halton-(17, 19) points, as before. A bounce
+/// to indirect depth `d` gets its own pair from `for_bounce(d)`:
+/// Owen-scrambled, index-shuffled Sobol points seeded by the pixel and
+/// the depth (`sampler::owen_sobol_2d`). Reflection, transmission and
+/// pass-through rays keep the coordinates they arrive with.
+#[derive(Clone, Copy, Debug)]
+struct PathSample {
+    /// Area-light coordinate in `[0, 1)²`.
+    light: (f64, f64),
+    /// Indirect-bounce coordinate in `[0, 1)²`.
+    indirect: (f64, f64),
+    /// The sample's index within its pixel (0-based).
+    index: u32,
+    /// A per-pixel hash, the root of every bounce's scramble seed.
+    pixel_seed: u32,
+}
+
+impl PathSample {
+    /// The coordinates for a ray at indirect depth `depth` (`>= 1`).
+    /// Stratified across the pixel's samples at that depth (the same
+    /// index runs through one scrambled Sobol set), and independent of
+    /// every other depth and dimension (each gets its own seed).
+    fn for_bounce(self, depth: u32) -> PathSample {
+        PathSample {
+            light: sampler::owen_sobol_2d(self.index, sampler::bounce_seed(self.pixel_seed, depth, 0)),
+            indirect: sampler::owen_sobol_2d(self.index, sampler::bounce_seed(self.pixel_seed, depth, 1)),
+            ..self
+        }
+    }
+}
+
 fn ray_color(
     ray: &Vector,
     scene: &Scene,
     lights: &[Light],
     depth: Depth,
-    light_coord: (f64, f64),
-    indirect_coord: (f64, f64),
+    sample: PathSample,
 ) -> LinearColor {
     match scene.root.hit_test(ray) {
-        Some(hit) => shade_pixel(ray, scene, lights, &hit, depth, light_coord, indirect_coord),
+        Some(hit) => shade_pixel(ray, scene, lights, &hit, depth, sample),
         None => scene.background
     }
 }
@@ -1911,6 +1953,9 @@ fn pixel_color(
     // `shade_pixel` but has no consumer yet — Phase 2 adds the
     // indirect branch to `shade_pixel` that reads it.
     let has_indirect = scene.indirect_limit > 0;
+    // The root of each bounce's sample seeds (see `PathSample`); unused
+    // without indirect lighting.
+    let pixel_seed = if has_indirect { sampler::pixel_seed(x, y) } else { 0 };
     let (iox, ioy) = if has_indirect {
         sampler::cranley_patterson_indirect_offset(x, y)
     } else {
@@ -2048,8 +2093,12 @@ fn pixel_color(
                 scene,
                 lights,
                 Depth::zero(),
-                light_coord,
-                indirect_coord,
+                PathSample {
+                    light: light_coord,
+                    indirect: indirect_coord,
+                    index: i,
+                    pixel_seed,
+                },
             );
 
             // Capture the sample's max indirect depth and add it
@@ -2313,6 +2362,8 @@ mod light_tests {
             reflection: 0.0,
             transparency: 0.0,
             metallic: false,
+            shininess: 50.0,
+            brilliance: 1.0,
             pigment: None,
         }
     }

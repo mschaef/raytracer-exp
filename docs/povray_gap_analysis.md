@@ -80,8 +80,13 @@ plans.
   transparency layering. nba tuned too (entry 64: AgX Punchy, +1.5),
   and xmastree (entry 65: metallic ornaments, +1), then redball,
   braids and train (entry 66). Every port except snowman is tuned.
-- **Tuning pass done** (entries 60–66). Snowman is next once Mike is
-  happy with the current images.
+- **Renderer gaps from the tuning pass fixed** (CLAUDE.md entry 67):
+  `:shininess` (POV roughness) and `:brilliance`, `:metallic` keeps
+  its diffuse, and path-tracing bounces get their own sample
+  coordinates.
+- **Tuning pass done** (entries 60–66).
+- **Snowman started:** phase 1, avatar.pov with stand-ins (entry 68).
+  The phases are in CLAUDE.md, "Snowman port: plan".
 - **View transform plan written** (CLAUDE.md, "View transform (tone
   mapping): implementation plan"). The output clips each channel on its
   own, which shifts bright colours toward yellow, cyan and the like. Its
