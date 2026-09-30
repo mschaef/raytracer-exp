@@ -89,7 +89,8 @@ plans.
   phase 2, the blob primitive (entry 69); phase 3, bump normals
   (entry 70); phase 4, filter transparency, with avatar.pov tuned
   against avatar.jpg (entry 71); phase 5, height fields and
-  sphere.pov (entry 72).
+  sphere.pov (entry 72); phase 6a–6c, the room's stock textures, sky,
+  and brick pattern with pigment maps (entry 73).
   The phases are in CLAUDE.md, "Snowman port: plan".
 - **View transform plan written** (CLAUDE.md, "View transform (tone
   mapping): implementation plan"). The output clips each channel on its

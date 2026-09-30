@@ -3311,6 +3311,61 @@ Approximate order of recent commits, oldest first:
     - Not done: PNG height fields (sphere2's optional yard, `yard.tga`,
       exists only as yard.png) and `image_map` pigments (sphere.pov has
       one commented out).
+73. **Snowman phase 6a–6c: stock textures, the sky, brick and pigment
+    maps.** The first half of the sphere2.pov room; see "Snowman port:
+    plan", phase 6.
+    - **6a, stock textures.** `_pov.lisp` gains textures.inc's
+      `DMFWood1`, `DMFWood2`, `DMFWood6`, `EMBWood1` and `Yellow_Pine`
+      as pigments (with the finishes of the ones that have them, as
+      surface maps), `Glass2` and `Glass3` as surface maps, and the
+      colours `Silver`, `Gray30`, `Gray70` and `Tan`. Values are from
+      POV-Ray's current distribution textures.inc; POV 3.1's may differ
+      slightly. There `DMFWood1` and `DMFWood2` are pigments, though
+      sphere2.pov writes `texture { DMFWood1 }`, so they get POV's
+      default finish. `DMFWood6` has a finish per layer; the port uses
+      the bottom layer's (one finish per surface). `EMBWood1`'s `crand`
+      isn't modelled.
+      - Glass3 is filter 0.9 and roughness 0.0003, not the 0.8 and 0.003
+        guessed in phase 1; the avatar's glass comment now says so (its
+        values were tuned to avatar.jpg and stay).
+    - **6b, sky.** Scene `:sky`: a pigment evaluated at the unit
+      direction of a ray that hits nothing, in place of `:background`
+      (POV's `sky_sphere`). New pattern `:gradient` (`:axis`, default
+      +y), whose default wave is `:ramp`, as in POV.
+    - **6c, brick and pigment maps.**
+      - `Pattern::Brick { size, mortar }` (`:brick-size`, default
+        `[8 3 4.5]`; `:mortar`, default 0.5): POV's brick, 0 in the
+        mortar and 1 in a brick, courses offset by half a brick in
+        alternate courses. POV lists the mortar texture first.
+      - `Pigment.pigment_map` (`:pigment-map [[v pigment] ...]` or
+        `:pigments [a b]`): a pattern picks or blends whole pigments
+        (each a map or layers), evaluated at the outer pattern's point
+        through their own transforms. This is how `Wood_Floor`'s
+        `brick texture { DMFWood2 } texture { Yellow_Pine }` works;
+        both woods have POV's default finish, so one surface finish
+        loses nothing.
+      - `srgb-pigment` decodes nested pigments too.
+      - `Whitewash_Pine` (Yellow_Pine under white with filter 0.2) uses
+        transmit 0.2: through white, a filter passes the layer below
+        unchanged, like a transmit.
+    - `scenes/_snowman_room_textures.lisp` holds the room's textures
+      (`wood-surface`, `whitewash-pine`, `wood-floor`, `room-sky`);
+      `scenes/snowman_room_textures.lisp` is a swatch board of them
+      (`Claude outputs/snowman_room_textures.png`).
+      - Found making it: a surface lying exactly on a plane of brick
+        joints (a floor top at y = 0 under Wood_Floor's rotation) shows
+        whole courses as mortar, from rounding. The room's floor top is
+        at y = 1.5, clear of it.
+      - At the room's inch scale the DMFWood and Yellow_Pine rings
+        (scaled 0.05 and 0.1) are much finer than a pixel and read as
+        flat colour, as they would in POV.
+    - Tests: pigment unit tests for the brick joints and course offset,
+      the gradient, and pigment maps; in the suite
+      `sky_is_a_pigment_on_the_direction`,
+      `brick_pigments_choose_between_pigments`,
+      `pattern_pigments_reject_bad_keys` and
+      `snowman_room_textures_scene_loads`. Every existing scene renders
+      byte-identically.
 
 ## Pitfalls and conventions
 
@@ -4733,10 +4788,31 @@ PNG for yard.png; the tga the scene names isn't in the repo).
 
 ### Phase 6 — sphere2.pov: the room
 
-The includes (furniture, window, utilities) as SDL, `sky_sphere` with a
-`gradient` colour map, the `brick` pattern choosing textures (Wood_Floor),
-`Whitewash_Pine` and `EMBWood1`, and the lighting set-ups. The largest
-phase; likely split once its includes are read.
+sphere2.pov's `DO_*` switches were Mike's quality toggles while
+modelling (lower fidelity to tune shapes). The final render has them all
+on (lights, area lighting, glass); the port renders that by default,
+with the as-written ambient-plus-clock-light mode as a flag.
+
+- **6a — Stock textures (done, entry 73).** textures.inc's woods and
+  glasses, and colors.inc colours, in `_pov.lisp`.
+- **6b — Sky (done, entry 73).** Scene `:sky`, `:gradient` pattern.
+- **6c — Brick and pigment maps (done, entry 73).** `Wood_Floor`.
+- **6d — The props.** `_snowman_room.lisp`: the includes as SDL
+  (RoundedBox, OneAxisRoundedBox, Quarter_Round, Corner_Round, the IKEA
+  desk, the mirror, WallOutlet, ModernCross, ModernClock with its red
+  internal light, WindowGlass, WindowFrame, WindowBlindSlats, Axis),
+  each rendered alone on a contact sheet to check the POV transform
+  order.
+- **6e — The room.** Walls with window openings and `wrinkles`, the
+  floor and molding, the placements, the snow plane and camera; render
+  time and bounding (a BVH per window of blinds). Kept as written: the
+  bowtie isn't moved with the snowman, and Wood_Floor's scale is
+  commented out (big boards).
+- **6f — Lighting and tuning.** Flags for lights, area lighting and
+  glass (all on by default); tune both lighting modes by eye (no
+  reference render).
+- Left out: the yard height field (needs PNG, and yard.tga isn't in the
+  repo), ArtDecoClock and Brushed_Aluminum (unused), refraction.
 
 ### Phase 7 — moldingtest.pov
 

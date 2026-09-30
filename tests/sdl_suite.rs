@@ -1109,6 +1109,11 @@ fn snowman_sphere_scene_loads() {
 }
 
 #[test]
+fn snowman_room_textures_scene_loads() {
+    assert_scene_loads("snowman_room_textures.lisp", "snowman-room-textures-scene");
+}
+
+#[test]
 fn metallic_test_scene_loads() {
     assert_scene_loads("metallic_test.lisp", "metallic-test-scene");
 }
@@ -1577,6 +1582,93 @@ fn height_field_rejects_bad_input() {
         let env = sdl::default_env();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             sdl::eval_source(source, "hf_bad.lisp", &env);
+        }));
+        let message = match result {
+            Ok(_) => panic!("must reject {}", source),
+            Err(p) => p.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        assert!(message.contains(expected), "{}: {}", source, message);
+    }
+}
+
+/// A scene `:sky` is a pigment on the ray's direction: sky_sphere's
+/// gradient, black above the horizon and red below, seen looking up and
+/// looking down (no objects).
+#[test]
+fn sky_is_a_pigment_on_the_direction() {
+    let look = |target: &str, tag: &str| {
+        let source = format!(
+            r#"
+(def s (scene {{:name "sky"
+               :camera (camera-looking-at [0 0 0] {} [1 0 0] 4)
+               :background [0 0 1]
+               :sky {{:pattern :gradient :color-map [[0 [1 0 0]] [0.5 [1 0 0]] [0.5 [0 0 0]] [1 [0 0 0]]]
+                      :transform (affine-compose (affine-translation [0 -1 0]) (affine-scale [2 2 2]))}}
+               :min-samples 1 :max-samples 1
+               :view {{:curve :clip}}
+               :objects []}}))
+(def t (png-target 3 3))
+(render s t 3 3)
+(save-png t PATH)
+"#,
+            target
+        );
+        render_to_image(&source, tag).get_pixel(1, 1).0
+    };
+    assert_eq!(look("[0 1 0]", "sky_up"), [0, 0, 0]);
+    assert_eq!(look("[0 -1 0]", "sky_down"), [255, 0, 0]);
+}
+
+/// A `:brick` pigment choosing whole pigments: mostly the second
+/// (brick), with the first (mortar) in the joints.
+#[test]
+fn brick_pigments_choose_between_pigments() {
+    let source = r#"
+(def s (scene {:name "brick"
+               :camera (camera-looking-at [0 0 -10] [0 0 0] [0 1 0] 1)
+               :background [0 0 0]
+               :min-samples 1 :max-samples 1
+               :view {:curve :clip}
+               :objects [(with-surface
+                           (surface {:ambient 1.0 :light 0.0
+                                     :pigment {:pattern :brick :brick-size [1 0.5 100] :mortar 0.1
+                                               :pigments [{:color [1 1 1]}
+                                                          [{:color [1 0 0]} {:color [0 0 1 0.5]}]]}})
+                           ; The front face at z = 4.95, clear of the joints
+                           ; across z (every 100 units).
+                           (cuboid {:center [0 0 5] :size [20 20 0.1]}))]}))
+(def t (png-target 41 41))
+(render s t 41 41)
+(save-png t PATH)
+"#;
+    let img = render_to_image(source, "brick_pigments");
+    let (mut mortar, mut brick, mut other) = (0, 0, 0);
+    for p in img.as_raw().chunks(3) {
+        match p {
+            [255, 255, 255] => mortar += 1,
+            // Red under a half-clear blue layer.
+            [r, 0, b] if *r > 150 && *b > 150 => brick += 1,
+            _ => other += 1,
+        }
+    }
+    assert!(brick > 2 * mortar && mortar > 50 && other < 100, "mortar {} brick {} other {}", mortar, brick, other);
+}
+
+#[test]
+fn pattern_pigments_reject_bad_keys() {
+    let cases = [
+        ("{:pattern :wood :axis [0 1 0] :colors [[0 0 0] [1 1 1]]}", "only applies to a :gradient"),
+        ("{:pattern :bozo :mortar 1 :colors [[0 0 0] [1 1 1]]}", "only applies to a :brick"),
+        ("{:pattern :brick :brick-size [0 1 1] :colors [[0 0 0] [1 1 1]]}", "positive"),
+        ("{:pattern :checker :colors [[0 0 0] [1 1 1]] :pigments [{:color [0 0 0]} {:color [1 1 1]}]}", "not both"),
+        ("{:pattern :checker :pigments [{:color [0 0 0]}]}", "two pigments"),
+        ("{:pattern :stripes :colors [[0 0 0] [1 1 1]]}", ":gradient or :brick"),
+    ];
+    for (pigment, expected) in cases.iter() {
+        let source = format!("(surface {{:pigment {}}})", pigment);
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(&source, "pigment_bad.lisp", &env);
         }));
         let message = match result {
             Ok(_) => panic!("must reject {}", source),

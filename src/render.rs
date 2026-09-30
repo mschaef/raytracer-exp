@@ -575,6 +575,11 @@ pub struct Scene {
     /// the canonical place for everything in the scene graph).
     pub root: Shape,
     pub background: LinearColor,
+    /// A pigment for what a ray sees when it hits nothing, evaluated at
+    /// the ray's unit direction (POV-Ray's `sky_sphere`). When set it
+    /// replaces `background` for those rays; `None` (the default) keeps
+    /// the plain background.
+    pub sky: Option<&'static LayeredPigment>,
 
     pub reflect_limit: u32,
 
@@ -1914,7 +1919,14 @@ fn ray_color(
 ) -> LinearColor {
     match scene.root.hit_test(ray) {
         Some(hit) => shade_pixel(ray, scene, lights, &hit, depth, sample),
-        None => scene.background
+        None => match scene.sky {
+            Some(sky) => {
+                let d = ray.delta;
+                let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                sky.color_at([d[0] / len, d[1] / len, d[2] / len])
+            }
+            None => scene.background,
+        },
     }
 }
 
@@ -2437,6 +2449,7 @@ mod light_tests {
             camera: Camera::looking_at([0.0, -5.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 1.0),
             root: group(vec![Shape::Sphere(Sphere { center: [0.0, 0.0, 0.0], r: 1.0, surface: Some(opaque()) })]),
             background: [0.0, 0.0, 0.0],
+            sky: None,
             reflect_limit: 0,
             transmit_limit: 0,
             indirect_limit: 0,

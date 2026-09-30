@@ -48,11 +48,16 @@
   (let [rgb [(srgb-channel (nth c 0)) (srgb-channel (nth c 1)) (srgb-channel (nth c 2))]]
     (if (= (count c) 4) (conj rgb (nth c 3)) rgb)))
 
-; A pigment map with every colour decoded: :color, :colors and the
-; colours of :color-map (whose positions stay as they are).
+; A pigment map with every colour decoded: :color, :colors, the
+; colours of :color-map (whose positions stay as they are), and the
+; pigments of :pigments and :pigment-map (recursively).
 (defn srgb-pigment-layer [layer]
   (let [layer (if (get layer :color) (assoc layer :color (srgb (get layer :color))) layer)
-        layer (if (get layer :colors) (assoc layer :colors (map srgb (get layer :colors))) layer)]
+        layer (if (get layer :colors) (assoc layer :colors (map srgb (get layer :colors))) layer)
+        layer (if (get layer :pigments) (assoc layer :pigments (map srgb-pigment (get layer :pigments))) layer)
+        layer (if (get layer :pigment-map)
+                (assoc layer :pigment-map (map (fn [[v p]] [v (srgb-pigment p)]) (get layer :pigment-map)))
+                layer)]
     (if (get layer :color-map)
       (assoc layer :color-map (map (fn [[v c]] [v (srgb c)]) (get layer :color-map)))
       layer)))
@@ -284,6 +289,90 @@
   {:pattern    :wood
    :turbulence 0.2
    :color-map  [[0.8 [0.43 0.24 0.05]] [0.8 [0.40 0.33 0.06]] [1.0 [0.20 0.03 0.03]]]})
+
+;; --------------------------------------------------------------------
+;; More of textures.inc (for the snowman room)
+;; --------------------------------------------------------------------
+;
+; Pigments as POV numbers (decode with `srgb-pigment` in a scene without
+; assumed_gamma 1.0; the snowman scenes use them as written). Values
+; from POV-Ray's distribution textures.inc (github.com/POV-Ray/povray,
+; distribution/include). Where a texture has its own finish, it's given
+; as a surface map without the pigment, for the scene to combine.
+
+; DMFWood1 and DMFWood2: plain wood pigments with no finish (so POV's
+; default finish). sphere2.pov writes them as `texture { DMFWood1 }`.
+(def pov-dmf-wood-1
+  {:pattern :wood :turbulence 0.04 :octaves 3
+   :color-map [[0.1 [0.60 0.30 0.18]] [0.9 [0.30 0.15 0.09]]]
+   :transform (affine-scale [0.05 0.05 1])})
+
+(def pov-dmf-wood-2
+  {:pattern :wood :turbulence 0.03 :octaves 4
+   :color-map [[0.1 [0.52 0.37 0.26]] [0.9 [0.42 0.26 0.15]]]
+   :transform (affine-scale [0.05 0.05 1])})
+
+; DMFWood6: three layers (wood, streaky grain, and a thin orange
+; varnish), each with its own finish; this renderer has one finish per
+; surface, so it takes the bottom layer's (`pov-dmf-wood-6-finish`).
+(def pov-dmf-wood-6
+  [{:pattern :wood :turbulence 0.04 :octaves 3
+    :color-map [[0.1 [0.88 0.60 0.4]] [0.9 [0.60 0.40 0.3]]]
+    :transform (affine-scale [0.05 0.05 1])}
+   {:pattern :wood :turbulence [0.1 0.5 1] :octaves 5 :lambda 3.25
+    :color-map [[0.0 [0.7 0.6 0.4 0.100]] [0.1 [0.8 0.6 0.3 0.500]]
+                [0.1 [0.8 0.6 0.3 0.650]] [0.9 [0.6 0.4 0.2 0.975]]
+                [1.0 [0.6 0.4 0.2 1.000]]]
+    :transform (pov-transform [[:scale [0.15 0.5 1]] [:rotate [5 10 5]] [:translate [-2 0 0]]])}
+   {:color [0.75 0.15 0.0 0.95]}])
+
+; The bottom layer's finish: specular 0.25, roughness 0.05, ambient
+; 0.45, diffuse 0.33, reflection 0.15.
+(def pov-dmf-wood-6-finish
+  {:ambient 0.45 :light 0.33 :specular 0.25 :shininess 20 :reflection 0.15})
+
+; EMBWood1: wood under a bozo of pale, partly clear flecks. The bottom
+; layer's finish: ambient 0.32, diffuse 0.63, phong 0.2 phong_size 10
+; (its `crand 0.02` graininess isn't modelled).
+(def pov-emb-wood-1
+  [{:pattern :wood :turbulence 0.05
+    :color-map [[0.00 [0.58 0.45 0.23]] [0.34 [0.65 0.45 0.25]] [0.40 [0.33 0.23 0.13]]
+                [0.47 [0.60 0.40 0.20]] [1.00 [0.25 0.15 0.05]]]}
+   {:pattern :bozo
+    :color-map [[0.0 [1.00 1.00 1.00 1.00]] [0.8 [1.00 0.90 0.80 0.80]] [1.0 [0.30 0.20 0.10 0.40]]]
+    :transform (affine-scale [0.25 0.25 0.25])}])
+
+(def pov-emb-wood-1-finish {:ambient 0.32 :light 0.63 :specular 0.2 :shininess 10})
+
+; Yellow_Pine: fine rings with a coarser, partly clear grain over them.
+; No finish (POV's default).
+(def pov-yellow-pine
+  [{:pattern :wood :turbulence 0.02
+    :color-map [[0.222 [0.808 0.671 0.251]] [0.342 [0.600 0.349 0.043]]
+                [0.393 [0.808 0.671 0.251]] [0.709 [0.808 0.671 0.251]]
+                [0.821 [0.533 0.298 0.027]] [1.000 [0.808 0.671 0.251]]]
+    :transform (pov-transform [[:scale [0.1 0.1 0.1]] [:translate [10 0 0]]])}
+   {:pattern :wood :turbulence 0.01
+    :color-map [[0.000 [1.000 1.000 1.000 1.000]] [0.120 [0.702 0.467 0.118 0.608]]
+                [0.496 [1.000 1.000 1.000 1.000]] [0.701 [1.000 1.000 1.000 1.000]]
+                [0.829 [0.702 0.467 0.118 0.608]] [1.000 [1.000 1.000 1.000 1.000]]]
+    :transform (pov-transform [[:scale [0.5 0.5 0.5]] [:translate [10 0 0]]])}])
+
+; Glass2: clear (rgbf <1, 1, 1, 1>), ambient 0, diffuse 0, reflection
+; 0.5, phong 0.3 phong_size 60. Glass3: rgbf <0.98, 0.98, 0.98, 0.9>,
+; ambient 0.1, diffuse 0.1, reflection 0.1, specular 0.8, roughness
+; 0.0003, phong 1 phong_size 400. As surface maps; a filter of 1 or
+; 0.9 over near-white is almost the same as transparency.
+(def pov-glass-2 {:color [1 1 1] :ambient 0.0 :light 0.0 :reflection 0.5
+                  :specular 0.3 :shininess 60 :filter 1.0})
+(def pov-glass-3 {:color [0.98 0.98 0.98] :ambient 0.1 :light 0.1 :reflection 0.1
+                  :specular 1.0 :shininess 400 :filter 0.9})
+
+; colors.inc colours the snowman room uses.
+(def pov-silver [0.90 0.91 0.98])
+(def pov-gray30 [0.3 0.3 0.3])
+(def pov-gray70 [0.7 0.7 0.7])
+(def pov-tan    [0.858824 0.576471 0.439216])
 
 ; Chrome, for cpot's pot. textures.inc's Chrome_Texture is grey 0.66
 ; with ambient 0.3, diffuse 0.7, reflection 0.15 and specular 0.8, which

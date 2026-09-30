@@ -640,6 +640,11 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
 /// The result is leaked to get the `'static` reference `Surface`
 /// holds (see `Surface::pigment`).
 fn build_layered_pigment(v: &Value, pos: &Position) -> &'static LayeredPigment {
+    Box::leak(Box::new(build_layers(v, pos)))
+}
+
+/// One pigment map, or a vector of them as layers (bottom first).
+fn build_layers(v: &Value, pos: &Position) -> LayeredPigment {
     let layers = match v {
         Value::Vec(items) => {
             if items.is_empty() {
@@ -649,7 +654,7 @@ fn build_layered_pigment(v: &Value, pos: &Position) -> &'static LayeredPigment {
         }
         _ => vec![build_pigment(v, pos)],
     };
-    Box::leak(Box::new(LayeredPigment { layers }))
+    LayeredPigment { layers }
 }
 
 /// A colour, `[r g b]` or `[r g b t]` with a transmit `t` (0 opaque, 1
@@ -668,7 +673,11 @@ fn require_rgbt(v: &Value, ctx: &str, pos: &Position) -> Rgbt {
 /// Build one pigment from its SDL map:
 ///
 /// - `:pattern` — `:wood` (concentric rings around the z axis),
-///   `:checker` (unit cubes) or `:bozo` (smooth noise).
+///   `:checker` (unit cubes), `:bozo` (smooth noise), `:gradient`
+///   (bands along `:axis`, default `[0 1 0]`; its default wave is
+///   `:ramp`, as in POV) or `:brick` (`:brick-size`, default
+///   `[8 3 4.5]`, and `:mortar`, default 0.5; value 0 in the mortar, 1
+///   in a brick).
 /// - `:color` — instead of a pattern: one colour everywhere, usually
 ///   with a transmit, as a layer (POV's `pigment { rgbt <...> }`).
 /// - `:color-map` — `[[value colour] ...]`, ascending values in
@@ -682,11 +691,17 @@ fn require_rgbt(v: &Value, ctx: &str, pos: &Position) -> Rgbt {
 /// - `:transform` — an affine applied to the pattern, like POV's
 ///   transforms inside a `pigment { }` (e.g. `(affine-scale [0.05 0.05
 ///   0.05])` for rings 20 times finer).
+/// - `:pigment-map` — instead of a colour map, `[[value pigment] ...]`,
+///   where each pigment is a pigment map or a vector of layers; the
+///   pattern picks or blends whole pigments (POV's `pigment_map`, or a
+///   block pattern's list of textures). `:pigments [a b]` is the
+///   two-entry shorthand at values 0 and 1, as `:colors` is.
 ///
 fn build_pigment(v: &Value, pos: &Position) -> Pigment {
     let map = require_map(v, "surface :pigment", pos);
-    const KEYS: [&str; 10] = [
+    const KEYS: [&str; 15] = [
         "pattern", "color", "color-map", "colors", "turbulence", "octaves", "omega", "lambda", "wave", "transform",
+        "axis", "brick-size", "mortar", "pigment-map", "pigments",
     ];
     for k in map.keys() {
         if !KEYS.contains(&k.as_str()) {
@@ -712,6 +727,7 @@ fn build_pigment(v: &Value, pos: &Position) -> Pigment {
             wave: Wave::Triangle,
             color_map: vec![(0.0, require_rgbt(c, "pigment :color", pos))],
             from_texture: Affine::identity(),
+            pigment_map: Vec::new(),
         };
     }
 
@@ -719,18 +735,85 @@ fn build_pigment(v: &Value, pos: &Position) -> Pigment {
         Some("wood") => Pattern::Wood,
         Some("checker") => Pattern::Checker,
         Some("bozo") => Pattern::Bozo,
-        Some(other) => sdl_panic!(pos, "pigment: unknown :pattern :{} (expected :wood, :checker or :bozo)", other),
+        Some("gradient") => {
+            let axis = maybe_key_point(&map, "axis", "pigment", pos).unwrap_or([0.0, 1.0, 0.0]);
+            if lenp(axis) < 1e-12 {
+                sdl_panic!(pos, "pigment :axis must be non-zero");
+            }
+            Pattern::Gradient { axis: normalizep(axis) }
+        }
+        Some("brick") => {
+            let size = maybe_key_point(&map, "brick-size", "pigment", pos).unwrap_or([8.0, 3.0, 4.5]);
+            let mortar = maybe_key_number(&map, "mortar", "pigment", pos).unwrap_or(0.5);
+            if !size.iter().all(|s| *s > 0.0) || mortar < 0.0 {
+                sdl_panic!(pos, "pigment: :brick-size must be positive and :mortar non-negative");
+            }
+            Pattern::Brick { size, mortar }
+        }
+        Some(other) => sdl_panic!(
+            pos,
+            "pigment: unknown :pattern :{} (expected :wood, :checker, :bozo, :gradient or :brick)",
+            other
+        ),
         None => sdl_panic!(pos, "pigment: missing :pattern (or :color for a solid colour)"),
     };
+    for (key, owner) in [("axis", "gradient"), ("brick-size", "brick"), ("mortar", "brick")] {
+        let belongs = matches!(
+            (owner, pattern),
+            ("gradient", Pattern::Gradient { .. }) | ("brick", Pattern::Brick { .. })
+        );
+        if map.contains_key(key) && !belongs {
+            sdl_panic!(pos, "pigment: :{} only applies to a :{} pattern", key, owner);
+        }
+    }
     let wave = match keyword("wave").as_deref() {
+        None if matches!(pattern, Pattern::Gradient { .. }) => Wave::Ramp,
         None | Some("triangle") => Wave::Triangle,
         Some("ramp") => Wave::Ramp,
         Some("sine") => Wave::Sine,
         Some(other) => sdl_panic!(pos, "pigment: unknown :wave :{} (expected :triangle, :ramp or :sine)", other),
     };
 
+    let pigment_map: Vec<(f64, LayeredPigment)> = match (map.get("pigment-map"), map.get("pigments")) {
+        (Some(_), Some(_)) => sdl_panic!(pos, "pigment: give :pigment-map or :pigments, not both"),
+        (Some(pm), None) => {
+            let entries = require_vec(pm, "pigment :pigment-map", pos);
+            if entries.is_empty() {
+                sdl_panic!(pos, "pigment: :pigment-map is empty");
+            }
+            let mut out: Vec<(f64, LayeredPigment)> = Vec::with_capacity(entries.len());
+            for e in entries.iter() {
+                let pair = require_vec(e, "pigment :pigment-map entry", pos);
+                if pair.len() != 2 {
+                    sdl_panic!(pos, "pigment: each :pigment-map entry is [value pigment] (got {})", e);
+                }
+                let value = require_number(&pair[0], "pigment :pigment-map value", pos);
+                if let Some((last, _)) = out.last() {
+                    if value < *last {
+                        sdl_panic!(pos, "pigment: :pigment-map values must ascend ({} after {})", value, last);
+                    }
+                }
+                out.push((value, build_layers(&pair[1], pos)));
+            }
+            out
+        }
+        (None, Some(ps)) => {
+            let items = require_vec(ps, "pigment :pigments", pos);
+            if items.len() != 2 {
+                sdl_panic!(pos, "pigment: :pigments takes two pigments (got {})", items.len());
+            }
+            vec![(0.0, build_layers(&items[0], pos)), (1.0, build_layers(&items[1], pos))]
+        }
+        (None, None) => Vec::new(),
+    };
+    let has_pigment_map = !pigment_map.is_empty();
+
     let color_map: Vec<(f64, Rgbt)> = match (map.get("color-map"), map.get("colors")) {
         (Some(_), Some(_)) => sdl_panic!(pos, "pigment: give :color-map or :colors, not both"),
+        (Some(_), None) | (None, Some(_)) if has_pigment_map => {
+            sdl_panic!(pos, "pigment: give a colour map or a pigment map, not both")
+        }
+        (None, None) if has_pigment_map => Vec::new(),
         (Some(cm), None) => {
             let entries = require_vec(cm, "pigment :color-map", pos);
             if entries.is_empty() {
@@ -763,7 +846,10 @@ fn build_pigment(v: &Value, pos: &Position) -> Pigment {
                 (1.0, require_rgbt(&colors[1], "pigment :colors", pos)),
             ]
         }
-        (None, None) => sdl_panic!(pos, "pigment: needs :color-map (or :colors for a checker)"),
+        (None, None) => sdl_panic!(
+            pos,
+            "pigment: needs :color-map (or :colors for a checker), or :pigment-map (or :pigments)"
+        ),
     };
 
     let defaults = Octaves::default();
@@ -800,6 +886,7 @@ fn build_pigment(v: &Value, pos: &Position) -> Pigment {
         wave,
         color_map,
         from_texture: transform.inverse(),
+        pigment_map,
     }
 }
 
@@ -1743,6 +1830,10 @@ fn builtin_aabb(args: &[Value], pos: &Position) -> Value {
 ///          :min-samples n :max-samples m :variance-threshold t
 ///          :view {:curve :clip :exposure 0} :size [w h]})`
 ///
+/// `:sky` is a pigment (a map or layers, as a surface's `:pigment`)
+/// for rays that hit nothing, evaluated at the ray's unit direction:
+/// POV-Ray's `sky_sphere`. It replaces `:background` for those rays.
+///
 /// `:size [w h]` is the image size the scene was composed for (e.g.
 /// `[640 480]` for a 4:3 POV port). main.rs renders at it unless the
 /// `SIZE` environment variable says otherwise; `(render ...)` ignores
@@ -1807,6 +1898,7 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
     let camera = require_key_camera(&map, "camera", "scene", pos);
     let background = maybe_key_point(&map, "background", "scene", pos)
         .unwrap_or([0.0, 0.0, 0.0]);
+    let sky = map.get("sky").map(|v| build_layered_pigment(v, pos));
 
     let objects_v = require_key(&map, "objects", "scene", pos);
     let objects_items = require_vec(objects_v, "scene :objects", pos);
@@ -1888,6 +1980,7 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         camera,
         root,
         background,
+        sky,
         reflect_limit,
         transmit_limit,
         indirect_limit,

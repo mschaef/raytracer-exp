@@ -140,14 +140,17 @@
 
 ; The mirror glass: box { <-5, -0.5, -5>, <5, 0, 5> } with
 ; pigment { rgbf <0, 0, 0.1, 0.9> } and then texture { Glass3 }, which
-; POV layers: Glass3 (near-white, filter 0.8, ambient 0.1, diffuse 0.1,
-; reflection 0.1, specular 0.8, roughness 0.003) over the dark blue
-; filter. Through both, only a little dark blue light gets through, and
-; what shows is mostly Glass3's own dim body. One surface can't hold
-; two layers, so this is an equivalent chosen to match avatar.jpg's
-; floor, a greyish navy (about 34, 34, 58): a grey-blue body with a
-; little blue-tinted filter. Glass3 alone (white, filter 0.8) left the
-; floor light grey; the blue layer alone left it nearly black.
+; POV layers: Glass3 (near-white, filter 0.9, ambient 0.1, diffuse 0.1,
+; reflection 0.1, specular 0.8, roughness 0.0003, phong 1; see
+; `pov-glass-3`) over the dark blue filter. Through both, only a little
+; dark blue light gets through, and what shows is mostly Glass3's own
+; dim body. One surface can't hold two layers, so this is an equivalent
+; chosen to match avatar.jpg's floor, a greyish navy (about 34, 34, 58):
+; a grey-blue body with a little blue-tinted filter. Glass3 alone (white,
+; filter 0.8, tried before its exact values were looked up) left the
+; floor light grey; the blue layer alone left it nearly black. The
+; highlight exponent (333) is from that first guess at the roughness;
+; it's left as tuned.
 (def mirror-glass
   (with-surface (surface {:color [0.2 0.2 0.4] :ambient 0.1 :light 0.1
                           :specular 0.8 :shininess 333 :reflection 0.1

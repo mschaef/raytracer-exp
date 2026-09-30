@@ -47,6 +47,16 @@ pub enum Pattern {
     Bozo,
     /// One colour everywhere: the first colour-map entry.
     Solid,
+    /// Bands along a unit `axis` (POV-Ray's `gradient`): the value is
+    /// the distance along the axis, so with the ramp wave (its default)
+    /// it runs 0 to 1 once per unit. Turbulence displaces the point.
+    Gradient { axis: Point },
+    /// Bricks of `size` separated by `mortar` (both in pattern units),
+    /// each course offset by half a brick (POV-Ray's `brick`): the value
+    /// is 0 in the mortar and 1 in a brick, so a two-entry map lists the
+    /// mortar first, as POV's `brick mortar_colour, brick_colour` does.
+    /// Turbulence displaces the point.
+    Brick { size: Point, mortar: f64 },
 }
 
 /// A colour with a transmit channel: `[r, g, b, t]`. `t = 0` is opaque;
@@ -83,6 +93,14 @@ pub struct Pigment {
     /// Texture space to pattern space: the inverse of the transforms
     /// written on the pigment.
     pub from_texture: Affine,
+    /// Instead of `color_map`, when not empty: `(value, pigment)`
+    /// entries, POV-Ray's pigment map (or a block pattern's list of
+    /// textures, as in `brick texture { A } texture { B }`). The pattern
+    /// value picks, or blends between, whole pigments, each evaluated at
+    /// the same pattern-space point through its own transform, so the
+    /// outer pigment's transform moves them too. Each entry is layered;
+    /// its composited colour is opaque.
+    pub pigment_map: Vec<(f64, LayeredPigment)>,
 }
 
 impl Pigment {
@@ -116,6 +134,17 @@ impl Pigment {
             return color_map_lookup(&self.color_map, 0.0);
         }
         let q = self.from_texture.transform_point(p);
+        let value = self.value_at(q);
+        if self.pigment_map.is_empty() {
+            color_map_lookup(&self.color_map, value)
+        } else {
+            pigment_map_lookup(&self.pigment_map, value, q)
+        }
+    }
+
+    /// The pattern's value (after the wave) at `q`, a point in pattern
+    /// space.
+    fn value_at(&self, q: Point) -> f64 {
         let value = match self.pattern {
             Pattern::Wood => {
                 // POV-Ray's wood: turbulence displaces x and y through a
@@ -141,10 +170,70 @@ impl Pigment {
                 // clamp so the ends map to the ends.
                 apply_wave(v.clamp(0.0, 1.0 - 1e-12), self.wave)
             }
+            Pattern::Gradient { axis } => {
+                let q = self.displaced(q);
+                apply_wave(q[0] * axis[0] + q[1] * axis[1] + q[2] * axis[2], self.wave)
+            }
+            Pattern::Brick { size, mortar } => brick_value(self.displaced(q), size, mortar),
             Pattern::Solid => unreachable!(),
         };
-        color_map_lookup(&self.color_map, value)
+        value
     }
+}
+
+/// POV-Ray's brick pattern at `q`: 0 in the mortar, 1 in a brick.
+/// Courses are `size[1]` tall; alternate courses (counting pairs of
+/// courses) shift the joints by half a brick in x and z. The mortar is
+/// `mortar` thick, measured from each brick's low faces, after the
+/// point is nudged by the mortar thickness so the joints are centred as
+/// POV's are.
+pub fn brick_value(q: Point, size: Point, mortar: f64) -> f64 {
+    let fract = |v: f64| v - v.floor();
+    let [x, y, z] = [q[0] + mortar, q[1] + mortar, q[2] + mortar];
+    // Horizontal mortar between courses.
+    if fract(y / size[1]) <= mortar / size[1] {
+        return 0.0;
+    }
+    let shift = if fract(y / size[1] * 0.5) > 0.5 { 0.5 } else { 0.0 };
+    // Vertical joints across x, then across z.
+    if fract(x / size[0] + shift) <= mortar / size[0] {
+        return 0.0;
+    }
+    if fract(z / size[2] + shift) <= mortar / size[2] {
+        return 0.0;
+    }
+    1.0
+}
+
+/// The colour for `value` from a pigment map of ascending entries,
+/// evaluating the chosen pigments at `q`: like `color_map_lookup`, a
+/// value between two entries blends their colours.
+fn pigment_map_lookup(map: &[(f64, LayeredPigment)], value: f64, q: Point) -> Rgbt {
+    let rgbt = |lp: &LayeredPigment| {
+        let c = lp.color_at(q);
+        [c[0], c[1], c[2], 0.0]
+    };
+    if value <= map[0].0 || map.len() == 1 {
+        return rgbt(&map[0].1);
+    }
+    for w in map.windows(2) {
+        let (v0, ref p0) = w[0];
+        let (v1, ref p1) = w[1];
+        if value < v1 {
+            if v1 <= v0 {
+                return rgbt(p1);
+            }
+            let t = (value - v0) / (v1 - v0);
+            let (c0, c1) = (rgbt(p0), rgbt(p1));
+            return [
+                c0[0] + t * (c1[0] - c0[0]),
+                c0[1] + t * (c1[1] - c0[1]),
+                c0[2] + t * (c1[2] - c0[2]),
+                0.0,
+            ];
+        }
+    }
+    rgbt(&map[map.len() - 1].1)
 }
 
 /// Reduce `v` to `[0, 1)` and apply the wave shape.
@@ -247,6 +336,7 @@ mod tests {
             wave: Wave::Triangle,
             color_map: map,
             from_texture: Affine::identity(),
+            pigment_map: Vec::new(),
         }
     }
 
@@ -402,5 +492,61 @@ mod tests {
         let spotted = LayeredPigment { layers: vec![red, spots] };
         assert_eq!(spotted.color_at([0.5, 0.5, 0.5]), [1.0, 1.0, 1.0]);
         assert_eq!(spotted.color_at([1.5, 0.5, 0.5]), [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn brick_has_mortar_joints_and_offset_courses() {
+        let size = [8.0, 3.0, 4.5];
+        let m = 0.5;
+        // Course joints: y within the mortar band (after the nudge by
+        // the mortar thickness, the band is y in [-0.5, 0) mod 3).
+        assert_eq!(brick_value([2.0, -0.25, 1.0], size, m), 0.0);
+        assert_eq!(brick_value([2.0, 1.5, 1.0], size, m), 1.0);
+        // Vertical joints in x: every 8 units in the first course...
+        assert_eq!(brick_value([-0.25, 1.5, 1.0], size, m), 0.0);
+        assert_eq!(brick_value([7.75, 1.5, 1.0], size, m), 0.0);
+        // ...and shifted half a brick in the course above (y / 6 past .5).
+        assert_eq!(brick_value([-0.25, 4.5, 1.0], size, m), 1.0);
+        assert_eq!(brick_value([3.75, 4.5, 1.0], size, m), 0.0);
+        // Joints across z too.
+        assert_eq!(brick_value([2.0, 1.5, -0.25], size, m), 0.0);
+        // Mostly brick: the mortar is a small fraction of the volume.
+        let mut mortar = 0;
+        let n = 20000;
+        for k in 0..n {
+            let q = [k as f64 * 0.731 % 50.0, k as f64 * 0.377 % 50.0, k as f64 * 0.191 % 50.0];
+            if brick_value(q, size, m) == 0.0 {
+                mortar += 1;
+            }
+        }
+        let frac = mortar as f64 / n as f64;
+        // 1 - (1 - .5/8)(1 - .5/3)(1 - .5/4.5) is about 0.31.
+        assert!((frac - 0.31).abs() < 0.03, "{}", frac);
+    }
+
+    #[test]
+    fn gradient_ramps_along_its_axis() {
+        let mut p = pigment(Pattern::Gradient { axis: [0.0, 1.0, 0.0] }, vec![(0.0, BLACK), (1.0, WHITE)]);
+        p.wave = Wave::Ramp;
+        assert_eq!(p.color_at([5.0, 0.25, -3.0]), [0.25, 0.25, 0.25]);
+        assert_eq!(p.color_at([0.0, 1.75, 0.0]), [0.75, 0.75, 0.75]);
+        assert_eq!(p.color_at([0.0, -0.25, 0.0]), [0.75, 0.75, 0.75]);
+    }
+
+    #[test]
+    fn pigment_map_picks_whole_pigments() {
+        let red = pigment(Pattern::Solid, vec![(0.0, [1.0, 0.0, 0.0, 0.0])]);
+        let stripes = pigment(Pattern::Gradient { axis: [1.0, 0.0, 0.0] }, vec![(0.0, BLACK), (1.0, WHITE)]);
+        let mut stripes = stripes;
+        stripes.wave = Wave::Ramp;
+        let mut checker = pigment(Pattern::Checker, vec![]);
+        checker.pigment_map = vec![
+            (0.0, LayeredPigment::single(red)),
+            (1.0, LayeredPigment::single(stripes)),
+        ];
+        // Cell (0,0,0) is the first pigment, cell (1,0,0) the second,
+        // evaluated at the same point.
+        assert_eq!(checker.color_at([0.5, 0.5, 0.5]), [1.0, 0.0, 0.0]);
+        assert_eq!(checker.color_at([1.25, 0.5, 0.5]), [0.25, 0.25, 0.25]);
     }
 }
