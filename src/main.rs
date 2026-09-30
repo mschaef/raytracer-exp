@@ -170,10 +170,12 @@ fn load_scene(path: &Path) -> Scene {
     let abs_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
 
     // A mistake in the script (or anything it loads) prints the
-    // position-tagged message and exits, instead of a panic report.
+    // position-tagged message and the SDL call stack, and exits,
+    // instead of a panic report. SDL_RUST_BACKTRACE=1 adds the Rust
+    // backtrace.
     let env = sdl::default_env();
-    if let Err(message) = sdl::catch_errors(|| sdl::eval_source(&source, &abs_path.to_string_lossy(), &env)) {
-        eprintln!("{}", message);
+    if let Err(failure) = sdl::catch_errors(|| sdl::eval_source(&source, &abs_path.to_string_lossy(), &env)) {
+        eprintln!("{}", failure);
         process::exit(1);
     }
 

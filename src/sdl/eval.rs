@@ -31,6 +31,7 @@ use std::rc::Rc;
 use crate::sdl::ast::{Form, FormKind};
 use crate::sdl::env::{EnvRef, Environment};
 use crate::sdl::error::Position;
+use crate::sdl::trace;
 use crate::sdl::value::{
     Function, FunctionKind, ParamList, ParamPattern, RecurSignal, Value, RECUR,
 };
@@ -117,6 +118,8 @@ pub fn apply(head: &Value, args: &[Value], pos: &Position) -> Value {
 }
 
 fn apply_function(func: &Rc<Function>, args: &[Value], pos: &Position) -> Value {
+    // On the call stack for error reports until this returns or unwinds.
+    let _frame = trace::enter_call(func, pos);
     match &func.kind {
         FunctionKind::Native { func: f, .. } => (*f)(args, pos),
         FunctionKind::Interpreted {
@@ -364,6 +367,7 @@ fn name_function(v: Value, def_name: &str) -> Value {
     if let Value::Fn(f) = &v {
         if let FunctionKind::Interpreted {
             name: None,
+            pos,
             params,
             body,
             env,
@@ -372,6 +376,7 @@ fn name_function(v: Value, def_name: &str) -> Value {
             let renamed = Function {
                 kind: FunctionKind::Interpreted {
                     name: Some(def_name.to_string()),
+                    pos: pos.clone(),
                     params: params.clone(),
                     body: body.clone(),
                     env: env.clone(),
@@ -444,6 +449,7 @@ fn eval_fn(args: &[Form], env: &EnvRef, pos: &Position) -> Value {
     let f = Function {
         kind: FunctionKind::Interpreted {
             name,
+            pos: pos.clone(),
             params,
             body: Rc::new(body),
             env: env.clone(),
@@ -686,5 +692,6 @@ fn eval_load(args: &[Form], env: &EnvRef, pos: &Position) -> Value {
     // Recursive eval_source installs its own CurrentDirGuard for the
     // loaded file's directory and pops it on exit, so nested loads
     // work without explicit bookkeeping here.
+    let _frame = trace::enter_load(&path_str, pos);
     crate::sdl::eval_source(&source, &resolved.to_string_lossy(), env)
 }

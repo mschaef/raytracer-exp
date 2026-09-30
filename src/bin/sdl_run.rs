@@ -18,7 +18,8 @@
 //!
 //! Reads the file, evaluates every top-level form, and prints the
 //! value of the final form. A script error prints its position-tagged
-//! message and exits with status 1.
+//! message and the SDL call stack, and exits with status 1.
+//! `SDL_RUST_BACKTRACE=1` adds the Rust backtrace.
 
 use std::env;
 use std::fs;
@@ -43,8 +44,8 @@ fn main() {
     match sdl::catch_errors(|| sdl::read_and_eval(&source, path)) {
         Ok(Value::Nil) => {} // Don't print nil; it's noise for scripts run for side-effects.
         Ok(v) => println!("{}", v),
-        Err(message) => {
-            eprintln!("{}", message);
+        Err(failure) => {
+            eprintln!("{}", failure);
             process::exit(1);
         }
     }

@@ -14,7 +14,8 @@
 //! Runtime errors panic with an [`SdlError`] formatted to include the
 //! position so failures are debuggable. The test harness catches the
 //! panic and reports the failing file; the binaries go through
-//! [`crate::sdl::catch_errors`], which prints just the message.
+//! [`crate::sdl::catch_errors`], which reports the message and the
+//! SDL call stack.
 
 use std::fmt;
 use std::rc::Rc;

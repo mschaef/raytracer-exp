@@ -267,16 +267,90 @@ fn catch_errors_returns_sdl_error_messages() {
     for &(source, expected) in cases.iter() {
         match eval(source) {
             Ok(v) => panic!("{:?} should fail, got {}", source, v),
-            Err(message) => assert!(
-                message.contains(expected),
+            Err(failure) => assert!(
+                failure.message.contains(expected),
                 "{:?}: expected {:?} in {:?}",
                 source,
                 expected,
-                message
+                failure.message
             ),
         }
     }
     assert!(matches!(eval("(+ 1 2)"), Ok(sdl::Value::Int(3))));
+}
+
+/// `SdlFailure::trace` is the SDL call stack at the error, innermost
+/// first: named and anonymous functions, natives that call back into
+/// the script (`map`), and `(load ...)`s still running. The native that
+/// raised the error is left out, since the message already gives its
+/// position.
+#[test]
+fn catch_errors_reports_the_sdl_call_stack() {
+    let dir = std::env::temp_dir().join(format!("sdl_trace_test_{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("helpers.lisp"),
+        "(defn scale-it [x]\n  (* x \"two\"))\n(defn build [xs]\n  (map (fn [x] (scale-it x)) xs))\n(def early (build [1]))\n",
+    )
+    .unwrap();
+    let main = dir.join("main.lisp");
+    fs::write(&main, "(def x 1)\n(load \"helpers.lisp\")\n").unwrap();
+
+    let env = sdl::default_env();
+    let main_path = main.to_string_lossy().to_string();
+    let failure = sdl::catch_errors(|| sdl::eval_source(&fs::read_to_string(&main).unwrap(), &main_path, &env))
+        .expect_err("script must fail");
+    let helpers = dir.join("helpers.lisp").to_string_lossy().to_string();
+    assert_eq!(failure.message, format!("eval error at {}:2:4: * expected an integer, got \"two\" (string)", helpers));
+    assert_eq!(
+        failure.trace,
+        vec![
+            format!("in scale-it, called at {}:4:17", helpers),
+            format!("in fn defined at {}:4:8, called at {}:4:4", helpers, helpers),
+            format!("in map, called at {}:4:4", helpers),
+            format!("in build, called at {}:5:13", helpers),
+            format!("in (load {:?}) at {}:2:1", "helpers.lisp", main_path),
+        ]
+    );
+    assert!(failure.to_string().contains(&format!("\n  in build, called at {}:5:13", helpers)));
+
+    // The stack unwound with the error: the next one, at the top level,
+    // has none.
+    let top = sdl::catch_errors(|| sdl::eval_source("(+ 1 \"x\")", "top.lisp", &sdl::default_env()))
+        .expect_err("must fail");
+    assert!(top.trace.is_empty(), "stale frames: {:?}", top.trace);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Recursion collapses into one line with a count; mutual recursion,
+/// which doesn't repeat line by line, is cut to the innermost and
+/// outermost 10 lines.
+#[test]
+fn catch_errors_shortens_recursive_call_stacks() {
+    let eval = |source: &str| {
+        sdl::catch_errors(|| sdl::eval_source(source, "rec.lisp", &sdl::default_env())).expect_err("must fail")
+    };
+    let direct = eval("(defn down [n] (if (= n 0) (+ 1 \"x\") (+ 1 (down (- n 1)))))\n(down 40)");
+    assert_eq!(
+        direct.trace,
+        vec!["in down, called at rec.lisp:1:44 (40 times)".to_string(), "in down, called at rec.lisp:2:2".to_string()]
+    );
+    let mutual = eval("(defn ev? [n] (if (= n 0) (first 5) (od? (- n 1))))\n(defn od? [n] (ev? (- n 1)))\n(ev? 60)");
+    assert_eq!(mutual.trace.len(), 21);
+    assert_eq!(mutual.trace[10], "... 41 more ...");
+    assert_eq!(mutual.trace[20], "in ev?, called at rec.lisp:3:2");
+}
+
+/// `SDL_RUST_BACKTRACE` adds the Rust backtrace to the report.
+#[test]
+fn catch_errors_adds_the_rust_backtrace_on_request() {
+    std::env::set_var(sdl::RUST_BACKTRACE_VAR, "1");
+    let failure = sdl::catch_errors(|| sdl::eval_source("(+ 1 \"x\")", "bt.lisp", &sdl::default_env()));
+    std::env::remove_var(sdl::RUST_BACKTRACE_VAR);
+    let failure = failure.expect_err("must fail");
+    let bt = failure.rust_backtrace.as_deref().expect("backtrace requested");
+    assert!(!bt.is_empty());
+    assert!(failure.to_string().contains("\n\nRust backtrace:\n"));
 }
 
 /// A panic that isn't an SDL error is a renderer bug, not a script

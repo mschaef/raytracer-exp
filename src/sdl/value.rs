@@ -312,6 +312,9 @@ pub enum FunctionKind {
     /// environment by reference (downward closure).
     Interpreted {
         name: Option<String>,
+        /// Where the `fn` form is, so an anonymous function can be
+        /// named in an error's call stack.
+        pos: Position,
         params: ParamList,
         body: Rc<Vec<Form>>,
         env: EnvRef,

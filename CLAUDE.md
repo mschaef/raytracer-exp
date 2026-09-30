@@ -697,7 +697,7 @@ Approximate order of recent commits, oldest first:
     in `let` and `fn`), `builtins.rs` (arithmetic + comparison with
     int/float promotion, vector and map ops, predicates, `assert` /
     `assert=`), `error.rs` (position-tagged panics via `sdl_panic!`;
-    see entry 78 for how the binaries report them).
+    see entries 78 and 80 for how the binaries report them).
     A small `sdl_run` binary in `src/bin/` evaluates ad-hoc scripts.
     Verification is a per-file test convention departing from the
     rest of the codebase: each `tests/sdl/<topic>.lisp` script becomes
@@ -3549,6 +3549,53 @@ Approximate order of recent commits, oldest first:
       (one node, and hits match the unfolded chain for surfaced and
       unsurfaced leaves) and `transforms_separated_by_other_nodes_stay_separate`.
 
+80. **SDL errors report the SDL call stack, and optionally the Rust
+    backtrace.** A script error now prints the message followed by the
+    calls and loads that led to it, innermost first:
+
+    ```
+    eval error at helpers.lisp:2:4: * expected an integer, got "two" (string)
+      in scale-it, called at helpers.lisp:5:17
+      in fn defined at helpers.lisp:5:8, called at helpers.lisp:5:4
+      in map, called at helpers.lisp:5:4
+      in build, called at main_scene.lisp:3:13
+    ```
+
+    - `src/sdl/trace.rs`: a thread-local stack of frames. `apply_function`
+      pushes one per call (the `Rc<Function>` and the call-site
+      position) and `eval_load` one per `(load ...)`; a guard pops it on
+      return or unwind. Interpreted functions now carry the position of
+      their `fn` form (`FunctionKind::Interpreted::pos`), which names
+      anonymous functions.
+    - `catch_errors`' panic hook copies the stack (`trace::snapshot`)
+      when an SDL error panics, before unwinding pops it. It now returns
+      `Err(SdlFailure { message, trace, rust_backtrace })`; `Display` is
+      the full report, which `raytracer` and `sdl_run` print.
+    - The report leaves out the innermost frame when it's a native
+      function (the one that raised the error, at the message's
+      position), collapses runs of identical lines into one with a count
+      (`in down, called at deep.lisp:1:44 (40 times)`), and shows at
+      most 20 lines, the innermost and outermost 10.
+    - Errors inside a `(load ...)`ed file now show the loading file.
+      Only loads still running appear: a function defined in a loaded
+      file and called later shows its call chain, not the load.
+    - Desugared forms (`when`, `cond`, `->`, `->>`, `for`, destructuring
+      `let`) all report real positions. `for` shows its expansion as a
+      `mapcat` frame and an anonymous `fn` at the `for`'s position.
+    - `SDL_RUST_BACKTRACE=1` (any value but `0` or empty) appends the
+      Rust backtrace, captured in the hook, after the SDL stack; it
+      starts with a few frames of the panic machinery itself.
+    - A panic that isn't an SDL error (a renderer bug) still gets the
+      default report, now followed by the SDL call stack if a script
+      was running.
+    - Cost: scene loading about 10% slower on the heaviest scripts
+      (xmastree 500 -> 550 ms, braids 80 -> 87 ms); rendering unchanged,
+      all 39 scenes byte-identical at 48 px.
+    - Tests `catch_errors_reports_the_sdl_call_stack` (nested calls,
+      `map`, an anonymous `fn`, a load, and no stale frames after an
+      error), `catch_errors_shortens_recursive_call_stacks` and
+      `catch_errors_adds_the_rust_backtrace_on_request`.
+
 
 ## Pitfalls and conventions
 
@@ -3686,6 +3733,7 @@ src/sdl/
   target.rs    SdlTarget — Arc-wrapped render-target value for the SDL.
   stdlib.lisp  In-language standard library, bundled via include_str!.
   error.rs     Error type with source positions; pretty printer.
+  trace.rs     The SDL call stack, for error reports (entry 80).
 ```
 
 The `render` module's public API is unchanged in shape; the SDL is a
@@ -5011,6 +5059,146 @@ depends on.
 Each phase ends with a render compared against the reference where there
 is one, and waits for Mike before the next.
 
+## First-class images: proposed plan (not started)
+
+A design for later, written up 2026-09-30; nothing here is
+implemented. Today the only image input is `height-field`'s `:image
+"file.tga"`, read by a TGA decoder in `render/heightfield.rs`, and the
+only image outputs are render targets (`png-target`, the rtview stream)
+and the heatmaps built in `main.rs`. Texture mapping will need to read
+images too, and in the long run the renderer should be closed over
+images: render into memory, then use the result as a texture in a
+later render.
+
+### Model
+
+- **Images are immutable values; targets are the mutable sinks.**
+  Rendering goes from a scene to a target. Three new pieces close the
+  loop: loading an image, a target that produces an image, and writing
+  an image out to any target.
+- `src/render/image.rs`, shared as `Arc<Image>` (rayon's threads read
+  it, so not `Rc`):
+
+  ```rust
+  pub struct Image {
+      pub width: usize,
+      pub height: usize,          // row 0 is the top, whatever the file's order
+      pub storage: Storage,
+      pub encoding: Encoding,     // how stored values become linear colour
+  }
+
+  pub enum Storage {
+      Gray8(Vec<u8>),
+      Rgb8(Vec<u8>),
+      Rgba8(Vec<u8>),
+      Indexed { indices: Vec<u8>, palette: Vec<[u8; 3]> },
+      RgbF32(Vec<f32>),           // linear radiance, unclamped: a render's output
+      GrayF32(Vec<f32>),          // single-channel data: heatmaps, depth
+  }
+
+  pub enum Encoding { Srgb, Linear }
+  ```
+
+- **Keep the stored data as it is,** rather than converting to
+  floating-point colour on load, because consumers read the same pixels
+  differently:
+  - Height fields need the raw data. POV uses the palette index for a
+    palette image and `(red * 256 + green) / 65535` for a colour one;
+    converting to colour first loses both.
+  - Texture maps want linear colour, decoded according to `encoding`.
+  - Rendered images are linear floats, not clamped to 1.0.
+
+  So `Image` has several read methods (`raw(x, y)`, `color(x, y)`,
+  `sample(u, v, filter)`) and each consumer calls the one it needs.
+- **Encoding is set at load, with a per-load override.** Pre-snowman
+  scenes decode sRGB; the snowman scenes use colours as written
+  (`assumed_gamma 1.0`). Height fields ignore it.
+
+### SDL surface
+
+```lisp
+(def imap (load-image "../models/snowman_imap.tga"))   ; {:encoding :linear} to override
+(image-width imap) (image-height imap)
+(image-pixel imap 10 20)                                ; -> [r g b], linear
+
+(height-field {:image imap :water-level 0.25})
+
+(image-map {:image photo :map :planar :interpolate :bilinear :once true})   ; a pigment pattern
+
+(def t (image-target 256 256))                          ; stores linear float rows
+(target-image t)                                        ; immutable snapshot
+(blit img target)                                       ; any existing target: png, stream, offset, progress
+(save-png img path) (save-tga img path) (save-pfm img path)
+```
+
+- New `Value::Image(Arc<Image>)`.
+- `height-field`'s `:image` takes an image value. A filename could stay
+  as shorthand for `(load-image ...)`; only `snowman_sphere` uses it.
+- `image-map` is a new `Pattern` alongside wood and bozo. It samples
+  `(u, v)` from the texture point, so pigment transforms, layering and
+  `pigment_map` work as they do for other patterns.
+- Render-to-texture is composition:
+
+  ```lisp
+  (def mirror-view (target-image (render room-from-mirror (image-target 256 256) 256 256)))
+  ```
+
+### Where the view transform applies
+
+This is the one semantic change. Today `PngTarget` applies exposure
+and the tone curve to each row as it arrives. In this design an image
+keeps linear scene values and carries the scene's `ViewTransform` as
+metadata; the transform is applied only when the image is encoded for
+display (saving a PNG, streaming). That's what makes a rendered image
+usable as a texture, and it makes PFM output (view transform phase 5)
+trivial.
+
+### Heatmaps are images
+
+The four heatmaps (time, samples, depth, clip) are single-channel
+images. The SDL heatmap binding (SDL Phase 9+) becomes `render`
+optionally returning them as `Image`s, saved with
+`(save-png img path {:scale :log})`, rather than a separate
+heatmap-target API.
+
+### Constraints in the current code
+
+1. **Pigments are leaked `&'static` references.** `Surface` is `Copy`
+   and holds `Option<&'static LayeredPigment>`, so an image inside an
+   `image-map` is leaked with its pigment. Harmless for one render; an
+   animation that renders a texture every frame would never free them
+   (about 1 MB a frame at 320x240 floats). Moving `Surface` to `Arc`
+   loses `Copy` and touches a lot of code, so defer it until an
+   animation needs render-to-texture.
+2. **PNG decoding.** The real `image` crate reads PNGs on Mike's
+   machine, but the cloud build's stand-in can't, so that path can't be
+   tested there. Keep TGA as the tested format, add a TGA writer so the
+   memory -> file -> memory round trip is testable in the cloud, and
+   add PNG loading through `image` later with its tests skipped when
+   the decoder isn't available. PNG loading unblocks the yard height
+   field (`yard.png`).
+
+### Phases
+
+1. **Image type and TGA loading.** `Image`, `load-image`, the
+   accessors; TGA decoding moves from `heightfield.rs` to `image.rs`,
+   and `heightfield.rs` computes heights from an `Image`. Byte-identical
+   renders; snowman_sphere is the check.
+2. **Image sinks.** `image-target`, `target-image`, `blit`, the save
+   functions, TGA and PFM writers. `png-target` keeps working as now.
+3. **`image-map` pigment.** Planar mapping first; nearest and bilinear
+   sampling; once and repeat. Spherical and cylindrical mappings later.
+   sphere.pov's `image_map` if its image is available.
+4. **Closing the loop.** A render-to-texture demo scene; heatmaps as
+   images. The `&'static` -> `Arc` change only if something needs it.
+
+### Decisions for Mike before phase 1
+
+- Encoding chosen at load time (with an override), or where the image
+  is used?
+- Keep `:image "file"` as shorthand, or require an image value?
+- Fold the heatmap binding into phase 4, or keep it separate?
+
 ## Future directions
 
 The README's own "Potential Futures" list overlaps these but is now somewhat
@@ -5094,6 +5282,10 @@ adaptive-sampling interplay).
 language: implementation plan" section above — this is the next major
 piece of work, and the design and phasing are captured there rather than
 in this list.
+
+**First-class images.** Proposed, not started: see "First-class
+images: proposed plan" above. Covers loading images for height fields
+and texture maps, rendering into memory, and render-to-texture.
 
 **Camera animation.** Now that `default_camera()` is a function returning a
 fresh `Camera`, varying its parameters per frame is one new function call.

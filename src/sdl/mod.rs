@@ -39,7 +39,8 @@
 //! Errors are surfaced via panic with a source position, matching the
 //! rest of this codebase. The test harness in `tests/sdl_suite.rs`
 //! catches these via `std::panic::catch_unwind`; the binaries use
-//! [`catch_errors`], which turns them into a one-line message.
+//! [`catch_errors`], which turns them into the message plus the SDL
+//! call stack (see `trace.rs`), and optionally the Rust backtrace.
 
 pub mod ast;
 pub mod bindings;
@@ -50,6 +51,7 @@ pub mod error;
 pub mod eval;
 pub mod reader;
 pub mod target;
+pub mod trace;
 pub mod value;
 
 pub use env::{EnvRef, Environment};
@@ -115,6 +117,22 @@ thread_local! {
     /// While it's non-zero the panic hook stays quiet about SDL errors,
     /// because the caller is about to report them itself.
     static CATCHING: Cell<usize> = const { Cell::new(0) };
+
+    /// What the panic hook saw at the last SDL error inside
+    /// `catch_errors`: the SDL call stack and, if asked for, the Rust
+    /// backtrace. Both have to be taken in the hook, before unwinding
+    /// pops the stack.
+    static CAPTURED: RefCell<Option<(Vec<String>, Option<String>)>> =
+        const { RefCell::new(None) };
+}
+
+/// The environment variable that adds the Rust backtrace to an SDL
+/// error report, for debugging the interpreter or a binding. Any value
+/// but `0` or empty turns it on.
+pub const RUST_BACKTRACE_VAR: &str = "SDL_RUST_BACKTRACE";
+
+fn rust_backtrace_requested() -> bool {
+    std::env::var(RUST_BACKTRACE_VAR).map_or(false, |v| !v.is_empty() && v != "0")
 }
 
 /// Text of a panic payload, if it has any. `panic!("{}", ..)` gives a
@@ -126,29 +144,78 @@ fn payload_text(payload: &(dyn std::any::Any + Send)) -> Option<&str> {
         .or_else(|| payload.downcast_ref::<&'static str>().copied())
 }
 
+/// An SDL error caught by [`catch_errors`].
+#[derive(Debug, Clone)]
+pub struct SdlFailure {
+    /// The position-tagged message `sdl_panic!` built, e.g.
+    /// `eval error at scenes/foo.lisp:12:5: + expected an integer, ...`.
+    pub message: String,
+    /// The SDL call stack at the error, innermost first, one line per
+    /// function call or `(load ...)`, e.g.
+    /// `in pov-metal, called at scenes/texaco.lisp:40:9`. Empty for an
+    /// error at the top level of a file.
+    pub trace: Vec<String>,
+    /// The Rust backtrace, when [`RUST_BACKTRACE_VAR`] is set.
+    pub rust_backtrace: Option<String>,
+}
+
+/// The report the binaries print: the message, then the call stack
+/// indented under it, then the Rust backtrace if there is one.
+impl std::fmt::Display for SdlFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)?;
+        for line in &self.trace {
+            write!(f, "\n  {}", line)?;
+        }
+        if let Some(bt) = &self.rust_backtrace {
+            write!(f, "\n\nRust backtrace:\n{}", bt)?;
+        }
+        Ok(())
+    }
+}
+
 /// Run `f`, turning an SDL error (a mistake in a script) into
-/// `Err(message)`, where the message is the position-tagged text
-/// `sdl_panic!` built, e.g.
-/// `eval error at scenes/foo.lisp:12:5: + expected an integer, ...`.
+/// `Err(SdlFailure)`: the error's message, the SDL call stack at the
+/// error, and optionally the Rust backtrace (see [`RUST_BACKTRACE_VAR`]).
 ///
 /// Only SDL errors are caught. Any other panic is a bug in the
-/// renderer, so it keeps the default report (location and backtrace)
-/// and carries on unwinding.
+/// renderer, so it keeps the default report (location and backtrace),
+/// followed by the SDL call stack if a script was running, and carries
+/// on unwinding.
 ///
 /// A plain `catch_unwind` isn't enough: the panic hook prints the
 /// "thread 'main' panicked at ..." header and backtrace *before* the
-/// unwind reaches the catch. So this installs, once per process, a
-/// hook that skips SDL errors on threads inside `catch_errors` and
-/// hands everything else to the hook that was there before.
-pub fn catch_errors<T>(f: impl FnOnce() -> T) -> Result<T, String> {
+/// unwind reaches the catch, and unwinding pops the SDL call stack. So
+/// this installs, once per process, a hook that, on threads inside
+/// `catch_errors`, records the stack for SDL errors instead of
+/// printing, and hands everything else to the hook that was there
+/// before.
+pub fn catch_errors<T>(f: impl FnOnce() -> T) -> Result<T, SdlFailure> {
     static INSTALL_HOOK: Once = Once::new();
     INSTALL_HOOK.call_once(|| {
         let previous = panic::take_hook();
         panic::set_hook(Box::new(move |info| {
-            let quiet = CATCHING.with(|c| c.get()) > 0
-                && payload_text(info.payload()).map_or(false, error::is_sdl_error_message);
-            if !quiet {
+            if CATCHING.with(|c| c.get()) == 0 {
                 previous(info);
+                return;
+            }
+            if payload_text(info.payload()).map_or(false, error::is_sdl_error_message) {
+                let backtrace = if rust_backtrace_requested() {
+                    Some(std::backtrace::Backtrace::force_capture().to_string())
+                } else {
+                    None
+                };
+                let captured = (trace::snapshot(), backtrace);
+                CAPTURED.with(|c| *c.borrow_mut() = Some(captured));
+            } else {
+                previous(info);
+                let stack = trace::snapshot();
+                if !stack.is_empty() {
+                    eprintln!("SDL call stack at the panic:");
+                    for line in stack {
+                        eprintln!("  {}", line);
+                    }
+                }
             }
         }));
     });
@@ -167,7 +234,12 @@ pub fn catch_errors<T>(f: impl FnOnce() -> T) -> Result<T, String> {
     };
 
     result.or_else(|payload| match payload_text(&*payload) {
-        Some(text) if error::is_sdl_error_message(text) => Err(text.to_string()),
+        Some(text) if error::is_sdl_error_message(text) => {
+            let (trace, rust_backtrace) = CAPTURED
+                .with(|c| c.borrow_mut().take())
+                .unwrap_or_default();
+            Err(SdlFailure { message: text.to_string(), trace, rust_backtrace })
+        }
         _ => panic::resume_unwind(payload),
     })
 }
