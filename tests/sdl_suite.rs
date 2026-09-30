@@ -1168,6 +1168,11 @@ fn area_light_test_scene_loads() {
 }
 
 #[test]
+fn back_faces_test_scene_loads() {
+    assert_scene_loads("back_faces_test.lisp", "back-faces-test-scene");
+}
+
+#[test]
 fn axis_spheres_scene_loads() {
     assert_scene_loads("axis_spheres.lisp", "axis-spheres-scene");
 }

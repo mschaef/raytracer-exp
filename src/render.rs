@@ -2752,7 +2752,7 @@ mod contribution_cutoff_tests {
 #[cfg(test)]
 mod shadow_probe_tests {
     use super::*;
-    use crate::render::shapes::{difference, group, surfaced, translate, Cylinder, Sphere};
+    use crate::render::shapes::{difference, group, surfaced, translate, Cylinder, Sphere, Torus};
 
     fn surface(transparency: f64, filter: f64) -> Surface {
         Surface {
@@ -2831,14 +2831,21 @@ mod shadow_probe_tests {
         assert_eq!(probe(&ball(0.0, 0.0), [3.0, 0.0, 10.0], [3.0, 0.0, 0.0]), ShadowProbe::Clear);
         // The point is between the light and the ball.
         assert_eq!(probe(&ball(0.0, 0.0), [0.0, 0.0, -10.0], [0.0, 0.0, 0.0]), ShadowProbe::Clear);
-        // The light inside the ball: a sphere never reports the ray
-        // leaving it, so the light escapes, for the walk as for the probe.
+        // The light inside the ball: the ray only leaves it (an exit, a
+        // back face), and a convex shape can't be met again, so the light
+        // escapes, for the walk as for the probe.
         let sc = ball(0.0, 0.0);
         assert_eq!(probe(&sc, [0.0, 0.0, 5.0], [0.0, 0.0, 0.0]), ShadowProbe::Clear);
         assert_eq!(walk(&sc, [0.0, 0.0, 5.0], [0.0, 0.0, 0.0]), Some([1.0; 3]));
-        // Inside a cylinder, which does report its exit: the walk decides.
         let can = scene(group(vec![surfaced(surface(0.0, 0.0), cylinder(-1.0, 1.0, 1.0))]));
-        assert_eq!(probe(&can, [0.0, 0.0, 0.0], [0.0, 5.0, 0.0]), ShadowProbe::Unsure);
+        assert_eq!(probe(&can, [0.0, 0.0, 0.0], [0.0, 5.0, 0.0]), ShadowProbe::Clear);
+        // Inside a torus's tube, which the ray can leave and meet again
+        // across the hole: the walk decides.
+        let ring = scene(group(vec![surfaced(surface(0.0, 0.0), Shape::Torus(Torus {
+            center: [0.0; 3], axis: [0.0, 1.0, 0.0], major: 2.0, minor: 0.5, surface: None,
+        }))]));
+        assert_eq!(probe(&ring, [2.0, 0.0, 0.0], [-5.0, 0.0, 0.0]), ShadowProbe::Unsure);
+        assert_eq!(walk(&ring, [2.0, 0.0, 0.0], [-5.0, 0.0, 0.0]), None, "the far side of the ring blocks it");
     }
 
     /// Wherever the probe gives an answer, the walk gives the same one:

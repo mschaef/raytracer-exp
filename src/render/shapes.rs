@@ -541,6 +541,12 @@ impl Shape {
     /// reach it and stop), `Clear` only when no primitive's first
     /// crossing is in range (the walk's first step finds nothing), and
     /// `Unsure` for everything else, which the walk then handles.
+    /// Whether this is a single convex primitive: a straight line
+    /// crosses its surface at most twice, entering then leaving.
+    fn is_convex(&self) -> bool {
+        matches!(self, Shape::Sphere(_) | Shape::Cuboid(_) | Shape::Cylinder(_) | Shape::Cone(_))
+    }
+
     pub fn shadow_probe(&self, ray: &Vector, t_max: f64, inherited: Option<&Surface>) -> ShadowProbe {
         match self {
             Shape::Group(children) => {
@@ -574,6 +580,11 @@ impl Shape {
             _ => match self.hit_test(ray) {
                 None => ShadowProbe::Clear,
                 Some(hit) if hit.distance > t_max => ShadowProbe::Clear,
+                // Leaving a convex solid: nothing more of it lies ahead
+                // (the walk steps past the exit and finds nothing else
+                // of it either). A light inside a marker sphere or a
+                // lamp's box hits this on every shadow ray.
+                Some(hit) if !hit.entering && self.is_convex() => ShadowProbe::Clear,
                 Some(hit) if !hit.entering => ShadowProbe::Unsure,
                 Some(hit) => match hit.surface.as_ref().or(inherited) {
                     // The walk treats a missing surface as opaque.
@@ -1484,16 +1495,22 @@ impl Hittable for Sphere {
         if discriminant < 0.0 {
             None
         } else {
-            let t = (-b - discriminant.sqrt()) / (2.0*a);
+            let sqrt_disc = discriminant.sqrt();
+            let mut t = (-b - sqrt_disc) / (2.0*a);
 
-            // Reject hits behind or coincident with the ray origin. Without
-            // this, a ray starting on (reflection / shadow) or inside a
-            // sphere returns a negative-`t` "hit" that beats every legitimate
-            // forward hit in `nearest_hit`'s distance comparison. The other
-            // primitives (Plane, Cuboid, Triangle) already do this — Sphere
-            // was the outlier.
+            // Hits behind or coincident with the ray origin don't count:
+            // a negative `t` would beat every legitimate forward hit in
+            // `nearest_hit`'s distance comparison. When the near crossing
+            // is behind, the ray starts inside (or on) the sphere, and
+            // what it sees is the far wall from inside: the exit, a back
+            // face (back faces phase 3, history entry 86). A ray starting
+            // on the surface and leaving has its far root at the origin
+            // too, so it still sees nothing.
             if t <= EPSILON {
-                return None;
+                t = (-b + sqrt_disc) / (2.0*a);
+                if t <= EPSILON {
+                    return None;
+                }
             }
 
             let hit_point = ray_location(ray, t);
@@ -1573,6 +1590,8 @@ impl Hittable for Cuboid {
         let mut t_exit = f64::INFINITY;
         let mut enter_axis: usize = 0;
         let mut enter_sign: f64 = 0.0;
+        let mut exit_axis: usize = 0;
+        let mut exit_sign: f64 = 0.0;
 
         for i in 0..3 {
             let origin = ray.start[i];
@@ -1607,6 +1626,8 @@ impl Hittable for Cuboid {
             }
             if t2 < t_exit {
                 t_exit = t2;
+                exit_axis = i;
+                exit_sign = -sign;
             }
 
             if t_enter > t_exit {
@@ -1614,25 +1635,30 @@ impl Hittable for Cuboid {
             }
         }
 
-        // Box is entirely behind the ray, or ray origin is on/inside the box.
-        // Treat origin-inside as a miss to avoid self-intersection on
-        // reflection and shadow rays starting at the surface.
-        if t_enter <= EPSILON {
+        // The entry face is behind the ray, so the ray starts inside (or
+        // on) the box and sees the exit face from inside: a back face
+        // (back faces phase 3, history entry 86), as `Cuboid::span`
+        // reports. A ray starting on the surface and leaving has its exit
+        // at the origin too, so it sees nothing; nor does a box entirely
+        // behind the ray.
+        let (t_hit, axis, sign) = if t_enter > EPSILON {
+            (t_enter, enter_axis, enter_sign)
+        } else if t_exit > EPSILON {
+            (t_exit, exit_axis, exit_sign)
+        } else {
             return None;
-        }
+        };
 
-        let hit_point = ray_location(ray, t_enter);
+        let hit_point = ray_location(ray, t_hit);
         let mut normal: Point = [0.0, 0.0, 0.0];
-        normal[enter_axis] = enter_sign;
+        normal[axis] = sign;
 
         Some(RayHit {
-            distance: t_enter,
+            distance: t_hit,
             hit_point,
             texture_point: hit_point,
             normal,
             surface: self.surface,
-            // Cuboids report only the entry face (see the back-faces
-            // plan's Phase 3), so this is true in practice.
             entering: dotp(normal, ray.delta) < 0.0,
         })
     }
@@ -3775,18 +3801,34 @@ mod span_tests {
         ] {
             assert!(entering(&s, out, dz), "{:?}", s);
         }
-        // From inside, the solids that report a back face report an
-        // exit. (Sphere and cuboid don't report one yet; see the
-        // back-faces plan's Phase 3.)
+        // From inside, every solid reports its exit (spheres and cuboids
+        // since back faces phase 3), at the same place, with the same
+        // outward normal, as the exit of its span.
         // (Off the axis: straight up the cone's axis runs into its apex,
         // a degenerate point.)
         for s in [
+            sphere([0.0, 0.0, 0.0], 1.0),
+            cuboid([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]),
             cylinder([0.0, 0.0, -1.0], [0.0, 0.0, 1.0], 1.0),
             cone([0.0, 0.0, -1.0], [0.0, 0.0, 1.0], 1.0),
         ] {
-            assert!(!entering(&s, inside, [0.2, 0.1, 1.0]), "{:?}", s);
-            assert!(!entering(&s, inside, [1.0, 0.3, 0.0]), "{:?}", s);
+            for d in [[0.2, 0.1, 1.0], [1.0, 0.3, 0.0], [-0.4, 0.7, -0.2]] {
+                assert!(!entering(&s, inside, d), "{:?} {:?}", s, d);
+                let r = ray(inside, d);
+                let hit = s.hit_test(&r).unwrap();
+                let spans = spans_of(&s, &r);
+                assert_eq!(spans.len(), 1, "{:?}", s);
+                assert!((hit.distance - spans[0].exit.t).abs() < TOL, "{:?} {:?}", s, d);
+                for i in 0..3 {
+                    assert!((hit.normal[i] - spans[0].exit.normal[i]).abs() < TOL, "{:?} {:?}", s, d);
+                }
+            }
         }
+        // A ray starting on a sphere's or cuboid's surface and leaving it
+        // sees nothing of it (its self-intersection guard).
+        let r = ray([0.0, 0.0, 1.0], [0.0, 0.3, 1.0]);
+        assert!(sphere([0.0, 0.0, 0.0], 1.0).hit_test(&r).is_none());
+        assert!(cuboid([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]).hit_test(&r).is_none());
         // A torus: in through the tube from outside, out from inside it.
         let t = torus([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], 2.0, 0.5);
         assert!(entering(&t, [2.0, 0.0, -5.0], dz));
