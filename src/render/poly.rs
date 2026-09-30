@@ -25,15 +25,82 @@
 /// deciding which case of a closed-form solution applies.
 const ZERO: f64 = 1e-12;
 
+/// Up to four real roots, held inline: the solvers run several times
+/// per ray, and a heap `Vec` for each result was a measurable share of
+/// render time (history entry 85). Derefs to `[f64]`, so callers index,
+/// iterate, `windows` and `last` it like a slice.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Roots {
+    values: [f64; 4],
+    len: usize,
+}
+
+impl Roots {
+    pub fn new() -> Roots {
+        Roots::default()
+    }
+
+    /// Append a root. A quartic has at most four real roots, so more
+    /// than four is a bug in the caller.
+    pub fn push(&mut self, x: f64) {
+        assert!(self.len < 4, "more than four roots");
+        self.values[self.len] = x;
+        self.len += 1;
+    }
+}
+
+impl std::ops::Deref for Roots {
+    type Target = [f64];
+    fn deref(&self) -> &[f64] {
+        &self.values[..self.len]
+    }
+}
+
+impl std::ops::DerefMut for Roots {
+    fn deref_mut(&mut self) -> &mut [f64] {
+        &mut self.values[..self.len]
+    }
+}
+
+impl Extend<f64> for Roots {
+    fn extend<I: IntoIterator<Item = f64>>(&mut self, iter: I) {
+        for x in iter {
+            self.push(x);
+        }
+    }
+}
+
+impl std::iter::FromIterator<f64> for Roots {
+    fn from_iter<I: IntoIterator<Item = f64>>(iter: I) -> Roots {
+        let mut roots = Roots::new();
+        roots.extend(iter);
+        roots
+    }
+}
+
+impl IntoIterator for Roots {
+    type Item = f64;
+    type IntoIter = std::iter::Take<std::array::IntoIter<f64, 4>>;
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIterator::into_iter(self.values).take(self.len)
+    }
+}
+
+impl<const N: usize> From<[f64; N]> for Roots {
+    fn from(values: [f64; N]) -> Roots {
+        IntoIterator::into_iter(values).collect()
+    }
+}
+
 /// Real roots of `x² + b x + c = 0`, ascending. A double root is
 /// reported once.
-pub fn solve_quadratic(b: f64, c: f64) -> Vec<f64> {
+pub fn solve_quadratic(b: f64, c: f64) -> Roots {
     let disc = b * b - 4.0 * c;
     if disc < -ZERO {
-        return vec![];
+        return Roots::new();
     }
     if disc <= ZERO {
-        return vec![-b / 2.0];
+        return Roots::from([-b / 2.0]);
     }
     // The numerically stable form: compute the larger-magnitude root
     // directly and get the other from the product of the roots (c),
@@ -41,12 +108,12 @@ pub fn solve_quadratic(b: f64, c: f64) -> Vec<f64> {
     let s = disc.sqrt();
     let q = if b >= 0.0 { -0.5 * (b + s) } else { -0.5 * (b - s) };
     let (r0, r1) = if q.abs() < ZERO { (0.0, -b) } else { (q, c / q) };
-    if r0 <= r1 { vec![r0, r1] } else { vec![r1, r0] }
+    if r0 <= r1 { Roots::from([r0, r1]) } else { Roots::from([r1, r0]) }
 }
 
 /// Real roots of `x³ + a x² + b x + c = 0`, ascending. There is always
 /// at least one. Repeated roots are reported once.
-pub fn solve_cubic(a: f64, b: f64, c: f64) -> Vec<f64> {
+pub fn solve_cubic(a: f64, b: f64, c: f64) -> Roots {
     // Substitute x = y - a/3 to get the depressed cubic y³ + p y + q = 0.
     let shift = a / 3.0;
     let p = b - a * a / 3.0;
@@ -59,28 +126,28 @@ pub fn solve_cubic(a: f64, b: f64, c: f64) -> Vec<f64> {
     let mut roots = if disc.abs() < ZERO {
         if half_q.abs() < ZERO {
             // Triple root.
-            vec![0.0]
+            Roots::from([0.0])
         } else {
             // One single and one double root.
             let u = (-half_q).cbrt();
-            vec![2.0 * u, -u]
+            Roots::from([2.0 * u, -u])
         }
     } else if disc < 0.0 {
         // Three distinct real roots: trigonometric form.
         let phi = (-half_q / (-third_p * third_p * third_p).sqrt()).clamp(-1.0, 1.0).acos() / 3.0;
         let t = 2.0 * (-third_p).sqrt();
-        vec![
+        Roots::from([
             t * phi.cos(),
             -t * (phi + std::f64::consts::PI / 3.0).cos(),
             -t * (phi - std::f64::consts::PI / 3.0).cos(),
-        ]
+        ])
     } else {
         // One real root.
         let s = disc.sqrt();
-        vec![(s - half_q).cbrt() - (s + half_q).cbrt()]
+        Roots::from([(s - half_q).cbrt() - (s + half_q).cbrt()])
     };
 
-    for r in &mut roots {
+    for r in roots.iter_mut() {
         *r -= shift;
     }
     roots.sort_by(|x, y| x.total_cmp(y));
@@ -99,7 +166,7 @@ fn quartic_and_slope(a: f64, b: f64, c: f64, d: f64, x: f64) -> (f64, f64) {
 /// root (a tangent ray) may be reported once or twice; callers that
 /// care about inside/outside should test between roots rather than
 /// trusting the count.
-pub fn solve_quartic(a: f64, b: f64, c: f64, d: f64) -> Vec<f64> {
+pub fn solve_quartic(a: f64, b: f64, c: f64, d: f64) -> Roots {
     // Substitute x = y - a/4 to get y⁴ + p y² + q y + r = 0.
     let shift = a / 4.0;
     let a2 = a * a;
@@ -107,7 +174,7 @@ pub fn solve_quartic(a: f64, b: f64, c: f64, d: f64) -> Vec<f64> {
     let q = c - a * b / 2.0 + a2 * a / 8.0;
     let r = d - a * c / 4.0 + a2 * b / 16.0 - 3.0 * a2 * a2 / 256.0;
 
-    let mut roots: Vec<f64> = Vec::with_capacity(4);
+    let mut roots = Roots::new();
     if r.abs() < ZERO {
         // y (y³ + p y + q) = 0.
         roots.push(0.0);
@@ -152,7 +219,7 @@ pub fn solve_quartic(a: f64, b: f64, c: f64, d: f64) -> Vec<f64> {
         }
     }
 
-    for x in &mut roots {
+    for x in roots.iter_mut() {
         *x -= shift;
         // Newton polishing on the original polynomial. Stop early when
         // the slope vanishes (a double root), where Newton can't help.

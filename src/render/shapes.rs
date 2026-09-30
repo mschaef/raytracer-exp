@@ -29,6 +29,7 @@ use crate::render::{
     EPSILON,
 };
 
+use crate::render::poly::Roots;
 use crate::render::transform::{
     Affine,
     Mat3,
@@ -1969,10 +1970,10 @@ impl Torus {
     /// the torus's bounding sphere, so the roots are small numbers
     /// rather than large distances with small differences. A ray that
     /// misses the bounding sphere can't hit the torus at all.
-    fn local_roots(&self, lr: &TorusRay) -> Vec<f64> {
+    fn local_roots(&self, lr: &TorusRay) -> Roots {
         let len = lenp(lr.delta);
         if len < 1e-12 {
-            return vec![];
+            return Roots::new();
         }
         let d = scalep(lr.delta, 1.0 / len);
 
@@ -1981,7 +1982,7 @@ impl Torus {
         let g = dotp(lr.origin, d);
         let disc = g * g - (dotp(lr.origin, lr.origin) - bound * bound);
         if disc <= 0.0 {
-            return vec![];
+            return Roots::new();
         }
         let s_enter = -g - disc.sqrt();
         let s_exit = -g + disc.sqrt();
@@ -2030,15 +2031,15 @@ impl Torus {
         addp(addp(scalep(lr.u, local[0]), scalep(self.axis, local[1])), scalep(lr.w, local[2]))
     }
 
-    fn end(&self, ray: &Vector, lr: &TorusRay, t: f64) -> SpanEnd {
-        SpanEnd { t, normal: self.normal_at(lr, lr.point(t)), surface: self.surface, point: ray_location(ray, t) }
+    fn end(&self, ray: &Vector, lr: &TorusRay, t: f64) -> SpanEnd<'_> {
+        SpanEnd { t, normal: self.normal_at(lr, lr.point(t)), surface: self.surface.as_ref(), point: ray_location(ray, t) }
     }
 
     /// The torus's spans along `ray`: zero, one or two. Rather than
     /// pairing roots by position, which a tangent ray's double root
     /// would upset, each gap between consecutive roots is classified
     /// by testing its midpoint.
-    fn spans(&self, ray: &Vector, out: &mut Vec<Span>) {
+    fn spans<'a>(&'a self, ray: &Vector, out: &mut Vec<Span<'a>>) {
         let lr = self.local_ray(ray);
         let roots = self.local_roots(&lr);
         let first = out.len();
@@ -2109,14 +2110,14 @@ impl Blob {
         if len > 0.0 && len.is_finite() { scalep(g, 1.0 / len) } else { normalizep(fallback) }
     }
 
-    fn end(&self, ray: &Vector, t: f64) -> SpanEnd {
+    fn end(&self, ray: &Vector, t: f64) -> SpanEnd<'_> {
         let p = ray_location(ray, t);
-        SpanEnd { t, normal: self.normal_at(p, negp(ray.delta)), surface: self.surface, point: p }
+        SpanEnd { t, normal: self.normal_at(p, negp(ray.delta)), surface: self.surface.as_ref(), point: p }
     }
 
     /// Every `t` along the whole line where the ray crosses the blob's
     /// surface, paired into spans; see the `Blob` doc comment.
-    fn spans(&self, ray: &Vector, out: &mut Vec<Span>) {
+    fn spans<'a>(&'a self, ray: &Vector, out: &mut Vec<Span<'a>>) {
         let len = lenp(ray.delta);
         if len < 1e-12 {
             return;
@@ -2232,11 +2233,11 @@ impl Hittable for Blob {
 /// leading coefficients can cancel (positive and negative blob
 /// components), so the degree is taken from the largest coefficient
 /// that isn't negligible next to the others.
-fn polynomial_roots(k: [f64; 5]) -> Vec<f64> {
+fn polynomial_roots(k: [f64; 5]) -> Roots {
     use crate::render::poly::{solve_cubic, solve_quadratic, solve_quartic};
     let scale = k.iter().fold(0.0f64, |m, v| m.max(v.abs()));
     if scale == 0.0 {
-        return vec![];
+        return Roots::new();
     }
     let tiny = 1e-12 * scale;
     if k[4].abs() > tiny {
@@ -2246,9 +2247,9 @@ fn polynomial_roots(k: [f64; 5]) -> Vec<f64> {
     } else if k[2].abs() > tiny {
         solve_quadratic(k[1] / k[2], k[0] / k[2])
     } else if k[1].abs() > tiny {
-        vec![-k[0] / k[1]]
+        Roots::from([-k[0] / k[1]])
     } else {
-        vec![]
+        Roots::new()
     }
 }
 
@@ -2277,11 +2278,17 @@ fn polynomial_roots(k: [f64; 5]) -> Vec<f64> {
 /// `Surfaced` "innermost wins" rule keeps working). The hit point
 /// isn't stored; it's recomputed from the ray and `t` when a hit is
 /// returned, the same way `Transformed::hit_test` does it.
+///
+/// The surface is borrowed from the shape tree for the length of one
+/// query rather than copied: a `Surface` is 112 bytes, and spans are
+/// built, sorted, merged and copied many times per ray. With a copy
+/// each span was 336 bytes; with a reference it's 128 (history
+/// entry 85).
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct SpanEnd {
+pub struct SpanEnd<'a> {
     pub t: f64,
     pub normal: Point,
-    pub surface: Option<Surface>,
+    pub surface: Option<&'a Surface>,
     /// The crossing in texture space (see `RayHit::texture_point`).
     /// Infinite for a half-space's infinite ends, which are never hits.
     pub point: Point,
@@ -2290,24 +2297,47 @@ pub struct SpanEnd {
 /// One interval `[enter.t, exit.t]` along a ray where the ray is inside
 /// a solid. `enter.t < exit.t` always holds; either end may be infinite.
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub struct Span {
-    pub enter: SpanEnd,
-    pub exit: SpanEnd,
+pub struct Span<'a> {
+    pub enter: SpanEnd<'a>,
+    pub exit: SpanEnd<'a>,
 }
 
-impl SpanEnd {
+impl<'a> SpanEnd<'a> {
     /// The same crossing seen from the other side of the surface. Used
     /// by `span_difference`: where a subtracted solid B carves into A,
     /// the new boundary is B's surface viewed from inside B, so its
     /// outward normal (as a boundary of `A − B`) points the other way.
-    fn flipped(self) -> SpanEnd {
+    fn flipped(self) -> SpanEnd<'a> {
         SpanEnd { normal: negp(self.normal), ..self }
     }
 
-    fn fill_surface(&mut self, surface: Surface) {
+    fn fill_surface(&mut self, surface: &'a Surface) {
         if self.surface.is_none() {
             self.surface = Some(surface);
         }
+    }
+}
+
+/// Up to `N` candidate crossings `(t, normal)` for `convex_span`, held
+/// inline: a heap `Vec` here was allocated and freed for every ray that
+/// met a cylinder or cone (history entry 85).
+struct Candidates<const N: usize> {
+    items: [(f64, Point); N],
+    len: usize,
+}
+
+impl<const N: usize> Candidates<N> {
+    fn new() -> Self {
+        Candidates { items: [(0.0, [0.0; 3]); N], len: 0 }
+    }
+
+    fn push(&mut self, candidate: (f64, Point)) {
+        self.items[self.len] = candidate;
+        self.len += 1;
+    }
+
+    fn as_slice(&self) -> &[(f64, Point)] {
+        &self.items[..self.len]
     }
 }
 
@@ -2315,7 +2345,7 @@ impl SpanEnd {
 /// crossings (in any order): the ray is inside between the smallest and
 /// largest crossing. Fewer than two distinct crossings — a miss, or a
 /// ray grazing an edge — gives no span.
-fn convex_span(ray: &Vector, candidates: &[(f64, Point)], surface: Option<Surface>) -> Option<Span> {
+fn convex_span<'a>(ray: &Vector, candidates: &[(f64, Point)], surface: Option<&'a Surface>) -> Option<Span<'a>> {
     let mut lo: Option<(f64, Point)> = None;
     let mut hi: Option<(f64, Point)> = None;
     for &(t, n) in candidates {
@@ -2370,7 +2400,7 @@ impl Shape {
     /// constructors refuse them as operands (see `is_solid`), so a
     /// triangle never reaches this from a `Csg` node. `Light`s
     /// contribute nothing.
-    pub fn spans(&self, ray: &Vector, out: &mut Vec<Span>) {
+    pub fn spans<'a>(&'a self, ray: &Vector, out: &mut Vec<Span<'a>>) {
         match self {
             Shape::Sphere(s)   => out.extend(s.span(ray)),
             Shape::Plane(p)    => out.extend(p.span(ray)),
@@ -2434,8 +2464,8 @@ impl Shape {
                 let first = out.len();
                 s.child.spans(ray, out);
                 for span in &mut out[first..] {
-                    span.enter.fill_surface(s.surface);
-                    span.exit.fill_surface(s.surface);
+                    span.enter.fill_surface(&s.surface);
+                    span.exit.fill_surface(&s.surface);
                 }
             }
         }
@@ -2448,24 +2478,42 @@ thread_local! {
     /// at every level of nesting); taking them from a per-thread pool
     /// instead of allocating each one keeps `malloc`/`free` out of the
     /// hot path. Buffers keep their capacity between uses.
-    static SPAN_POOL: std::cell::RefCell<Vec<Vec<Span>>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SPAN_POOL: std::cell::RefCell<Vec<Vec<Span<'static>>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Run `f` with an empty span buffer from the pool, returning the
 /// buffer afterwards. Nesting is fine: each call takes its own buffer,
 /// and the pool is only borrowed while taking or returning one.
-fn with_span_buffer<R>(f: impl FnOnce(&mut Vec<Span>) -> R) -> R {
-    let mut buf = SPAN_POOL.with(|pool| pool.borrow_mut().pop()).unwrap_or_default();
-    buf.clear();
+fn with_span_buffer<'a, R>(f: impl FnOnce(&mut Vec<Span<'a>>) -> R) -> R {
+    let pooled = SPAN_POOL.with(|pool| pool.borrow_mut().pop()).unwrap_or_default();
+    let mut buf = relabel(pooled);
     let result = f(&mut buf);
-    SPAN_POOL.with(|pool| pool.borrow_mut().push(buf));
+    let returned: Vec<Span<'static>> = relabel(buf);
+    SPAN_POOL.with(|pool| pool.borrow_mut().push(returned));
     result
+}
+
+/// Change the lifetime a span buffer's (future) elements borrow for,
+/// after emptying it. Spans borrow surfaces from the shape tree for one
+/// query, but the pool outlives every query, so it stores its buffers
+/// as `Span<'static>` and each query borrows one under its own lifetime.
+///
+/// Sound because the buffer is emptied first: no span, and so no
+/// borrowed surface, crosses from one lifetime to the other; only the
+/// allocation does, and `Span<'a>` and `Span<'b>` have the same layout.
+fn relabel<'a, 'b>(mut buf: Vec<Span<'a>>) -> Vec<Span<'b>> {
+    buf.clear();
+    let mut buf = std::mem::ManuallyDrop::new(buf);
+    let (ptr, capacity) = (buf.as_mut_ptr(), buf.capacity());
+    // SAFETY: an empty Vec's allocation, re-typed to an element type
+    // with the same size and alignment (only a lifetime differs).
+    unsafe { Vec::from_raw_parts(ptr as *mut Span<'b>, 0, capacity) }
 }
 
 impl Csg {
     /// Append this node's spans along `ray` to `out`: the operands'
     /// span lists combined by the node's set operation.
-    fn spans(&self, ray: &Vector, out: &mut Vec<Span>) {
+    fn spans<'a>(&'a self, ray: &Vector, out: &mut Vec<Span<'a>>) {
         if self.op == CsgOp::Merge {
             // A union needs no scratch lists: append both operands'
             // spans and normalize.
@@ -2508,7 +2556,7 @@ impl Csg {
 /// the primitives' `hit_test` would report for a back face).
 ///
 /// `Csg::hit_test` is this applied to the node's spans.
-pub fn first_span_hit(spans: &[Span], ray: &Vector) -> Option<RayHit> {
+pub fn first_span_hit(spans: &[Span<'_>], ray: &Vector) -> Option<RayHit> {
     for span in spans {
         for (end, is_enter) in [(span.enter, true), (span.exit, false)] {
             if end.t > EPSILON && end.t.is_finite() {
@@ -2517,7 +2565,7 @@ pub fn first_span_hit(spans: &[Span], ray: &Vector) -> Option<RayHit> {
                     hit_point: ray_location(ray, end.t),
                     texture_point: end.point,
                     normal: end.normal,
-                    surface: end.surface,
+                    surface: end.surface.copied(),
                     // The span's own start is where the ray enters the
                     // solid; its end is where it leaves.
                     entering: is_enter,
@@ -2532,7 +2580,7 @@ pub fn first_span_hit(spans: &[Span], ray: &Vector) -> Option<RayHit> {
 /// and non-overlapping. The spans may arrive in any order and overlap.
 /// Touching spans coalesce, so the shared face between two abutting
 /// solids disappears.
-fn normalize_union_tail(out: &mut Vec<Span>, first: usize) {
+fn normalize_union_tail(out: &mut Vec<Span<'_>>, first: usize) {
     let tail = &mut out[first..];
     if tail.len() < 2 {
         return;
@@ -2554,7 +2602,7 @@ fn normalize_union_tail(out: &mut Vec<Span>, first: usize) {
 }
 
 /// Union of two sorted, non-overlapping span lists.
-pub fn span_union(a: &[Span], b: &[Span]) -> Vec<Span> {
+pub fn span_union<'a>(a: &[Span<'a>], b: &[Span<'a>]) -> Vec<Span<'a>> {
     let mut out: Vec<Span> = a.iter().chain(b.iter()).copied().collect();
     normalize_union_tail(&mut out, 0);
     out
@@ -2564,14 +2612,14 @@ pub fn span_union(a: &[Span], b: &[Span]) -> Vec<Span> {
 /// inside both. Each result endpoint is the crossing that bounds the
 /// overlap (the later of the two enters, the earlier of the two exits),
 /// so it carries the right solid's normal and surface.
-pub fn span_intersection(a: &[Span], b: &[Span]) -> Vec<Span> {
+pub fn span_intersection<'a>(a: &[Span<'a>], b: &[Span<'a>]) -> Vec<Span<'a>> {
     let mut result = Vec::new();
     span_intersection_into(a, b, &mut result);
     result
 }
 
 /// `span_intersection`, appending to `result` instead of allocating.
-fn span_intersection_into(a: &[Span], b: &[Span], result: &mut Vec<Span>) {
+fn span_intersection_into<'a>(a: &[Span<'a>], b: &[Span<'a>], result: &mut Vec<Span<'a>>) {
     let (mut i, mut j) = (0, 0);
     while i < a.len() && j < b.len() {
         let enter = if a[i].enter.t >= b[j].enter.t { a[i].enter } else { b[j].enter };
@@ -2592,14 +2640,14 @@ fn span_intersection_into(a: &[Span], b: &[Span], result: &mut Vec<Span>) {
 /// Difference of two sorted, non-overlapping span lists: the ranges
 /// inside `a` but not inside `b`. Boundaries contributed by `b` are
 /// flipped (see `SpanEnd::flipped`) and keep `b`'s surface.
-pub fn span_difference(a: &[Span], b: &[Span]) -> Vec<Span> {
+pub fn span_difference<'a>(a: &[Span<'a>], b: &[Span<'a>]) -> Vec<Span<'a>> {
     let mut result = Vec::new();
     span_difference_into(a, b, &mut result);
     result
 }
 
 /// `span_difference`, appending to `result` instead of allocating.
-fn span_difference_into(a: &[Span], b: &[Span], result: &mut Vec<Span>) {
+fn span_difference_into<'a>(a: &[Span<'a>], b: &[Span<'a>], result: &mut Vec<Span<'a>>) {
     // `j` skips `b` spans that end before the current `a` span starts.
     // It never skips past a `b` span that might still overlap a later
     // `a` span, since both lists are sorted.
@@ -2627,7 +2675,7 @@ fn span_difference_into(a: &[Span], b: &[Span], result: &mut Vec<Span>) {
 }
 
 impl Sphere {
-    fn span(&self, ray: &Vector) -> Option<Span> {
+    fn span(&self, ray: &Vector) -> Option<Span<'_>> {
         // Same quadratic as `hit_test`, keeping both roots and not
         // rejecting negative `t`. A tangent ray (zero discriminant)
         // touches the sphere at one point and has no inside.
@@ -2644,17 +2692,17 @@ impl Sphere {
         let t1 = (-b + sqrt_disc) / (2.0 * a);
         let normal_at = |t| normalizep(subp(ray_location(ray, t), self.center));
         Some(Span {
-            enter: SpanEnd { t: t0, normal: normal_at(t0), surface: self.surface, point: ray_location(ray, t0) },
-            exit: SpanEnd { t: t1, normal: normal_at(t1), surface: self.surface, point: ray_location(ray, t1) },
+            enter: SpanEnd { t: t0, normal: normal_at(t0), surface: self.surface.as_ref(), point: ray_location(ray, t0) },
+            exit: SpanEnd { t: t1, normal: normal_at(t1), surface: self.surface.as_ref(), point: ray_location(ray, t1) },
         })
     }
 }
 
 impl Plane {
-    fn span(&self, ray: &Vector) -> Option<Span> {
+    fn span(&self, ray: &Vector) -> Option<Span<'_>> {
         // A plane is a half-space: the solid side is the one opposite
         // `normal`, i.e. the points where `(P - p0)·normal <= 0`.
-        let side = |t: f64| SpanEnd { t, normal: self.normal, surface: self.surface, point: ray_location(ray, t) };
+        let side = |t: f64| SpanEnd { t, normal: self.normal, surface: self.surface.as_ref(), point: ray_location(ray, t) };
         let denom = dotp(self.normal, ray.delta);
         if denom.abs() < EPSILON {
             // Parallel to the plane: the ray is inside for its whole
@@ -2676,7 +2724,7 @@ impl Plane {
 }
 
 impl Cuboid {
-    fn span(&self, ray: &Vector) -> Option<Span> {
+    fn span(&self, ray: &Vector) -> Option<Span<'_>> {
         // Slab method, as in `hit_test`, but tracking the exit face as
         // well as the entry face and without rejecting negative `t`.
         let mut t_enter = f64::NEG_INFINITY;
@@ -2724,14 +2772,14 @@ impl Cuboid {
         // At least one axis constrains `t` (the direction is nonzero),
         // so both ends are finite here.
         (t_enter < t_exit).then_some(Span {
-            enter: SpanEnd { t: t_enter, normal: enter_normal, surface: self.surface, point: ray_location(ray, t_enter) },
-            exit: SpanEnd { t: t_exit, normal: exit_normal, surface: self.surface, point: ray_location(ray, t_exit) },
+            enter: SpanEnd { t: t_enter, normal: enter_normal, surface: self.surface.as_ref(), point: ray_location(ray, t_enter) },
+            exit: SpanEnd { t: t_exit, normal: exit_normal, surface: self.surface.as_ref(), point: ray_location(ray, t_exit) },
         })
     }
 }
 
 impl Cylinder {
-    fn span(&self, ray: &Vector) -> Option<Span> {
+    fn span(&self, ray: &Vector) -> Option<Span<'_>> {
         // The same side and cap tests as `hit_test`, keeping every
         // valid crossing instead of the nearest one in front. The
         // cylinder is convex, so the span runs from the smallest
@@ -2747,7 +2795,8 @@ impl Cylinder {
         let d_dot_a = dotp(ray.delta, axis_unit);
         let delta_dot_a = dotp(delta, axis_unit);
 
-        let mut candidates: Vec<(f64, Point)> = Vec::with_capacity(4);
+        // Two side crossings and two caps.
+        let mut candidates: Candidates<4> = Candidates::new();
 
         // Side surface.
         let d_perp = subp(ray.delta, scalep(axis_unit, d_dot_a));
@@ -2784,12 +2833,12 @@ impl Cylinder {
             }
         }
 
-        convex_span(ray, &candidates, self.surface)
+        convex_span(ray, candidates.as_slice(), self.surface.as_ref())
     }
 }
 
 impl Cone {
-    fn span(&self, ray: &Vector) -> Option<Span> {
+    fn span(&self, ray: &Vector) -> Option<Span<'_>> {
         // The same lateral and base-cap tests as `hit_test`, keeping
         // every valid crossing. A closed cone is convex, so the span
         // runs from the smallest crossing to the largest.
@@ -2833,7 +2882,8 @@ impl Cone {
             }
         }
 
-        let mut candidates: Vec<(f64, Point)> = Vec::with_capacity(3);
+        // Two side crossings and the base.
+        let mut candidates: Candidates<3> = Candidates::new();
         let slope = self.r / axis_len;
         for t in roots.iter().flatten().copied() {
             // `s >= 0` discards the double cone's second nappe behind
@@ -2867,7 +2917,7 @@ impl Cone {
             }
         }
 
-        convex_span(ray, &candidates, self.surface)
+        convex_span(ray, candidates.as_slice(), self.surface.as_ref())
     }
 }
 
@@ -2899,7 +2949,7 @@ mod span_tests {
         }
     }
 
-    fn spans_of(shape: &Shape, r: &Vector) -> Vec<Span> {
+    fn spans_of<'a>(shape: &'a Shape, r: &Vector) -> Vec<Span<'a>> {
         let mut out = Vec::new();
         shape.spans(r, &mut out);
         out
@@ -3122,7 +3172,9 @@ mod span_tests {
             // behind the origin: the tree's boxes skip those, which is
             // harmless because they can't affect anything in front of
             // the ray (see the `Bounded` arm of `Shape::spans`).
-            let ahead = |v: Vec<Span>| v.into_iter().filter(|s| s.exit.t > 0.0).collect::<Vec<_>>();
+            fn ahead(v: Vec<Span<'_>>) -> Vec<Span<'_>> {
+                v.into_iter().filter(|s| s.exit.t > 0.0).collect()
+            }
             assert_eq!(ahead(spans_of(&flat, &r)), ahead(spans_of(&tree, &r)));
         }
         assert!(hits > 300, "too few hits ({}) for a meaningful check", hits);
@@ -3288,10 +3340,10 @@ mod span_tests {
         ]));
         let spans = spans_of(&g, &ray([-5.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
         assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].enter.surface, Some(outer));
-        assert_eq!(spans[0].exit.surface, Some(outer));
-        assert_eq!(spans[1].enter.surface, Some(inner));
-        assert_eq!(spans[1].exit.surface, Some(inner));
+        assert_eq!(spans[0].enter.surface, Some(&outer));
+        assert_eq!(spans[0].exit.surface, Some(&outer));
+        assert_eq!(spans[1].enter.surface, Some(&inner));
+        assert_eq!(spans[1].exit.surface, Some(&inner));
     }
 
     #[test]
@@ -3404,7 +3456,7 @@ mod span_tests {
     /// A span with a marker normal: `+x` at the enter end, `+y` at
     /// the exit end, scaled by `tag` so results can be traced back to
     /// the list they came from.
-    fn mk(t0: f64, t1: f64, tag: f64) -> Span {
+    fn mk(t0: f64, t1: f64, tag: f64) -> Span<'static> {
         Span {
             enter: SpanEnd { t: t0, normal: [tag, 0.0, 0.0], surface: None, point: [t0, 0.0, 0.0] },
             exit: SpanEnd { t: t1, normal: [0.0, tag, 0.0], surface: None, point: [t1, 0.0, 0.0] },
@@ -3687,9 +3739,11 @@ mod span_tests {
         // minus a smaller concentric sphere minus the half-space
         // z <= 0 (a plane with normal +z).
         let r = ray([0.0, 0.0, -5.0], [0.0, 0.0, 1.0]);
-        let outer = spans_of(&sphere([0.0, 0.0, 0.0], 1.0), &r);
-        let inner = spans_of(&sphere([0.0, 0.0, 0.0], 0.9), &r);
-        let front = spans_of(&Shape::Plane(Plane { normal: [0.0, 0.0, 1.0], p0: [0.0, 0.0, 0.0], surface: None }), &r);
+        let (outer_ball, inner_ball) = (sphere([0.0, 0.0, 0.0], 1.0), sphere([0.0, 0.0, 0.0], 0.9));
+        let half = Shape::Plane(Plane { normal: [0.0, 0.0, 1.0], p0: [0.0, 0.0, 0.0], surface: None });
+        let outer = spans_of(&outer_ball, &r);
+        let inner = spans_of(&inner_ball, &r);
+        let front = spans_of(&half, &r);
         let shell = span_difference(&outer, &inner);
         let bowl = span_difference(&shell, &front);
         // Only the back wall of the shell remains: z from 0.9 to 1.0.
@@ -3810,7 +3864,7 @@ mod blob_tests {
         }
     }
 
-    fn spans(b: &Blob, start: Point, delta: Point) -> Vec<Span> {
+    fn spans(b: &Blob, start: Point, delta: Point) -> Vec<Span<'_>> {
         let mut out = Vec::new();
         b.spans(&Vector { start, delta }, &mut out);
         out

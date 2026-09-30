@@ -3713,6 +3713,41 @@ Approximate order of recent commits, oldest first:
       answer matches the walk) and
       `opaque_content_coincident_with_glass_casts_a_shadow`.
 
+85. **CSG and primitive spans: no heap allocation, smaller spans.**
+    Following entry 84's profile. All three changes leave every scene
+    byte-identical.
+    - **Candidate crossings on the stack.** Cylinders and cones gathered
+      their candidate crossings for `convex_span` in a new `Vec` on
+      every span query: 2.5 million allocations for cpot at 64 px. Now
+      a fixed `Candidates<N>` array.
+    - **Polynomial roots on the stack.** `solve_quadratic`, `solve_cubic`
+      and `solve_quartic`, `Torus::local_roots` and blob
+      `polynomial_roots` return `poly::Roots` (up to four values inline,
+      derefs to `[f64]`) instead of a `Vec`. Together with the
+      candidates, cpot's `malloc` cost fell from 176 million
+      instructions to 1.5 million.
+    - **Spans borrow their surface.** `SpanEnd<'a>` holds
+      `Option<&'a Surface>` instead of a 112-byte copy, so a `Span` is
+      128 bytes instead of 336; the surface is copied only into the
+      returned `RayHit`. `Shape::spans` takes `&'a self` and fills
+      `Vec<Span<'a>>`. The per-thread span buffer pool stores
+      `Vec<Span<'static>>` and relabels an *emptied* buffer to each
+      query's lifetime (`relabel`, one `unsafe` `from_raw_parts` with the
+      argument written next to it).
+    - Instructions at 64 px (callgrind): cpot 5.79 -> 5.12 -> 5.00
+      billion, room 10.46 -> 10.03 -> 9.91 (after entry 84; then after
+      the allocation changes; then after smaller spans).
+    - Render time at 128 px against entry 84 (best of 5, alternating
+      builds): texaco -14.9%, cpot -8.8% (-12.0% with the allocation
+      changes alone; the difference is within noise), snowman_room
+      -7.2%, snowman_avatar -5.6%, ornament -1.4%.
+    - **xmastree profile** (64 px): 46% is building the scene in the
+      SDL, a fixed ~0.5 s that's 1-2% of a full-size render (much of it
+      SipHash in environment lookups). The render half is BVH traversal:
+      `shadow_probe` 10.5%, `hit_test` 7.5%, `nearer_first_hit` 7.5% of
+      the whole, over 18,317 leaves. Its next gains would come from BVH
+      quality and layout, not CSG.
+
 
 ## Pitfalls and conventions
 
