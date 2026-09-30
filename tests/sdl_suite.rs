@@ -1104,6 +1104,11 @@ fn snowman_avatar_scene_loads() {
 }
 
 #[test]
+fn snowman_sphere_scene_loads() {
+    assert_scene_loads("snowman_sphere.lisp", "snowman-sphere-scene");
+}
+
+#[test]
 fn metallic_test_scene_loads() {
     assert_scene_loads("metallic_test.lisp", "metallic-test-scene");
 }
@@ -1519,5 +1524,64 @@ fn filter_rejects_bad_values() {
             Err(p) => p.downcast_ref::<String>().cloned().unwrap_or_default(),
         };
         assert!(message.contains(":filter"), "{}: {}", source, message);
+    }
+}
+
+/// A height field from a 2x2 all-white grey TGA is the flat unit square
+/// at y = 1: seen from above, the middle is lit and the area beyond the
+/// square's edge is background.
+#[test]
+fn height_field_renders_its_square() {
+    let tga = std::env::temp_dir().join(format!("hf_flat_{}.tga", std::process::id()));
+    let mut data = vec![0u8; 18];
+    data[2] = 3; // uncompressed grey
+    data[12] = 2;
+    data[14] = 2;
+    data[16] = 8;
+    data[17] = 0x20;
+    data.extend_from_slice(&[255, 255, 255, 255]);
+    fs::write(&tga, &data).unwrap();
+    // From 4 units above the square at zoom 1 the frame is 4 units
+    // across, so the square fills about the middle quarter.
+    let source = format!(
+        r#"
+(def s (scene {{:name "hf"
+               :camera (camera-looking-at [0.5 5 0.5001] [0.5 0 0.5] [0 0 1] 1)
+               :background [0 0 0]
+               :min-samples 1 :max-samples 1
+               :view {{:curve :clip}}
+               :objects [(with-surface (surface {{:color [1 1 1] :ambient 1.0 :light 0.0}})
+                           (height-field {{:image "{}"}}))]}}))
+(def t (png-target 21 21))
+(render s t 21 21)
+(save-png t PATH)
+"#,
+        tga.to_string_lossy()
+    );
+    let img = render_to_image(&source, "height_field");
+    let _ = fs::remove_file(&tga);
+    assert_eq!(img.get_pixel(10, 10).0, [255, 255, 255], "the square");
+    assert_eq!(img.get_pixel(2, 2).0, [0, 0, 0], "beyond its edge");
+    let lit = img.as_raw().chunks(3).filter(|p| p[0] > 128).count();
+    assert!((16..=49).contains(&lit), "about a quarter of the frame across: {} pixels", lit);
+}
+
+#[test]
+fn height_field_rejects_bad_input() {
+    let cases = [
+        ("(height-field {:image \"/nonexistent/none.tga\"})", "can't read"),
+        ("(height-field {:image \"x.tga\" :smoooth true})", "unknown key :smoooth"),
+        ("(height-field {:water-level 0.2})", ":image"),
+    ];
+    for (source, expected) in cases.iter() {
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(source, "hf_bad.lisp", &env);
+        }));
+        let message = match result {
+            Ok(_) => panic!("must reject {}", source),
+            Err(p) => p.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        assert!(message.contains(expected), "{}: {}", source, message);
     }
 }

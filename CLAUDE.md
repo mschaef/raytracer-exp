@@ -3266,6 +3266,51 @@ Approximate order of recent commits, oldest first:
     - Comparison: `Claude outputs/snowman_phase4_avatar.png`. The
       avatar takes 16 s at 520x600.
     - avatar.pov is done apart from refraction, which it doesn't use.
+72. **Snowman phase 5: height fields, and sphere.pov.**
+    - `src/render/heightfield.rs`: a small TGA reader
+      (`read_tga_heights`: uncompressed and RLE; 8-bit grey, 8-bit
+      palette, 24- and 32-bit colour; either row order) and
+      `height_field_triangles`, which builds the mesh.
+      - Heights as POV reads them: grey `v / 255`, palette index
+        `/ 255`, colour `(red * 256 + green) / 65535` (a grey picture
+        gives `v / 255` either way).
+      - The field fills the unit square: column `c` at `x = c / (w-1)`,
+        row `r` (from the top of the picture) at `z = 1 - r / (h-1)`, so
+        the picture reads the right way up from above. That orientation
+        puts imap.tga's square hole under sphere.pov's compass, which
+        is the evidence for it. Each cell is two triangles wound to face
+        up; `:smooth` gives central-difference vertex normals.
+      - Cells whose four corners are all below `water_level` are left
+        out.
+      - Own reader rather than the `image` crate: the format is small,
+        and the cloud workspace builds against a stub `image`.
+    - SDL: `(height-field {:image "file.tga" :water-level w :smooth b})`,
+      a BVH of unsurfaced triangles; the path resolves like
+      `load-obj`'s. Rejects unknown keys, unreadable or unsupported
+      files, and a field with nothing above the water level.
+    - **Fix: small triangles were never hit.** `Triangle::hit_test`
+      rejected rays with `|det| < EPSILON` (1e-4), but the determinant
+      scales with the triangle's area and the ray's length. A height
+      field's cells in its unit square (1/255 by 1/169) all failed it,
+      as would any small mesh. The test is now relative:
+      `|det| < 1e-12 |e1| |e2| |d|`. Every existing scene, meshes
+      included, renders byte-identically. The face normal is normalized
+      by hand for the same reason (`normalizep` panics below 1e-4).
+      Test `tiny_triangles_are_hit`.
+    - `scenes/snowman_sphere.lisp` is sphere.pov: avatar.pov's snowman,
+      bowtie, mirror, glass and compass (now shared in `_snowman.lisp`;
+      the avatar is byte-identical) from `<12, 6.75, 12>`, with the
+      height field `imap.tga` (copied to `models/snowman_imap.tga`)
+      scaled `<10, 3, 10>`, moved `<-5, -0.25, -5>`, water level 0.25,
+      in DirtySnowWhite. 640x480, `{:curve :clip}` like the avatar (no
+      reference render exists). 22 s at 640x480.
+    - Tests: `heightfield::tests` (grey, colour, orientation, RLE,
+      rejections, mesh orientation, water level), and in the suite
+      `height_field_renders_its_square`, `height_field_rejects_bad_input`
+      and `snowman_sphere_scene_loads`.
+    - Not done: PNG height fields (sphere2's optional yard, `yard.tga`,
+      exists only as yard.png) and `image_map` pigments (sphere.pov has
+      one commented out).
 
 ## Pitfalls and conventions
 
@@ -4679,7 +4724,7 @@ face-forward shading. The snow (`Dirty`), the nose and hat band
 colour. For the mirror glass here, window glass in sphere2 and T_Glass4
 in cpot. Then tune avatar.pov against avatar.jpg and give it a `:view`.
 
-### Phase 5 — sphere.pov: height fields
+### Phase 5 — sphere.pov: height fields (done, entry 72)
 
 `height_field` from an image, generated as a triangle mesh (with a BVH)
 at load time: heights from the image's luminance or palette index,

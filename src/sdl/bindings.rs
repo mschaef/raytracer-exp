@@ -48,6 +48,7 @@ use crate::render::shapes::{
 use crate::render::transform::Affine;
 use crate::render::noise::Octaves;
 use crate::render::pigment::{LayeredPigment, Pattern, Pigment, Rgbt, Wave};
+use crate::render::heightfield::{height_field_triangles, read_tga_heights};
 use crate::render::normal::{Bump, NormalPattern};
 use crate::render::view::{ToneCurve, ViewTransform};
 use crate::render::{Camera, HeatmapTargets, Light, LightKind, Scene, SpotCone, Surface, ViewMode};
@@ -98,6 +99,7 @@ pub fn install(env: &EnvRef) {
     define_native(env, "cone", builtin_cone);
     define_native(env, "torus", builtin_torus);
     define_native(env, "blob", builtin_blob);
+    define_native(env, "height-field", builtin_height_field);
 
     // Mesh loading (Phase 7).
     define_native(env, "load-obj", builtin_load_obj);
@@ -1398,6 +1400,39 @@ fn builtin_load_obj(args: &[Value], pos: &Position) -> Value {
     };
 
     Value::Shape(Rc::new(load_obj(&resolved, surface)))
+}
+
+/// `(height-field {:image "file.tga" :water-level w :smooth b})` —
+/// POV-Ray's `height_field { tga "file" water_level w smooth }`: a
+/// triangle mesh over the unit square in x and z, heights `[0, 1]` in
+/// y, in a BVH. Unsurfaced; wrap it in `(with-surface ...)` and place it
+/// with `scale` / `translate`. `:water-level` (default 0) drops cells
+/// entirely below it; `:smooth` (default false) interpolates normals.
+/// The path resolves like `load-obj`'s. See `render::heightfield`.
+fn builtin_height_field(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 1, "height-field", pos);
+    let map = require_map(&args[0], "height-field", pos);
+    const KEYS: [&str; 3] = ["image", "water-level", "smooth"];
+    for k in map.keys() {
+        if !KEYS.contains(&k.as_str()) {
+            sdl_panic!(pos, "height-field: unknown key :{} (expected one of :{})", k, KEYS.join(" :"));
+        }
+    }
+    let path_str = require_key_string(&map, "image", "height-field", pos);
+    let water_level = maybe_key_number(&map, "water-level", "height-field", pos).unwrap_or(0.0);
+    let smooth = maybe_key_bool(&map, "smooth", "height-field", pos).unwrap_or(false);
+    let path = Path::new(&path_str);
+    let resolved: std::path::PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        crate::sdl::CURRENT_DIR.with(|c| c.borrow().clone().map(|d| d.join(path)).unwrap_or_else(|| path.to_path_buf()))
+    };
+    let grid = read_tga_heights(&resolved).unwrap_or_else(|e| sdl_panic!(pos, "height-field: {}", e));
+    let triangles = height_field_triangles(&grid, water_level, smooth, None);
+    if triangles.is_empty() {
+        sdl_panic!(pos, "height-field: nothing above :water-level {}", water_level);
+    }
+    Value::Shape(Rc::new(bvh(triangles)))
 }
 
 // ---------------------------------------------------------------------------

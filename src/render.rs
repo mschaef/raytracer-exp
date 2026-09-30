@@ -17,6 +17,7 @@ pub mod output;
 pub mod sampler;
 pub mod poly;
 pub mod noise;
+pub mod heightfield;
 pub mod normal;
 pub mod pigment;
 pub mod view;

@@ -1053,8 +1053,12 @@ impl Hittable for Triangle {
         let h = crossp(ray.delta, edge2);
         let a = dotp(edge1, h);
 
-        // Ray (nearly) parallel to triangle plane.
-        if a.abs() < EPSILON {
+        // Ray (nearly) parallel to triangle plane. The test is relative
+        // to the triangle's and the ray's size: `a` scales with both, so
+        // an absolute `EPSILON` rejected every ray at a small triangle,
+        // such as a height field's cells in its unit square (history
+        // entry 72).
+        if a.abs() < 1e-12 * lenp(edge1) * lenp(edge2) * lenp(ray.delta) {
             return None;
         }
 
@@ -3817,5 +3821,32 @@ mod blob_tests {
         let h = b.hit_test(&Vector { start: [0.0, -5.0, 0.0], delta: [0.0, 1.0, 0.0] }).unwrap();
         assert!(h.entering);
         assert!(h.normal[1] < -0.99);
+    }
+}
+
+#[cfg(test)]
+mod small_triangle_tests {
+    use super::*;
+
+    /// History entry 72: a triangle a thousandth of a unit across is hit
+    /// just like a big one. The parallel-ray test used an absolute
+    /// `EPSILON`, and the determinant it compares scales with the
+    /// triangle's area, so small triangles were never hit.
+    #[test]
+    fn tiny_triangles_are_hit() {
+        for size in [1.0, 1e-3, 1e-5] {
+            let n = [0.0, 0.0, -1.0];
+            let t = Triangle {
+                vertices: [[0.0, 0.0, 0.0], [size, 0.0, 0.0], [0.0, size, 0.0]],
+                normals: [n, n, n],
+                surface: None,
+            };
+            let ray = Vector { start: [size * 0.25, size * 0.25, -1.0], delta: [0.0, 0.0, 1.0] };
+            let hit = t.hit_test(&ray).unwrap_or_else(|| panic!("size {} missed", size));
+            assert!((hit.distance - 1.0).abs() < 1e-9);
+            // Still misses beside it, and misses a ray in its plane.
+            assert!(t.hit_test(&Vector { start: [size * 2.0, size * 2.0, -1.0], delta: [0.0, 0.0, 1.0] }).is_none());
+            assert!(t.hit_test(&Vector { start: [-1.0, size * 0.25, 0.0], delta: [1.0, 0.0, 0.0] }).is_none());
+        }
     }
 }

@@ -15,45 +15,8 @@
 
 (load "_snowman.lisp")
 
-; The mirror glass: box { <-5, -0.5, -5>, <5, 0, 5> } with
-; pigment { rgbf <0, 0, 0.1, 0.9> } and then texture { Glass3 }, which
-; POV layers: Glass3 (near-white, filter 0.8, ambient 0.1, diffuse 0.1,
-; reflection 0.1, specular 0.8, roughness 0.003) over the dark blue
-; filter. Through both, only a little dark blue light gets through, and
-; what shows is mostly Glass3's own dim body. One surface can't hold
-; two layers, so this is an equivalent chosen to match avatar.jpg's
-; floor, a greyish navy (about 34, 34, 58): a grey-blue body with a
-; little blue-tinted filter. Glass3 alone (white, filter 0.8) left the
-; floor light grey; the blue layer alone left it nearly black.
-(def mirror-glass
-  (with-surface (surface {:color [0.2 0.2 0.4] :ambient 0.1 :light 0.1
-                          :specular 0.8 :shininess 333 :reflection 0.1
-                          :filter 0.2})
-    (box [-5 -0.5 -5] [5 0 5])))
-
-; The mirror under it: plane { y, -0.4999 } clipped to a thin box, in
-; Silver with ambient 0.15, diffuse 0.05, reflection 0.8, phong 0.9,
-; phong_size 120, metallic.
-(def mirror
-  (with-surface (surface {:color [0.90 0.91 0.98] :ambient 0.15 :light 0.05
-                          :specular 0.9 :shininess 120 :reflection 0.8
-                          :metallic true})
-    (intersection (plane {:normal [0 1 0] :p0 [0 -0.4999 0]})
-                  (box [-5 0 -5] [5 -0.51 5]))))
-
-; The compass at <2, 2, -2>: a black ball and red, green and blue arrows
-; 0.8 long along +x, +y and +z.
-(def avatar-compass
-  (group [(sphere {:center [2 2 -2] :r 0.16 :surface matte-black})
-          (with-surface metallic-red
-            (group [(cylinder {:p0 [2 2 -2] :p1 [2.8 2 -2] :r 0.04})
-                    (pov-cone [2.8 2 -2] 0.08 [3 2 -2] 0)]))
-          (with-surface metallic-green
-            (group [(cylinder {:p0 [2 2 -2] :p1 [2 2.8 -2] :r 0.04})
-                    (pov-cone [2 2.8 -2] 0.08 [2 3 -2] 0)]))
-          (with-surface metallic-blue
-            (group [(cylinder {:p0 [2 2 -2] :p1 [2 2 -1.2] :r 0.04})
-                    (pov-cone [2 2 -1.2] 0.08 [2 2 -1] 0)]))]))
+; The mirror, its glass and the compass are in _snowman.lisp (sphere.pov
+; has them too).
 
 (def snowman-avatar-scene
   (scene
@@ -71,4 +34,4 @@
       (placed-bowtie metallic-red)
       mirror-glass
       mirror
-      avatar-compass]}))
+      snowman-compass]}))
