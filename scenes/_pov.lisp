@@ -403,23 +403,23 @@
 (defn pov-plain-specular [color specular]
   (surface {:color (srgb color) :ambient 0.1 :light 0.6 :specular specular}))
 
-; Starting points for metals.inc's F_MetalA ("very soft and dull"),
+; metals.inc's finishes in full: F_MetalA ("very soft and dull"),
 ; F_MetalC ("medium reflectivity, holds color well") and F_MetalE
-; (below), using their
-; ambient, diffuse (:light), specular and reflection numbers. They
-; leave out the finishes' metallic, brilliance and roughness, which the
-; renderer supports since history entry 67 (:metallic keeps the
-; diffuse, :brilliance, :shininess = 1/roughness); xmastree's
-; `surface-ornament` and redball use the full finish.
+; ("very highly polished & reflective"). All are metallic (history
+; entry 67: the reflection and highlight take the surface colour, and
+; the diffuse stays); roughness r becomes :shininess 1/r. Until entry
+; 81 these left out metallic, brilliance and roughness.
 (defn pov-metal-a [color]
-  (surface {:color (srgb color) :ambient 0.35 :light 0.3 :specular 0.8 :reflection 0.1}))
+  (surface {:color (srgb color) :ambient 0.35 :light 0.3 :specular 0.8
+            :shininess 20 :brilliance 2 :reflection 0.1 :metallic true}))
 
 (defn pov-metal-c [color]
-  (surface {:color (srgb color) :ambient 0.25 :light 0.5 :specular 0.8 :reflection 0.5}))
+  (surface {:color (srgb color) :ambient 0.25 :light 0.5 :specular 0.8
+            :shininess 80 :brilliance 4 :reflection 0.5 :metallic true}))
 
-; F_MetalE, "very highly polished & reflective".
 (defn pov-metal-e [color]
-  (surface {:color (srgb color) :ambient 0.1 :light 0.7 :specular 0.8 :reflection 0.8}))
+  (surface {:color (srgb color) :ambient 0.1 :light 0.7 :specular 0.8
+            :shininess 120 :brilliance 6 :reflection 0.8 :metallic true}))
 
 ;; --------------------------------------------------------------------
 ;; The compass (makeCompass)

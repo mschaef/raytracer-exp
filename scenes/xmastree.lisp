@@ -68,16 +68,13 @@
 ; makeOrnamentByID pairs these pigments with F_MetalC.
 (def ornament-colors [pov-gold3 pov-red pov-silver3 pov-yellow pov-blue])
 
-; F_MetalC in full: ambient 0.25, diffuse 0.5, specular 0.8, roughness
-; 1/80 (:shininess 80), brilliance 4, reflection 0.5, metallic. With
-; plain pov-metal-c the 0.5 reflection of the white ground and
-; background washed every ball out to pastel; as metals they reflect in
-; their own colour and read as red, blue and gold baubles, as in
-; xmastree.pov's render. Brilliance keeps the diffuse (history entry 67)
-; from brightening them back toward pastel.
-(defn surface-ornament [color]
-  (surface {:color (srgb color) :ambient 0.25 :light 0.5 :specular 0.8
-            :shininess 80 :brilliance 4 :reflection 0.5 :metallic true}))
+; F_MetalC in full (`pov-metal-c`). Without metallic, the 0.5
+; reflection of the white ground and background washed every ball out
+; to pastel; as metals they reflect in their own colour and read as red,
+; blue and gold baubles, as in xmastree.pov's render. Brilliance keeps
+; the diffuse (history entry 67) from brightening them back toward
+; pastel.
+(defn surface-ornament [color] (pov-metal-c color))
 
 ;; --------------------------------------------------------------------
 ;; Ornaments

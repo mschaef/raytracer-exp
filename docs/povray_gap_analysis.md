@@ -84,6 +84,9 @@ plans.
   `:shininess` (POV roughness) and `:brilliance`, `:metallic` keeps
   its diffuse, and path-tracing bounces get their own sample
   coordinates.
+- **Shared metal presets in full** (CLAUDE.md entry 81): `pov-metal-a`,
+  `-c` and `-e` take metals.inc's whole finishes (metallic, brilliance,
+  roughness). texaco's bowl and xmastree's trunk and hooks changed.
 - **Tuning pass done** (entries 60–66).
 - **Snowman started:** phase 1, avatar.pov with stand-ins (entry 68);
   phase 2, the blob primitive (entry 69); phase 3, bump normals
@@ -214,7 +217,8 @@ them once, during the first port.
      `T_Brass_3E`, `Chrome_Texture`, …), built from this renderer's own
      fields: colour, `:ambient`, `:light`, `:specular`, `:reflection`,
      and its own `:metallic`. These are rough first guesses to tune by
-     eye, not a mapping of POV's finish model.
+     eye, not a mapping of POV's finish model. (Since entry 81 the
+     `F_MetalA`/`C`/`E` presets are metals.inc's finishes in full.)
 
 4. **Mutable state becomes threaded state.** POV ports lean on
    `#declare` mutation. The worst case is `paths.inc` in xmastree, a

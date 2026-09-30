@@ -3048,7 +3048,8 @@ Approximate order of recent commits, oldest first:
       about 0.75 on screen; hue-clip leaves it white, as in POV, and
       the ball's highlight (about 1.6) keeps a green tint.
       - `red.tga` has a black backdrop, which contradicts `red.pov`'s
-        ambient-1 white plane; the port follows `red.pov`.
+        ambient-1 white plane; the port follows `red.pov` (confirmed by
+        Mike, entry 81).
       - `brilliance 5` and `roughness 1/100` still aren't modelled
         (the specular exponent is fixed at 50), so the ball is lighter
         with a broader highlight than `red.tga`'s.
@@ -3595,6 +3596,26 @@ Approximate order of recent commits, oldest first:
       `map`, an anonymous `fn`, a load, and no stale frames after an
       error), `catch_errors_shortens_recursive_call_stacks` and
       `catch_errors_adds_the_rust_backtrace_on_request`.
+
+81. **Shared metal presets take metals.inc's full finishes; redball's
+    backdrop settled.** Two decisions from the backlog, both Mike's.
+    - `pov-metal-a`, `-c` and `-e` in `_pov.lisp` are now F_MetalA, C
+      and E in full: `:metallic true`, `:brilliance` 2 / 4 / 6 and
+      `:shininess` 20 / 80 / 120 (1/roughness), on top of the ambient,
+      diffuse, specular and reflection they had. xmastree's
+      `surface-ornament`, which already spelled out full F_MetalC
+      (entry 65), is now `(pov-metal-c color)`; renders byte-identically.
+    - What changed: texaco's bowl (F_MetalC red) now reflects in red,
+      so the star's reflections in it are red, as in `texaco.gif`,
+      instead of white-pink; the bowl reads a little darker than the
+      reference. xmastree's trunk and finial (T_Brass_3E) are brass
+      rather than pale grey, and the hooks (T_Silver_3C) reflect in
+      their own colour. `pov-metal-a` has no users (texaco's star was
+      tuned away from it in entry 63). No scene was retuned.
+    - Every other scene renders byte-identically.
+    - redball keeps `red.pov`'s white self-lit (ambient 1) plane rather
+      than `red.tga`'s black backdrop; no change.
+    - `Claude outputs/metal_presets_before_after.png`.
 
 
 ## Pitfalls and conventions
