@@ -3474,6 +3474,26 @@ Approximate order of recent commits, oldest first:
     - Renders: `Claude outputs/snowman_room_lights.png` and
       `snowman_room_ambient.png`.
     - sphere2.pov is done. Left out: the yard height field, refraction.
+77. **Snowman phase 7: moldingtest.pov; the snowman port is done.**
+    `scenes/snowman_molding.lisp`: eight fence boards (1 x 12 x 6, every
+    7 along z while under 50) with their top corners cut off by two
+    boxes turned 45 degrees about x, 1.5 either side of the centre, in
+    `Yellow_Pine rotate <90, 0, 0>` (POV's default finish); utilities.inc's
+    axis (size 4) at the origin; two Gray30 lights and a Gray50
+    spotlight at `<20, 3, 3>` aimed at the origin (radius 6, falloff 80);
+    ambient light 0; the square camera at `<50, 50, 50>`, zoom 1.5.
+    - As in POV, the fence runs out of the frame (the camera shows five
+      boards) and the first board hides most of the axis, which sits
+      inside it.
+    - No reference render; the default view reads well (the lit faces
+      are mid-tone, nothing clips), so it has no `:view`. 600x600 in
+      11 s.
+    - Test `snowman_molding_scene_loads`. `Claude outputs/snowman_molding.png`.
+    - All four snowman scenes are ported: snowman_avatar (tuned to
+      avatar.jpg), snowman_sphere, snowman_room (both lighting modes)
+      and snowman_molding. Left out across them: refraction, the yard
+      height field (PNG, and a missing yard.tga) and `image_map`
+      pigments (commented out in sphere.pov).
 
 ## Pitfalls and conventions
 
@@ -4922,7 +4942,7 @@ with the as-written ambient-plus-clock-light mode as a flag.
 - Left out: the yard height field (needs PNG, and yard.tga isn't in the
   repo), ArtDecoClock and Brushed_Aluminum (unused), refraction.
 
-### Phase 7 — moldingtest.pov
+### Phase 7 — moldingtest.pov (done, entry 77)
 
 The fence: CSG boards clipped by rotated boxes, `Yellow_Pine`. Small once
 phase 6's wood textures exist.

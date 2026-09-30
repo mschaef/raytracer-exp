@@ -1124,6 +1124,11 @@ fn snowman_room_scene_loads() {
 }
 
 #[test]
+fn snowman_molding_scene_loads() {
+    assert_scene_loads("snowman_molding.lisp", "snowman-molding-scene");
+}
+
+#[test]
 fn metallic_test_scene_loads() {
     assert_scene_loads("metallic_test.lisp", "metallic-test-scene");
 }

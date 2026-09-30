@@ -92,7 +92,9 @@ plans.
   sphere.pov (entry 72); phase 6a–6c, the room's stock textures, sky,
   and brick pattern with pigment maps (entry 73); phase 6d, the room's
   props (entry 74); phase 6e, the room assembled (entry 75); phase 6f,
-  its lighting tuned (entry 76). sphere2.pov is done.
+  its lighting tuned (entry 76). sphere2.pov is done. Phase 7,
+  moldingtest.pov (entry 77): the snowman port, and with it every
+  POV-Ray project, is done.
   The phases are in CLAUDE.md, "Snowman port: plan".
 - **View transform plan written** (CLAUDE.md, "View transform (tone
   mapping): implementation plan"). The output clips each channel on its
