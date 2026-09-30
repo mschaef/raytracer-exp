@@ -134,6 +134,7 @@ pub enum Shape {
     Cylinder(Cylinder),                // closed cylinder, body + caps
     Cone(Cone),                        // closed cone, lateral surface + base cap
     Torus(Torus),                      // solid ring torus (quartic)
+    Blob(Blob),                        // metaballs: piecewise quartic field
     Group(Vec<Shape>),                 // hierarchical container
     Transform(Box<Transformed>),       // affine-transformed subtree
     Bounded(Box<Bounded>),             // AABB-accelerated subtree
@@ -3151,6 +3152,44 @@ Approximate order of recent commits, oldest first:
       rather than dark blue. No `:view` yet (tuned at the end).
     - Test `snowman_avatar_scene_loads`. Comparison:
       `Claude outputs/snowman_avatar_phase1.png`.
+69. **Snowman phase 2: `Shape::Blob` (metaballs).**
+    - `Blob { components: Vec<BlobComponent { center, radius, strength }>,
+      threshold, surface }` is POV's `blob` with sphere components: the
+      solid where `sum s (1 - d²/R²)²` (each component only within its
+      radius) exceeds the threshold. Negative strengths carve.
+    - **Intersection:** each component's contribution along the ray is a
+      quartic in `t` between where the ray enters and leaves its sphere,
+      so the field minus the threshold is a piecewise quartic. `spans`
+      sorts the sphere entry and exit points, solves each piece (with
+      the direction normalized and the piece re-originated at its
+      midpoint, as `Torus` does), and classifies every gap between
+      candidate roots by evaluating the field at its midpoint, so tangent
+      and double roots can't mis-pair. `hit_test` is the first span end
+      in front of the ray; a ray from inside gets the exit.
+      - Positive and negative components can cancel the leading
+        coefficient, so `polynomial_roots` drops to a cubic, quadratic
+        or linear solve when the higher coefficients are negligible.
+    - **Normal:** the negated field gradient, normalized by hand: it can
+      be far below `normalizep`'s `EPSILON` (1e-4) where components
+      nearly cancel, which panicked the first avatar render.
+    - **Bounds:** the union of the positive components' spheres.
+    - SDL: `(blob {:threshold t :components [[center radius strength]
+      ...] :surface S})`; rejects a non-positive threshold or radius, a
+      component that isn't three items, and a blob with no positive
+      component.
+    - `_snowman.lisp`'s body is now the real blob (body, head, the two
+      eye sockets, and avatar.pov's arm lump).
+    - With avatar.pov's threshold of 0.008 the blob is very close to the
+      sphere stand-in: the neck crease softens, the arm lump blends in,
+      and the eye-socket edges shift. See
+      `Claude outputs/snowman_phase2_blob.png` and
+      `snowman_phase2_neck.png`.
+    - Tests: `blob_tests` (one component is its sphere, components melt
+      together, a negative component carves, spans match the field's
+      sign along 300 random rays through the snowman's blob, a ray from
+      inside exits), and in the suite `blob_rejects_bad_values` and
+      `blob_renders_like_its_sphere`. Other scenes unchanged.
+    - The avatar renders at 260x300 in 4.9 s, up from 3.2 s.
 
 ## Pitfalls and conventions
 
@@ -4539,7 +4578,7 @@ their keep (see the gap analysis §6):
 Truncated cones (in the SDL), the shared textures, snowman and bowtie,
 and stand-ins for the blob, bumps and filter colours.
 
-### Phase 2 — Blob (metaballs)
+### Phase 2 — Blob (metaballs) (done, entry 69)
 
 A `blob` primitive: components `{center, radius, strength}` and a
 threshold; the field is `sum s (1 - d²/R²)²` over the components in

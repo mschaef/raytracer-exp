@@ -1340,3 +1340,59 @@ fn pov_cone_truncates() {
     assert!(at(0.0, 1.2) < 50 && at(0.0, -1.2) < 50, "ends: {} {}", at(0.0, 1.2), at(0.0, -1.2));
     assert!(at(0.0, 0.0) > 200);
 }
+
+#[test]
+fn blob_rejects_bad_values() {
+    let cases = [
+        ("(blob {:threshold 0 :components [[[0 0 0] 1 1]]})", "threshold"),
+        ("(blob {:threshold 0.1 :components [[[0 0 0] 0 1]]})", "radius"),
+        ("(blob {:threshold 0.1 :components [[[0 0 0] 1 -1]]})", "positive strength"),
+        ("(blob {:threshold 0.1 :components [[[0 0 0] 1]]})", "[center radius strength]"),
+        ("(blob {:components [[[0 0 0] 1 1]]})", ":threshold"),
+    ];
+    for (source, expected) in cases.iter() {
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(source, "blob_bad.lisp", &env);
+        }));
+        let message = match result {
+            Ok(_) => panic!("must reject {}", source),
+            Err(p) => p.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        assert!(message.contains(expected), "{}: {}", source, message);
+    }
+}
+
+/// A one-component blob renders as the sphere of radius
+/// R sqrt(1 - sqrt(t/s)), here exactly 1.
+#[test]
+fn blob_renders_like_its_sphere() {
+    let render = |shape: &str, tag: &str| {
+        let source = format!(
+            r#"
+(def s (scene {{:name "blob"
+               :camera (camera-looking-at [0 0 -5] [0 0 0] [0 1 0] 1.0)
+               :background [0 0 0]
+               :min-samples 1 :max-samples 1
+               :view {{:curve :clip}}
+               :objects [(light-white [2 3 -5])
+                         (with-surface (surface {{:color [1 1 1] :ambient 0.1 :light 0.8}}) {})]}}))
+(def t (png-target 31 31))
+(render s t 31 31)
+(save-png t PATH)
+"#,
+            shape
+        );
+        render_to_image(&source, tag)
+    };
+    // (1 - 1/4)² * 16/9 = 1: the threshold is reached at d = 1.
+    let blob = render("(blob {:threshold 1 :components [[[0 0 0] 2 1.7777777777777777]]})", "blob_one");
+    let sphere = render("(sphere {:center [0 0 0] :r 1})", "blob_sphere");
+    let diff = blob
+        .as_raw()
+        .iter()
+        .zip(sphere.as_raw())
+        .filter(|(a, b)| (**a as i32 - **b as i32).abs() > 2)
+        .count();
+    assert_eq!(diff, 0, "blob and sphere differ in {} channels", diff);
+}

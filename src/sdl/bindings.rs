@@ -43,7 +43,7 @@ use crate::render::render;
 use crate::render::shapes::{
     bounded, bounded_with, bvh, difference, group, intersection, merge, rotate_axis,
     rotate_x, rotate_y, rotate_z, scale, surfaced, transform, translate, AABB,
-    Cone, Cuboid, Cylinder, Plane, Shape, Sphere, Torus, Triangle,
+    Blob, BlobComponent, Cone, Cuboid, Cylinder, Plane, Shape, Sphere, Torus, Triangle,
 };
 use crate::render::transform::Affine;
 use crate::render::noise::Octaves;
@@ -96,6 +96,7 @@ pub fn install(env: &EnvRef) {
     define_native(env, "cylinder", builtin_cylinder);
     define_native(env, "cone", builtin_cone);
     define_native(env, "torus", builtin_torus);
+    define_native(env, "blob", builtin_blob);
 
     // Mesh loading (Phase 7).
     define_native(env, "load-obj", builtin_load_obj);
@@ -1183,6 +1184,47 @@ fn builtin_cone(args: &[Value], pos: &Position) -> Value {
     let r = require_key_number(&map, "r", "cone", pos);
     let surface = maybe_key_surface(&map, "surface", "cone", pos);
     Value::Shape(Rc::new(Shape::Cone(Cone { p0, p1, r, surface })))
+}
+
+/// `(blob {:threshold t :components [[center radius strength] ...]
+///         :surface S})` — POV-Ray's `blob` with sphere components:
+/// the solid where `sum strength (1 - d²/radius²)²` over the components
+/// (each only within its radius) exceeds `:threshold`. A negative
+/// strength carves. Needs a positive threshold, at least one component
+/// with a positive strength, and positive radii.
+fn builtin_blob(args: &[Value], pos: &Position) -> Value {
+    require_arity(args, 1, "blob", pos);
+    let map = require_map(&args[0], "blob", pos);
+    let threshold = require_key_number(&map, "threshold", "blob", pos);
+    let items = require_vec(require_key(&map, "components", "blob", pos), "blob :components", pos);
+    let surface = maybe_key_surface(&map, "surface", "blob", pos);
+    if !(threshold > 0.0 && threshold.is_finite()) {
+        sdl_panic!(pos.clone(), "blob :threshold must be positive (got {})", threshold);
+    }
+    let components: Vec<BlobComponent> = items
+        .iter()
+        .map(|item| {
+            let parts = require_vec(item, "blob component", pos);
+            if parts.len() != 3 {
+                sdl_panic!(
+                    pos.clone(),
+                    "blob component must be [center radius strength], got {} elements",
+                    parts.len()
+                );
+            }
+            let center = require_point(&parts[0], "blob component center", pos);
+            let radius = require_number(&parts[1], "blob component radius", pos);
+            let strength = require_number(&parts[2], "blob component strength", pos);
+            if !(radius > 0.0 && radius.is_finite()) {
+                sdl_panic!(pos.clone(), "blob component radius must be positive (got {})", radius);
+            }
+            BlobComponent { center, radius, strength }
+        })
+        .collect();
+    if !components.iter().any(|c| c.strength > 0.0) {
+        sdl_panic!(pos.clone(), "blob needs a component with a positive strength");
+    }
+    Value::Shape(Rc::new(Shape::Blob(Blob { components, threshold, surface })))
 }
 
 /// `(torus {:major R :minor r :center [..] :axis [..] :surface S})` — a

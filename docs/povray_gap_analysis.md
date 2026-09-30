@@ -85,7 +85,8 @@ plans.
   its diffuse, and path-tracing bounces get their own sample
   coordinates.
 - **Tuning pass done** (entries 60–66).
-- **Snowman started:** phase 1, avatar.pov with stand-ins (entry 68).
+- **Snowman started:** phase 1, avatar.pov with stand-ins (entry 68);
+  phase 2, the blob primitive (entry 69).
   The phases are in CLAUDE.md, "Snowman port: plan".
 - **View transform plan written** (CLAUDE.md, "View transform (tone
   mapping): implementation plan"). The output clips each channel on its

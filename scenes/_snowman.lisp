@@ -7,10 +7,7 @@
 ; already linear and are used as written (no `srgb`, unlike the other
 ; ports; see _pov.lisp).
 ;
-; Snowman phase 1 stand-ins (see "Snowman port plan" in CLAUDE.md):
-; - The blob body is a union of spheres at the radii where each blob
-;   component alone reaches the threshold, less two eye sockets. The
-;   real blob blends the spheres into a smooth neck (phase 2).
+; Stand-ins still in place (see "Snowman port: plan" in CLAUDE.md):
 ; - The `Dirty` and `Dirtier` bump normals are left out (phase 3).
 ; - `rgbf` filter colours are plain colours: every filter here is 0
 ;   apart from the mirror glass (phase 4).
@@ -47,24 +44,18 @@
 ;; The snowman (snowman.inc's `snowman` macro)
 ;; --------------------------------------------------------------------
 
-; A blob component `sphere { c, R, s }` contributes s (1 - d²/R²)² inside
-; radius R. Alone, it reaches the threshold t at d = R sqrt(1 - sqrt(t/s)).
-(def blob-threshold 0.008)
-(defn blob-radius [r strength]
-  (* r (sqrt (- 1 (sqrt (/ blob-threshold strength))))))
-
-; Stand-in for the blob: body, head and (in avatar.pov only) a lump
-; where the left arm joins, less the two negative eye sockets.
+; The body: a blob of the body and head, two negative components for
+; the eye sockets, and (in avatar.pov only) a lump where the left arm
+; joins. Components are [center radius strength], as POV's
+; `sphere { center, radius, strength }`.
 (defn snowman-body [arm-lump?]
-  (with-surface dirty-snow-white
-    (difference
-      (group (concat [(sphere {:center [0 1 0.2] :r (blob-radius 1.1 1)})
-                      (sphere {:center [0 2.5 0] :r (blob-radius 0.85 1.4)})]
-                     (if arm-lump?
-                       [(sphere {:center [0 1.5 1.0] :r (blob-radius 0.3 1.4)})]
-                       [])))
-      (sphere {:center [0.85 2.8 0.28] :r 0.12})
-      (sphere {:center [0.85 2.8 -0.28] :r 0.12}))))
+  (blob {:threshold  0.008
+         :components (concat [[[0 1 0.2] 1.1 1]
+                              [[0 2.5 0] 0.85 1.4]
+                              [[0.85 2.80 0.28] 0.16 -0.7]
+                              [[0.85 2.80 -0.28] 0.16 -0.7]]
+                             (if arm-lump? [[[0 1.5 1.0] 0.3 1.4]] []))
+         :surface    dirty-snow-white}))
 
 (def snowman-nose
   (with-surface matte-orange

@@ -271,6 +271,7 @@ impl fmt::Display for Value {
                 Shape::Cylinder(_)  => f.write_str("#<shape cylinder>"),
                 Shape::Cone(_)      => f.write_str("#<shape cone>"),
                 Shape::Torus(_)     => f.write_str("#<shape torus>"),
+                Shape::Blob(_)      => f.write_str("#<shape blob>"),
                 Shape::Group(_)     => f.write_str("#<shape group>"),
                 Shape::Transform(_) => f.write_str("#<shape transform>"),
                 Shape::Bounded(_)   => f.write_str("#<shape bounded>"),

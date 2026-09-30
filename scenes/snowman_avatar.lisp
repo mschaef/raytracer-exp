@@ -5,8 +5,8 @@
 ; The original renders at 65x75 (avatar.jpg); this keeps the shape at
 ; 520x600 (its :size); SIZE overrides.
 ;
-; Phase 1 of the snowman port: see _snowman.lisp for the stand-ins
-; (blob, bump normals, filter colours).
+; See _snowman.lisp for the stand-ins still in place (bump normals,
+; filter colours).
 
 (load "_snowman.lisp")
 

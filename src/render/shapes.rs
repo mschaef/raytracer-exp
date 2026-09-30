@@ -146,6 +146,38 @@ pub struct Torus {
     pub surface: Option<Surface>,
 }
 
+/// One component of a `Blob`: a sphere of influence with a strength.
+/// Inside `radius` of `center` it adds `strength (1 - d²/radius²)²` to
+/// the blob's field, where `d` is the distance to `center`; outside, it
+/// adds nothing. A negative strength carves.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub struct BlobComponent {
+    pub center: Point,
+    pub radius: f64,
+    pub strength: f64,
+}
+
+/// A blob (metaballs), POV-Ray's `blob` with sphere components: the
+/// solid where the summed field of the components exceeds `threshold`
+/// (which is positive). Components that overlap melt into one smooth
+/// surface; negative components dent it.
+///
+/// Along a ray, each component's contribution is a quartic in `t`
+/// between the points where the ray enters and leaves its sphere, so
+/// the field minus the threshold is a piecewise quartic. `spans` solves
+/// each piece and classifies the gaps between roots by evaluating the
+/// field at their midpoints, like `Torus::spans`. The outward normal is
+/// the negated field gradient.
+///
+/// A non-uniformly scaled blob is fine through `Transform` (the field
+/// is just evaluated in local space).
+#[derive(Clone, PartialEq, Debug)]
+pub struct Blob {
+    pub components: Vec<BlobComponent>,
+    pub threshold: f64,
+    pub surface: Option<Surface>,
+}
+
 /// Axis-aligned bounding box. Used as the acceleration primitive for the
 /// `Bounded` variant: a ray that misses the AABB doesn't need to recurse
 /// into the wrapped subtree at all.
@@ -333,6 +365,7 @@ pub enum Shape {
     Cylinder(Cylinder),
     Cone(Cone),
     Torus(Torus),
+    Blob(Blob),
     Group(Vec<Shape>),
     Transform(Box<Transformed>),
     Bounded(Box<Bounded>),
@@ -441,6 +474,10 @@ impl From<Torus> for Shape {
     fn from(t: Torus) -> Self { Shape::Torus(t) }
 }
 
+impl From<Blob> for Shape {
+    fn from(b: Blob) -> Self { Shape::Blob(b) }
+}
+
 impl From<Light> for Shape {
     fn from(l: Light) -> Self { Shape::Light(l) }
 }
@@ -455,6 +492,7 @@ impl Hittable for Shape {
             Shape::Cylinder(c)      => c.hit_test(ray),
             Shape::Cone(c)          => c.hit_test(ray),
             Shape::Torus(t)         => t.hit_test(ray),
+            Shape::Blob(b)          => b.hit_test(ray),
             Shape::Group(children)  => match children.as_slice() {
                 // Interior BVH nodes are a group of two bounded subtrees.
                 [Shape::Bounded(a), Shape::Bounded(b)] => nearer_first_hit(ray, a, b),
@@ -594,6 +632,24 @@ impl Shape {
                         ],
                     ))
                 }
+            }
+            Shape::Blob(b) => {
+                // Only positive components can put points inside, so
+                // their spheres bound the solid. None at all: an empty
+                // blob, which no ray hits.
+                let mut bounds: Option<AABB> = None;
+                for c in b.components.iter().filter(|c| c.strength > 0.0) {
+                    let r = [c.radius, c.radius, c.radius];
+                    let bb = AABB::new(subp(c.center, r), addp(c.center, r));
+                    bounds = Some(match bounds {
+                        Some(a) => AABB::new(
+                            [a.min[0].min(bb.min[0]), a.min[1].min(bb.min[1]), a.min[2].min(bb.min[2])],
+                            [a.max[0].max(bb.max[0]), a.max[1].max(bb.max[1]), a.max[2].max(bb.max[2])],
+                        ),
+                        None => bb,
+                    });
+                }
+                bounds
             }
             Shape::Torus(t) => {
                 // The core circle (radius `major`, perpendicular to
@@ -850,7 +906,8 @@ impl Shape {
             | Shape::Triangle(_)
             | Shape::Cylinder(_)
             | Shape::Cone(_)
-            | Shape::Torus(_) => {}
+            | Shape::Torus(_)
+            | Shape::Blob(_) => {}
         }
     }
 
@@ -881,6 +938,7 @@ impl Shape {
             Shape::Cylinder(c) => check_leaf_surface(&c.surface, has_surfaced_ancestor, "cylinder"),
             Shape::Cone(c) => check_leaf_surface(&c.surface, has_surfaced_ancestor, "cone"),
             Shape::Torus(t) => check_leaf_surface(&t.surface, has_surfaced_ancestor, "torus"),
+            Shape::Blob(b) => check_leaf_surface(&b.surface, has_surfaced_ancestor, "blob"),
             Shape::Group(children) => {
                 for child in children {
                     child.validate_surfaces(has_surfaced_ancestor)?;
@@ -1927,6 +1985,184 @@ impl Hittable for Torus {
     }
 }
 
+impl Blob {
+    /// The field minus the threshold at `p`: positive inside.
+    fn excess(&self, p: Point) -> f64 {
+        let mut f = -self.threshold;
+        for c in &self.components {
+            let d = subp(p, c.center);
+            let u = 1.0 - dotp(d, d) / (c.radius * c.radius);
+            if u > 0.0 {
+                f += c.strength * u * u;
+            }
+        }
+        f
+    }
+
+    /// The outward normal at `p`: minus the field gradient,
+    /// `-sum -4 s u (p - c) / R²`, normalized. Where the gradient
+    /// vanishes (not on a real surface crossing, but kept total), it
+    /// falls back to `fallback`.
+    fn normal_at(&self, p: Point, fallback: Point) -> Point {
+        let mut g = [0.0, 0.0, 0.0];
+        for c in &self.components {
+            let d = subp(p, c.center);
+            let r2 = c.radius * c.radius;
+            let u = 1.0 - dotp(d, d) / r2;
+            if u > 0.0 {
+                g = addp(g, scalep(d, 4.0 * c.strength * u / r2));
+            }
+        }
+        // Normalized by hand: the gradient can be legitimately small
+        // (a faint blob, or where components nearly cancel), well below
+        // the `EPSILON` that `normalizep` refuses.
+        let len = lenp(g);
+        if len > 0.0 && len.is_finite() { scalep(g, 1.0 / len) } else { normalizep(fallback) }
+    }
+
+    fn end(&self, ray: &Vector, t: f64) -> SpanEnd {
+        let p = ray_location(ray, t);
+        SpanEnd { t, normal: self.normal_at(p, negp(ray.delta)), surface: self.surface, point: p }
+    }
+
+    /// Every `t` along the whole line where the ray crosses the blob's
+    /// surface, paired into spans; see the `Blob` doc comment.
+    fn spans(&self, ray: &Vector, out: &mut Vec<Span>) {
+        let len = lenp(ray.delta);
+        if len < 1e-12 {
+            return;
+        }
+        let dir = scalep(ray.delta, 1.0 / len);
+
+        // Where the (unit-speed) ray is within each component's radius.
+        let mut ranges: Vec<(f64, f64, usize)> = Vec::new();
+        for (i, c) in self.components.iter().enumerate() {
+            let oc = subp(ray.start, c.center);
+            let g = dotp(oc, dir);
+            let disc = g * g - (dotp(oc, oc) - c.radius * c.radius);
+            if disc > 0.0 {
+                let h = disc.sqrt();
+                ranges.push((-g - h, -g + h, i));
+            }
+        }
+        if !ranges.iter().any(|r| self.components[r.2].strength > 0.0) {
+            return;
+        }
+
+        // Breakpoints: the active set is constant between neighbours.
+        let mut breaks: Vec<f64> = ranges.iter().flat_map(|r| [r.0, r.1]).collect();
+        breaks.sort_by(|a, b| a.total_cmp(b));
+        breaks.dedup();
+
+        // Candidate crossings (unit-speed s): each piece's quartic roots.
+        let mut points: Vec<f64> = breaks.clone();
+        for w in breaks.windows(2) {
+            let (lo, hi) = (w[0], w[1]);
+            if hi - lo < 1e-12 {
+                continue;
+            }
+            // Re-originate at the piece's midpoint so the roots are small.
+            let mid = 0.5 * (lo + hi);
+            let o = addp(ray.start, scalep(dir, mid));
+            // Coefficients of excess(s) = k4 s⁴ + ... + k0, s from `mid`.
+            let mut k = [-self.threshold, 0.0, 0.0, 0.0, 0.0];
+            for r in ranges.iter().filter(|r| r.0 <= mid && mid <= r.1) {
+                let c = &self.components[r.2];
+                let r2 = c.radius * c.radius;
+                let oc = subp(o, c.center);
+                // u(s) = a2 s² + a1 s + a0.
+                let a2 = -1.0 / r2;
+                let a1 = -2.0 * dotp(oc, dir) / r2;
+                let a0 = 1.0 - dotp(oc, oc) / r2;
+                let st = c.strength;
+                k[4] += st * a2 * a2;
+                k[3] += st * 2.0 * a2 * a1;
+                k[2] += st * (a1 * a1 + 2.0 * a2 * a0);
+                k[1] += st * 2.0 * a1 * a0;
+                k[0] += st * a0 * a0;
+            }
+            for s in polynomial_roots(k) {
+                let t = s + mid;
+                if t > lo && t < hi {
+                    points.push(t);
+                }
+            }
+        }
+        points.sort_by(|a, b| a.total_cmp(b));
+
+        // Classify each gap between candidates by its midpoint, and turn
+        // runs of inside gaps into spans.
+        let first = out.len();
+        let mut enter: Option<f64> = None;
+        for w in points.windows(2) {
+            if w[1] - w[0] < 1e-12 {
+                continue;
+            }
+            let inside = self.excess(addp(ray.start, scalep(dir, 0.5 * (w[0] + w[1])))) > 0.0;
+            match (inside, enter) {
+                (true, None) => enter = Some(w[0]),
+                (false, Some(e)) => {
+                    out.push(Span { enter: self.end(ray, e / len), exit: self.end(ray, w[0] / len) });
+                    enter = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(e) = enter {
+            // Can't happen (the field is zero past the last breakpoint),
+            // but close the span rather than drop it.
+            let last = *points.last().unwrap();
+            out.push(Span { enter: self.end(ray, e / len), exit: self.end(ray, last / len) });
+        }
+        normalize_union_tail(out, first);
+    }
+}
+
+impl Hittable for Blob {
+    fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
+        // The nearest span end in front of the ray. A ray starting
+        // inside sees the wall it leaves through, as for `Torus`.
+        let mut spans = Vec::new();
+        self.spans(ray, &mut spans);
+        let (end, entering) = spans
+            .iter()
+            .flat_map(|s| [(s.enter, true), (s.exit, false)])
+            .find(|(e, _)| e.t > EPSILON)?;
+        Some(RayHit {
+            distance: end.t,
+            hit_point: end.point,
+            texture_point: end.point,
+            normal: end.normal,
+            surface: self.surface,
+            entering,
+        })
+    }
+}
+
+/// Real roots of `k4 s⁴ + k3 s³ + k2 s² + k1 s + k0`, any order. The
+/// leading coefficients can cancel (positive and negative blob
+/// components), so the degree is taken from the largest coefficient
+/// that isn't negligible next to the others.
+fn polynomial_roots(k: [f64; 5]) -> Vec<f64> {
+    use crate::render::poly::{solve_cubic, solve_quadratic, solve_quartic};
+    let scale = k.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    if scale == 0.0 {
+        return vec![];
+    }
+    let tiny = 1e-12 * scale;
+    if k[4].abs() > tiny {
+        solve_quartic(k[3] / k[4], k[2] / k[4], k[1] / k[4], k[0] / k[4])
+    } else if k[3].abs() > tiny {
+        solve_cubic(k[2] / k[3], k[1] / k[3], k[0] / k[3])
+    } else if k[2].abs() > tiny {
+        solve_quadratic(k[1] / k[2], k[0] / k[2])
+    } else if k[1].abs() > tiny {
+        vec![-k[0] / k[1]]
+    } else {
+        vec![]
+    }
+}
+
 // ---------------------------------------------------------------------
 // CSG span query
 // ---------------------------------------------------------------------
@@ -2031,6 +2267,7 @@ impl Shape {
             | Shape::Cylinder(_)
             | Shape::Cone(_)
             | Shape::Torus(_)
+            | Shape::Blob(_)
             | Shape::Csg(_)
             | Shape::Light(_) => true,
         }
@@ -2052,6 +2289,7 @@ impl Shape {
             Shape::Cylinder(c) => out.extend(c.span(ray)),
             Shape::Cone(c)     => out.extend(c.span(ray)),
             Shape::Torus(t)    => t.spans(ray, out),
+            Shape::Blob(b)     => b.spans(ray, out),
             // Not a solid: a triangle has no inside.
             Shape::Triangle(_) => {}
             Shape::Light(_)    => {}
@@ -3463,5 +3701,119 @@ mod span_tests {
                 assert_eq!(h.entering, dotp(h.normal, dir) < 0.0, "from {:?} along {:?}", start, dir);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod blob_tests {
+    use super::*;
+
+    fn blob(components: &[(Point, f64, f64)], threshold: f64) -> Blob {
+        Blob {
+            components: components
+                .iter()
+                .map(|&(center, radius, strength)| BlobComponent { center, radius, strength })
+                .collect(),
+            threshold,
+            surface: None,
+        }
+    }
+
+    fn spans(b: &Blob, start: Point, delta: Point) -> Vec<Span> {
+        let mut out = Vec::new();
+        b.spans(&Vector { start, delta }, &mut out);
+        out
+    }
+
+    /// One component alone is a sphere of radius R sqrt(1 - sqrt(t/s)).
+    #[test]
+    fn one_component_is_a_sphere() {
+        let b = blob(&[([1.0, 2.0, 3.0], 2.0, 1.5)], 0.2);
+        let r = 2.0 * (1.0 - (0.2f64 / 1.5).sqrt()).sqrt();
+        // A non-unit direction: t is in its units.
+        let s = spans(&b, [-9.0, 2.0, 3.0], [2.0, 0.0, 0.0]);
+        assert_eq!(s.len(), 1, "{:?}", s);
+        assert!((s[0].enter.t - (10.0 - r) / 2.0).abs() < 1e-9, "{:?}", s[0].enter);
+        assert!((s[0].exit.t - (10.0 + r) / 2.0).abs() < 1e-9, "{:?}", s[0].exit);
+        assert!(lenp(subp(s[0].enter.normal, [-1.0, 0.0, 0.0])) < 1e-9);
+        assert!(lenp(subp(s[0].exit.normal, [1.0, 0.0, 0.0])) < 1e-9);
+        // Missing the sphere misses the blob.
+        assert!(spans(&b, [-9.0, 2.0 + 1.01 * r, 3.0], [1.0, 0.0, 0.0]).is_empty());
+    }
+
+    /// Two components too far apart to touch alone melt into one solid:
+    /// the midpoint between them is inside (a neck), which two separate
+    /// spheres of the single-component radius wouldn't give.
+    #[test]
+    fn components_melt_together() {
+        let b = blob(&[([-1.0, 0.0, 0.0], 1.5, 1.0), ([1.0, 0.0, 0.0], 1.5, 1.0)], 0.5);
+        let single = 1.5 * (1.0 - 0.5f64.sqrt()).sqrt();
+        assert!(single < 1.0, "the spheres alone don't meet");
+        let s = spans(&b, [-5.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        assert_eq!(s.len(), 1, "one solid along the axis: {:?}", s);
+        assert!(b.excess([0.0, 0.0, 0.0]) > 0.0);
+    }
+
+    /// A negative component carves a hole through a positive one.
+    #[test]
+    fn negative_component_carves() {
+        let b = blob(&[([0.0, 0.0, 0.0], 2.0, 1.0), ([0.0, 0.0, 0.0], 0.8, -2.0)], 0.1);
+        let s = spans(&b, [-5.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+        assert_eq!(s.len(), 2, "a shell, hollow in the middle: {:?}", s);
+        assert!(b.excess([0.0, 0.0, 0.0]) < 0.0);
+        // The inner walls face into the hole.
+        assert!(s[0].exit.normal[0] > 0.9 && s[1].enter.normal[0] < -0.9, "{:?}", s);
+    }
+
+    /// Spans agree with the field everywhere along many rays, including
+    /// ones that graze and ones that start inside.
+    #[test]
+    fn spans_match_the_field() {
+        let b = blob(
+            &[
+                ([0.0, 1.0, 0.2], 1.1, 1.0),
+                ([0.0, 2.5, 0.0], 0.85, 1.4),
+                ([0.85, 2.8, 0.28], 0.16, -0.7),
+                ([0.85, 2.8, -0.28], 0.16, -0.7),
+                ([0.0, 1.5, 1.0], 0.3, 1.4),
+            ],
+            0.008,
+        );
+        let mut seed = 12345u64;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        for _ in 0..300 {
+            let start = [rnd() * 6.0 - 3.0, rnd() * 6.0 - 1.0, rnd() * 6.0 - 3.0];
+            let target = [rnd() * 2.0 - 1.0, rnd() * 3.5, rnd() * 2.0 - 1.0];
+            let delta = subp(target, start);
+            let s = spans(&b, start, delta);
+            for w in s.windows(2) {
+                assert!(w[0].exit.t <= w[1].enter.t, "sorted and disjoint: {:?}", s);
+            }
+            for k in 0..200 {
+                let t = -1.0 + 3.0 * (k as f64 + 0.5) / 200.0;
+                let inside_spans = s.iter().any(|sp| sp.enter.t < t && t < sp.exit.t);
+                let excess = b.excess(addp(start, scalep(delta, t)));
+                // Skip samples right at a crossing.
+                if excess.abs() < 1e-7 {
+                    continue;
+                }
+                assert_eq!(inside_spans, excess > 0.0, "t {} excess {} spans {:?}", t, excess, s);
+            }
+        }
+    }
+
+    /// A ray from inside hits the far wall, leaving.
+    #[test]
+    fn hit_from_inside_is_an_exit() {
+        let b = blob(&[([0.0, 0.0, 0.0], 2.0, 1.0)], 0.1);
+        let h = b.hit_test(&Vector { start: [0.0, 0.0, 0.0], delta: [0.0, 1.0, 0.0] }).unwrap();
+        assert!(!h.entering);
+        assert!(h.normal[1] > 0.99);
+        let h = b.hit_test(&Vector { start: [0.0, -5.0, 0.0], delta: [0.0, 1.0, 0.0] }).unwrap();
+        assert!(h.entering);
+        assert!(h.normal[1] < -0.99);
     }
 }
