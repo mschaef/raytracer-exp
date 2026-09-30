@@ -513,6 +513,80 @@ impl Hittable for Shape {
     }
 }
 
+/// What a shadow ray finds between a light and the point it lights,
+/// from [`Shape::shadow_probe`].
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum ShadowProbe {
+    /// Nothing is in range: the light arrives unattenuated.
+    Clear,
+    /// An opaque surface is entered in range: the point is in shadow.
+    Blocked,
+    /// Something in range needs the full, ordered shadow walk: a
+    /// transparent or filtering surface, or a ray leaving a surface.
+    Unsure,
+}
+
+impl Shape {
+    /// A fast answer to "does anything stop this shadow ray before
+    /// `t_max`?", for the common cases (history entry 84). Unlike
+    /// `hit_test` it doesn't look for the *nearest* hit: it stops at
+    /// the first opaque surface it finds, and it skips any bounding
+    /// box that starts beyond `t_max`. `inherited` is the surface an
+    /// enclosing `Surfaced` supplies to unsurfaced leaves.
+    ///
+    /// The answers agree with the renderer's shadow walk
+    /// (`shadow_ray_walk`) by construction: `Blocked` only for an
+    /// entering crossing of an opaque surface in range (the walk would
+    /// reach it and stop), `Clear` only when no primitive's first
+    /// crossing is in range (the walk's first step finds nothing), and
+    /// `Unsure` for everything else, which the walk then handles.
+    pub fn shadow_probe(&self, ray: &Vector, t_max: f64, inherited: Option<&Surface>) -> ShadowProbe {
+        match self {
+            Shape::Group(children) => {
+                let mut result = ShadowProbe::Clear;
+                for child in children {
+                    match child.shadow_probe(ray, t_max, inherited) {
+                        ShadowProbe::Blocked => return ShadowProbe::Blocked,
+                        ShadowProbe::Unsure => result = ShadowProbe::Unsure,
+                        ShadowProbe::Clear => {}
+                    }
+                }
+                result
+            }
+            Shape::Bounded(b) => match b.bounds.entry(ray) {
+                Some(t) if t <= t_max => b.child.shadow_probe(ray, t_max, inherited),
+                _ => ShadowProbe::Clear,
+            },
+            // `delta` isn't renormalized, so `t` means the same in the
+            // child's space (see `Transformed::hit_test`).
+            Shape::Transform(t) => {
+                let local = Vector {
+                    start: t.inverse.transform_point(ray.start),
+                    delta: t.inverse.transform_vector(ray.delta),
+                };
+                t.child.shadow_probe(&local, t_max, inherited)
+            }
+            // Innermost wins, as in `SurfacedShape::hit_test`.
+            Shape::Surfaced(s) => s.child.shadow_probe(ray, t_max, Some(&s.surface)),
+            Shape::Light(_) => ShadowProbe::Clear,
+            // Primitives and CSG nodes: their first crossing.
+            _ => match self.hit_test(ray) {
+                None => ShadowProbe::Clear,
+                Some(hit) if hit.distance > t_max => ShadowProbe::Clear,
+                Some(hit) if !hit.entering => ShadowProbe::Unsure,
+                Some(hit) => match hit.surface.as_ref().or(inherited) {
+                    // The walk treats a missing surface as opaque.
+                    None => ShadowProbe::Blocked,
+                    // A filter's pass depends on the colour at the hit.
+                    Some(s) if s.filter > 0.0 && !s.metallic => ShadowProbe::Unsure,
+                    Some(s) if s.transparency <= EPSILON => ShadowProbe::Blocked,
+                    Some(_) => ShadowProbe::Unsure,
+                },
+            },
+        }
+    }
+}
+
 impl Bounded {
     fn hit_test(&self, ray: &Vector) -> Option<RayHit> {
         // Skip the entire wrapped subtree if the ray misses our box.

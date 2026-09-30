@@ -3670,6 +3670,49 @@ Approximate order of recent commits, oldest first:
       weights multiply along the path) and `scene_contribution_cutoff`
       (default, 0, negative rejected).
 
+84. **Profiling; shadow rays get a fast probe.** Profiled cpot and
+    snowman_room with callgrind (no `perf` in the cloud workspace;
+    64 px, the sequential stand-in `rayon`, a debuginfo release build).
+    - **Where the time went:** shadow rays (`light_ray`) were 62% of
+      cpot's instructions and 74% of the room's; CSG span computation
+      (`Csg::spans`, mostly under shadow rays) 44% and 26%; malloc/free
+      about 8% in cpot (span lists). The shadow walk asked for the
+      *nearest* hit at every step, with no distance limit.
+    - **`Shape::shadow_probe(ray, t_max, inherited)`** answers `Clear`
+      (no primitive's first crossing is in range), `Blocked` (an
+      entering crossing of an opaque surface is in range) or `Unsure`
+      (a transparent or filtering surface, or an exit, is in range). It
+      returns at the first opaque surface, skips bounding boxes that
+      start beyond `t_max`, and carries the `Surfaced` default down.
+      `shadow_ray_walk` asks it first and only runs the ordered walk
+      (now `ordered_shadow_walk`) for `Unsure`.
+    - **Speed** (128 px, best of 3, sequential): snowman_room -27.9%,
+      cpot -24.5%, nba -24.6%, braids -21.2%, snowman_avatar -17.7%,
+      ornament -16.4%, train -16.2%, snowman_room_props -13.7%,
+      snowman_sphere -12.0%, xmastree -9.4%, texaco -2.9%. Instructions
+      at 64 px: cpot 7.02 -> 5.79 billion, room 14.04 -> 10.46.
+    - **A bug it fixes:** the walk ignores crossings within `EPSILON`
+      of its last step, so an opaque surface coincident with a
+      transparent one could be stepped over and let light through.
+      cpot's coffee has the same radius as its cup's inner wall, and
+      the room mirror's silver shares faces with its glass box. The
+      probe blocks those rays, so cpot's cups are now shadowed by
+      their coffee (11,413 of 147,456 pixels change at 384 px;
+      `Claude outputs/shadow_probe_cpot.png`); snowman_room_props and
+      the room change in a handful of pixels. Every other scene is
+      byte-identical.
+    - **What's left** (64 px, after): shadow rays are still 55% (cpot)
+      and 65% (room), the probe itself 40-49%, much of it CSG: a CSG
+      hit test builds its full span lists (allocating) even when the
+      probe only needs "any crossing in range". Torus quartics are
+      about 10% of cpot; the room's bump normals and pigments (noise)
+      about 12-15%.
+    - Tests `shadow_probe_tests::probe_answers`,
+      `probe_agrees_with_the_walk` (1,200 light/point pairs around a
+      sphere, a glass sphere and a transformed CSG shell; every settled
+      answer matches the walk) and
+      `opaque_content_coincident_with_glass_casts_a_shadow`.
+
 
 ## Pitfalls and conventions
 

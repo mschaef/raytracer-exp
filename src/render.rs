@@ -26,7 +26,7 @@ use std::cell::Cell;
 use std::convert::TryFrom;
 use std::time::Instant;
 
-use shapes::Shape;
+use shapes::{Shape, ShadowProbe};
 use output::{RenderTarget, HeatmapTarget};
 use transform::Affine;
 use normal::NormalPattern;
@@ -969,6 +969,30 @@ fn shadow_ray_walk(origin: Point, target: &Point, scene: &Scene) -> Option<(Vect
     // test from a hit point never re-finds that same surface — the
     // same self-intersection guard the reflection and transmission
     // rays rely on.
+    // Most shadow rays are either blocked by something opaque or reach
+    // the point unobstructed. `shadow_probe` answers those two cases
+    // without finding nearest hits, and without looking past the point
+    // (history entry 84); anything else falls through to the walk.
+    match scene.root.shadow_probe(&ray, distance - EPSILON, None) {
+        ShadowProbe::Blocked => return None,
+        ShadowProbe::Clear => return Some((ray, [1.0, 1.0, 1.0])),
+        ShadowProbe::Unsure => {}
+    }
+
+    ordered_shadow_walk(ray, distance, scene)
+}
+
+/// The shadow walk proper: from the light, find the nearest crossing,
+/// multiply in its transmittance, step past it and repeat, until the
+/// shaded point (`distance` along `ray`) is reached. `shadow_ray_walk`
+/// calls it only for rays `shadow_probe` can't settle.
+///
+/// Known flaw (history entry 84): each step ignores crossings within
+/// `EPSILON` of the last, so an opaque surface coincident with a
+/// transparent one (cpot's coffee inside its cup, the room mirror's
+/// silver under its glass) can be stepped over. `shadow_probe` catches
+/// those as `Blocked` before the walk runs.
+fn ordered_shadow_walk(ray: Vector, distance: f64, scene: &Scene) -> Option<(Vector, LinearColor)> {
     let mut transmittance: LinearColor = [1.0, 1.0, 1.0];
     let mut cursor = ray.start;
 
@@ -2722,5 +2746,138 @@ mod contribution_cutoff_tests {
         assert_eq!(at_half(0.3, 4), no_reflect_black);
         // From a camera ray (weight 1) both are traced under 0.3.
         assert_eq!(trace(&scene(s, white, 0.3)), trace(&scene(s, white, 0.0)));
+    }
+}
+
+#[cfg(test)]
+mod shadow_probe_tests {
+    use super::*;
+    use crate::render::shapes::{difference, group, surfaced, translate, Cylinder, Sphere};
+
+    fn surface(transparency: f64, filter: f64) -> Surface {
+        Surface {
+            color: [0.2, 0.4, 0.8],
+            ambient: 0.1,
+            specular: 0.0,
+            light: 0.6,
+            checked: false,
+            reflection: 0.0,
+            transparency,
+            filter,
+            metallic: false,
+            shininess: 50.0,
+            brilliance: 1.0,
+            pigment: None,
+            normal: None,
+        }
+    }
+
+    fn scene(root: Shape) -> Scene {
+        Scene {
+            name: "probe tests".to_string(),
+            camera: Camera::looking_at([0.0, 0.0, 10.0], [0.0; 3], [0.0, 1.0, 0.0], 1.0),
+            root,
+            background: [0.0; 3],
+            sky: None,
+            ambient_light: 1.0,
+            reflect_limit: 0,
+            transmit_limit: 0,
+            indirect_limit: 0,
+            contribution_cutoff: 0.0,
+            min_samples: 1,
+            max_samples: 1,
+            variance_threshold: 0.0,
+            view_mode: ViewMode::default(),
+            view: view::ViewTransform::default(),
+            size: None,
+        }
+    }
+
+    fn cylinder(y0: f64, y1: f64, r: f64) -> Shape {
+        Shape::Cylinder(Cylinder { p0: [0.0, y0, 0.0], p1: [0.0, y1, 0.0], r, surface: None })
+    }
+
+    /// cpot's cup: a glass shell (outer radius 1, inner 0.8) holding an
+    /// opaque cylinder whose side is exactly the shell's inner wall.
+    fn cup() -> Shape {
+        group(vec![
+            surfaced(surface(0.75, 0.0), difference(cylinder(0.0, 2.0, 1.0), cylinder(0.2, 2.2, 0.8))),
+            surfaced(surface(0.0, 0.0), cylinder(0.2, 1.7, 0.8)),
+        ])
+    }
+
+    fn probe(scene: &Scene, origin: Point, target: Point) -> ShadowProbe {
+        let d = subp(target, origin);
+        let ray = Vector { start: origin, delta: normalizep(d) };
+        scene.root.shadow_probe(&ray, lenp(d) - EPSILON, None)
+    }
+
+    fn walk(scene: &Scene, origin: Point, target: Point) -> Option<LinearColor> {
+        let d = subp(target, origin);
+        let ray = Vector { start: origin, delta: normalizep(d) };
+        ordered_shadow_walk(ray, lenp(d), scene).map(|(_, t)| t)
+    }
+
+    /// The probe settles the plain cases: nothing in the way, an opaque
+    /// blocker, an opaque blocker beyond the point, and a light inside
+    /// a closed opaque shape (its exit needs the walk).
+    #[test]
+    fn probe_answers() {
+        let ball = |t, f| scene(group(vec![surfaced(surface(t, f), translate([0.0, 0.0, 5.0], Shape::Sphere(Sphere { center: [0.0; 3], r: 1.0, surface: None })))]));
+        let (light, point) = ([0.0, 0.0, 10.0], [0.0, 0.0, 0.0]);
+        assert_eq!(probe(&ball(0.0, 0.0), light, point), ShadowProbe::Blocked);
+        assert_eq!(probe(&ball(0.5, 0.0), light, point), ShadowProbe::Unsure);
+        assert_eq!(probe(&ball(0.0, 0.5), light, point), ShadowProbe::Unsure);
+        assert_eq!(probe(&ball(0.0, 0.0), [3.0, 0.0, 10.0], [3.0, 0.0, 0.0]), ShadowProbe::Clear);
+        // The point is between the light and the ball.
+        assert_eq!(probe(&ball(0.0, 0.0), [0.0, 0.0, -10.0], [0.0, 0.0, 0.0]), ShadowProbe::Clear);
+        // The light inside the ball: a sphere never reports the ray
+        // leaving it, so the light escapes, for the walk as for the probe.
+        let sc = ball(0.0, 0.0);
+        assert_eq!(probe(&sc, [0.0, 0.0, 5.0], [0.0, 0.0, 0.0]), ShadowProbe::Clear);
+        assert_eq!(walk(&sc, [0.0, 0.0, 5.0], [0.0, 0.0, 0.0]), Some([1.0; 3]));
+        // Inside a cylinder, which does report its exit: the walk decides.
+        let can = scene(group(vec![surfaced(surface(0.0, 0.0), cylinder(-1.0, 1.0, 1.0))]));
+        assert_eq!(probe(&can, [0.0, 0.0, 0.0], [0.0, 5.0, 0.0]), ShadowProbe::Unsure);
+    }
+
+    /// Wherever the probe gives an answer, the walk gives the same one:
+    /// light and point pairs all around a sphere, a glass sphere, the
+    /// cup, and a transformed, surfaced group of them. The coincident
+    /// walls of the cup are left out; see the next test.
+    #[test]
+    fn probe_agrees_with_the_walk() {
+        let shapes = vec![
+            scene(group(vec![surfaced(surface(0.0, 0.0), Shape::Sphere(Sphere { center: [0.0; 3], r: 1.0, surface: None }))])),
+            scene(group(vec![surfaced(surface(0.6, 0.0), Shape::Sphere(Sphere { center: [0.0; 3], r: 1.0, surface: None }))])),
+            scene(group(vec![translate([0.3, -0.5, 0.2], surfaced(surface(0.0, 0.0), difference(cylinder(0.0, 2.0, 1.0), cylinder(0.2, 2.2, 0.8))))])),
+        ];
+        let mut settled = 0;
+        for sc in &shapes {
+            for i in 0..400 {
+                let a = i as f64 * 0.731;
+                let light = [6.0 * a.cos(), 4.0 * (a * 0.37).sin(), 6.0 * a.sin()];
+                let point = [2.5 * (a * 1.9).sin(), 2.0 * (a * 0.53).cos(), 2.5 * (a * 1.3).cos()];
+                match probe(sc, light, point) {
+                    ShadowProbe::Blocked => { settled += 1; assert_eq!(walk(sc, light, point), None, "ray {}", i) }
+                    ShadowProbe::Clear => { settled += 1; assert_eq!(walk(sc, light, point), Some([1.0; 3]), "ray {}", i) }
+                    ShadowProbe::Unsure => {}
+                }
+            }
+        }
+        assert!(settled > 600, "only {} of 1200 rays settled by the probe", settled);
+    }
+
+    /// The bug the probe fixes: a ray through the cup's glass wall into
+    /// the opaque content behind it. The walk steps past the glass's
+    /// inner wall and misses the content's side, which is at the same
+    /// point, so light leaks through; the probe blocks it.
+    #[test]
+    fn opaque_content_coincident_with_glass_casts_a_shadow() {
+        let sc = scene(cup());
+        let (light, point) = ([10.0, 1.0, 0.0], [-10.0, 1.0, 0.0]);
+        assert_eq!(probe(&sc, light, point), ShadowProbe::Blocked);
+        assert!(walk(&sc, light, point).is_some(), "the walk alone lets light through");
+        assert!(shadow_ray_walk(light, &point, &sc).is_none());
     }
 }
