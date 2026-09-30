@@ -6,7 +6,8 @@
 ;
 ; Stand-ins: the glass (T_Glass4) is see-through without the filter's
 ; tint, which at its near-white colour changes little. It has no ior in
-; the original, so POV didn't refract it either.
+; POV 3.7's glass_old.inc, the version matched, so POV doesn't refract it
+; either (history entry 89).
 
 (load "_pov.lisp")
 

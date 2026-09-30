@@ -387,8 +387,8 @@
 ; glass_old.inc's T_Glass4: rgbf <0.98, 1, 0.99, 0.75> with F_Glass4
 ; (ambient 0.1, diffuse 0.1, reflection 0.25, specular 1). POV's filter
 ; tints what shows through, and this renderer's transparency doesn't,
-; but at this near-white colour the difference is slight. With no
-; interior (no ior) POV doesn't refract it either.
+; but at this near-white colour the difference is slight. POV 3.7 gives
+; it no interior (no ior), so it doesn't refract (history entry 89).
 (def pov-glass4
   (surface {:color (srgb [0.98 1.0 0.99])
             :ambient 0.1 :light 0.1 :specular 1.0 :reflection 0.25

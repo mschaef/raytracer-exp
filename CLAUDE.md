@@ -3847,6 +3847,34 @@ Approximate order of recent commits, oldest first:
       its centre and bends an off-centre one toward its axis, more on
       the way out.
 
+89. **Refraction Phase 5: the ports.** Phase 4 (nested media) skipped:
+    no ported scene nests refractive objects.
+    - `flat-glass` (`_snowman_room.lisp`) gets FlatGlass's own
+      `:ior 1.5`. It's the only glass in the ports with an `ior` under
+      POV 3.7; the window panes and mirrors (`Glass2`, `Glass3`) and
+      cpot's cups (`T_Glass4`) have none in 3.7's includes.
+    - **A sub-pixel change:** the clock glass is a flat disc 0.05
+      thick, which only shifts what's behind it sideways, by a few
+      hundredths of a unit at most. snowman_room_props at 600 px: 637
+      pixels change, up to 53 levels, all on the edges of the dial's
+      ticks, hands and rim; side by side the renders look the same.
+      snowman_room at 400 px: 23 pixels, at most 3 levels. No retuning.
+      `Claude outputs/refraction_clock_glass.png` (crops, and the
+      difference x20).
+    - (A first comparison wrongly reported both as byte-identical: it
+      ran two builds on the same, already-edited scene files. The right
+      check for a scene-file change is old files against new with one
+      build.)
+    - Notes corrected: `docs/povray_gap_analysis.md` (cpot's T_Glass4
+      row, the refraction feature row and bullet, the cpot stand-in
+      note, and a status line), and the glass comments in `cpot.lisp`
+      and `_pov.lisp`, which now name POV 3.7 as the version matched.
+    - Every other scene byte-identical (39 of 41 at 64 px; the two
+      that differ are the rooms above).
+    - The refraction plan is complete apart from its deferred items:
+      nested media (Phase 4), Fresnel, absorption, caustics and
+      dispersion.
+
 
 ## Pitfalls and conventions
 
@@ -5098,6 +5126,9 @@ In `shade_pixel`:
 
 ### Phase 4 — Nested media
 
+Skipped for now (entry 89): no ported scene has nested refractive
+objects. Every exit leaves into air, as documented below.
+
 Track what the ray is inside of, so the ratio at a crossing uses the
 real media on both sides: glass in water, or a ray leaving glass
 directly into an opaque object it touches.
@@ -5111,6 +5142,8 @@ directly into an opaque object it touches.
   the limitation is documented: every exit leaves into air.
 
 ### Phase 5 — The ports
+
+Done (history entry 89).
 
 - `flat-glass` in `_snowman_room.lisp` gets `:ior 1.5` (FlatGlass's
   own value). The snowman room renders changed only at the clock face;

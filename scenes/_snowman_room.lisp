@@ -52,10 +52,12 @@
 (def matte-blue  (snow-matte pov-blue))
 
 ; FlatGlass: rgbf <1, 1, 1, 0.7>, specular 1, roughness 0.001, ambient
-; 0, diffuse 0, reflection 0.04 (its ior isn't modelled).
+; 0, diffuse 0, reflection 0.04, ior 1.5. The only glass in these scenes
+; that refracts: POV 3.7's stock Glass2 and Glass3 (the window panes and
+; mirrors) have no ior (history entry 89).
 (def flat-glass
   (surface {:color [1 1 1] :ambient 0.0 :light 0.0 :specular 1.0 :shininess 1000
-            :reflection 0.04 :filter 0.7}))
+            :reflection 0.04 :filter 0.7 :ior 1.5}))
 
 ; Arrow(len, shaft radius, head radius, texture): a shaft along x from
 ; -0.8 len to 0.8 len, a cone head out to len, and a flared tail cone

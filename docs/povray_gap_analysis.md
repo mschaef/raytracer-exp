@@ -57,8 +57,8 @@ plans.
   can now vary per axis, as `T_Wood7` needs. Remaining stand-ins:
   - nba: the woods are bottom layers only (no layered textures), and the
     middle block's clear pink layer is folded into its colour map.
-  - cpot: the glass doesn't refract, which matches the original (no
-    ior).
+  - cpot: the glass doesn't refract, which matches the original under
+    POV 3.7, the version matched (`T_Glass4` has no ior there).
   - Both scenes come out brighter than POV's renders (nba is compared
     with `magic/nba.tga`), which is left for tuning.
 - **Loose ends done** (CLAUDE.md entry 50):
@@ -84,6 +84,13 @@ plans.
   `:shininess` (POV roughness) and `:brilliance`, `:metallic` keeps
   its diffuse, and path-tracing bounces get their own sample
   coordinates.
+- **Refraction** (CLAUDE.md entries 86–89): `:ior` on surfaces, Snell's
+  law and total internal reflection, following POV 3.7 (Mike's choice of
+  version). The only ported glass with an `ior` is `FlatGlass`, the
+  snowman room's clock glass (1.5); it's a thin flat pane, so it only
+  shifts the dial's edges by a fraction of a pixel. cpot's cups, the
+  windows and the mirrors have
+  no `ior` in 3.7's includes and stay straight-through.
 - **Shared metal presets in full** (CLAUDE.md entry 81): `pov-metal-a`,
   `-c` and `-e` take metals.inc's whole finishes (metallic, brilliance,
   roughness). texaco's bowl and xmastree's trunk and hooks changed.
@@ -405,7 +412,7 @@ Suggested order, from least new work to most.
 | 4 | `braids/braids.pov`, `train/train.pov` | Same lights and camera as xmastree. Braids: 200×6×8 = 9,600 blue spheres in twisted rope braids. Train: just the compass. | None once X1 is done. `braids/box.pov` is a one-sphere test. |
 | 5 | `ornament/orn.pov` | The wooden train-engine ornament: CSG boxes and cylinders in four `wood` + turbulence colours, a **3,312-triangle smokestack** (`smokestack.inc`, an AC3D export), and a tilted plane | **POV `triangle` mesh → OBJ** (S): a one-off conversion script (the file is plain `triangle { <a>,<b>,<c> }` lines). Then `load-obj` + `bvh`. Wood pigments (X9) matter more here: it's all painted wood. |
 | 6 | `magic/nba.pov` | Three boxes in `T_Wood7/23/28` (one with `rgbt` 0.9 over wood), a checker ground, a white sky sphere, four lights | **Two-colour checker with scale** (S): the current checker uses unit cells, and the second colour is half the first. POV's `checker A, B scale s` needs both colours and a scale. Layered woods (X10). |
-| 7 | `cpot/cpot.pov` + `coffeecup.inc` | Coffee pot and two cups: heavy CSG (differences, one intersection with a box), tori, `Chrome_Texture`, `Dark_Wood`, `T_Glass4` cups, a `phong` finish, a checker plane with `scale 5` | Specular power (T3), `phong`/`phong_size` mapping, two-colour checker. `T_Glass4` has **`ior`** in 3.x: without refraction the cups will look like tinted film rather than glass, which is acceptable for now. |
+| 7 | `cpot/cpot.pov` + `coffeecup.inc` | Coffee pot and two cups: heavy CSG (differences, one intersection with a box), tori, `Chrome_Texture`, `Dark_Wood`, `T_Glass4` cups, a `phong` finish, a checker plane with `scale 5` | Specular power (T3), `phong`/`phong_size` mapping, two-colour checker. `T_Glass4` has no `ior` in POV 3.7's `glass_old.inc`, the version matched (CLAUDE.md entry 89), so the cups don't refract; the port's straight-through glass matches. |
 | 8 | `snowman/*` (`avatar.pov`, `sphere.pov`, `sphere2.pov`, `moldingtest.pov` + 6 includes) | A snowman blob, a "room" with a desk, window glass and blinds, clocks, outlets, a mirror, a yard height field, spotlit area lighting | Much more than the rest. See below. `snowman_workdir` duplicates `snowman_avatar` apart from xv thumbnails. |
 
 ### Snowman-only gaps
@@ -423,8 +430,10 @@ Suggested order, from least new work to most.
 - **`rgbf` filter transparency** (S–M): transmission tinted by the
   pigment colour. Colored transmission is already deferred in the
   transparency plan.
-- **Refraction / `ior`** (L): glass panes, `FlatGlass`, the mirror
-  glass. Already listed under "Future directions: refraction".
+- **Refraction / `ior`** (L): done (CLAUDE.md entries 86–89). Under
+  POV 3.7 only `FlatGlass` (the clock glass) has an `ior`; the glass
+  panes and the mirror glass (`Glass2`, `Glass3`) don't, and so don't
+  refract.
 - **`brick` pattern with textures per brick and mortar** (M): the
   `Wood_Floor` texture. Needs X9 plus textures chosen by pattern.
 - **`sky_sphere` with a `gradient` colour map** (S): a background
@@ -472,7 +481,7 @@ height field and refraction, and adds each feature afterwards.
 | Brick pattern (textures by pattern) | M | — | — | snowman | §6 |
 | Height field / image map | M each | — | — | snowman | §6 |
 | Blob / metaballs | L | — | — | snowman | §6 |
-| Refraction / `ior` | L | — | — | cpot (cups), snowman | §6 |
+| Refraction / `ior` (done, CLAUDE.md entries 86–89) | L | — | — | snowman (the clock glass only, under POV 3.7) | §6 |
 
 ---
 
