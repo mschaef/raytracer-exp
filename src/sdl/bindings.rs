@@ -1830,6 +1830,9 @@ fn builtin_aabb(args: &[Value], pos: &Position) -> Value {
 ///          :min-samples n :max-samples m :variance-threshold t
 ///          :view {:curve :clip :exposure 0} :size [w h]})`
 ///
+/// `:ambient-light` (default 1) scales every surface's `:ambient`, as
+/// POV's `global_settings { ambient_light }` does; 0 turns it off.
+///
 /// `:sky` is a pigment (a map or layers, as a surface's `:pigment`)
 /// for rays that hit nothing, evaluated at the ray's unit direction:
 /// POV-Ray's `sky_sphere`. It replaces `:background` for those rays.
@@ -1899,6 +1902,10 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
     let background = maybe_key_point(&map, "background", "scene", pos)
         .unwrap_or([0.0, 0.0, 0.0]);
     let sky = map.get("sky").map(|v| build_layered_pigment(v, pos));
+    let ambient_light = maybe_key_number(&map, "ambient-light", "scene", pos).unwrap_or(1.0);
+    if !(ambient_light >= 0.0 && ambient_light.is_finite()) {
+        sdl_panic!(pos.clone(), "scene :ambient-light must be a non-negative number (got {})", ambient_light);
+    }
 
     let objects_v = require_key(&map, "objects", "scene", pos);
     let objects_items = require_vec(objects_v, "scene :objects", pos);
@@ -1981,6 +1988,7 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         root,
         background,
         sky,
+        ambient_light,
         reflect_limit,
         transmit_limit,
         indirect_limit,

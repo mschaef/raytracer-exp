@@ -3366,6 +3366,89 @@ Approximate order of recent commits, oldest first:
       `pattern_pigments_reject_bad_keys` and
       `snowman_room_textures_scene_loads`. Every existing scene renders
       byte-identically.
+74. **Snowman phase 6d: the room's props.** `scenes/_snowman_room.lisp`
+    ports sphere2.pov's include files (higherorder.inc, furniture.inc,
+    window.inc, and the parts of utilities.inc it uses) as SDL
+    functions of the macros' arguments, returning unplaced shapes; `at`
+    applies POV object transforms in the order written, and
+    `pigment-at` moves a texture as `texture { EMBWood1 scale 2 rotate
+    ... }` does.
+    - Props: `rounded-box`, `one-axis-rounded-box`, `ikea-desk`,
+      `room-mirror` (the furniture.inc mirror; `mirror` is avatar.pov's),
+      `quarter-round`, `corner-round`, `inflatable-cross`,
+      `modern-cross`, `modern-clock` (with its red internal light and
+      optional FlatGlass), `wall-outlet` (faceplate, screw, sockets with
+      black-lined slots), `window-glass` (sash and muntins, optional
+      Glass3 pane), `window-frame`, `window-blind-slats` (a BVH of
+      notched slats) and `axis`; plus `matte-red/green/blue` and
+      `flat-glass`.
+    - Kept as written: RoundedBox lists one edge cylinder twice and
+      leaves out the edge from `<cr, cr, cr>` to `<xs - cr, cr, cr>`, so
+      that bottom edge stays square; ModernClock's hub has no texture,
+      so it gets POV's default (black, ambient 0.1, diffuse 0.6).
+    - The mirror's glass is Glass2 (clear, reflection 0.5, phong 0.3)
+      over `rgbf <0, 0, 0.1, 0.9>`; with one layer per surface it keeps
+      Glass2's finish and the dark blue filter. Unlike the avatar's,
+      there's no reference render to tune it to.
+    - Not ported (unused by sphere2.pov): RoundedEndCap, Cross, XBox,
+      ArtDecoClock, TwoScrewFaceplateBase and the top/bottom screws'
+      faceplate.
+    - `scenes/snowman_room_props.lisp` is a contact sheet of every prop,
+      each scaled into a cell of a 4 x 3 grid, viewed down -x so the
+      props that face +x in the room face the camera
+      (`Claude outputs/snowman_room_props.png`, with a close-up of four
+      blind slats showing their cord slots). Everything reads as
+      intended: the outlet's slots and ground hole, the clock's ticks,
+      hands and red-lit dial, the cross's inlay, the window's 4 x 5
+      panes, the frame's sash channels.
+    - Speed: a flat list of props took twice as long as the same props
+      in a BVH (the room will need one). The clock's light adds a
+      shadow ray at every shaded point in the scene. The sheet renders
+      at 1200x900 in 59 s.
+    - Test `snowman_room_props_scene_loads`. No renderer changes.
+75. **Snowman phase 6e: the room assembled.** `scenes/snowman_room.lisp`
+    is sphere2.pov.
+    - The room: a 144-inch box less its interior (4-inch walls, a
+      1-inch floor slab) and two window openings in the -x wall, in
+      LightTan MatteFinish with `wrinkles 0.1 scale 0.03`; Wood_Floor on
+      the slab (top at y = 1.5); quarter-round molding on three walls;
+      the two windows (two sashes each, the frame, and blinds); the
+      desk with its EMBWood1 top (with EMBWood1's own finish), mat,
+      mirror, snowman (snowman.inc's, no arm) and the unplaced bowtie;
+      two outlets, the cross, the clock (red light inside) and the
+      axis; the snow plane and `room-sky`. Everything but the plane and
+      lights is in one BVH.
+    - The modelling switches are `room-lights?`, `room-area?` and
+      `room-glass?`, all true by default (the finished render). With
+      lights off it's sphere2.pov's default: ambient light 1 and the
+      clock's red light. With them on: ambient light 0, a blue moon
+      (area light 200 across at `<-2000, 2000, 0>`), a Gray30 light at
+      `<0, 106, -60>`, and a white spotlight at `<0, 95, 0>` aimed at
+      `<0, 0, -5>` (radius 6, falloff 80), 6 across with area lighting.
+    - **Renderer: scene `:ambient-light`** (default 1) scales every
+      surface's ambient, POV's `global_settings { ambient_light }`.
+      `Scene.ambient_light`; every other scene is byte-identical (a
+      factor of exactly 1). Test `ambient_light_scales_ambient`.
+    - Checked with an overview camera: the props land where sphere2.pov
+      puts them. The clock (`rotate <0, -90, 0>`) faces into the room;
+      the outlets sit on the back and window walls; the cross between
+      the windows.
+    - The camera (from `<26, 62, 36>` toward `<-56, 36, -36>`, zoom
+      1.5, square) frames the desk's end, the axis in front of it, and
+      the -z window; the clock and cross are just out of frame.
+    - With the lights on and no ambient light, anything the lights
+      don't reach is black: the desk shadows the overhead spot and the
+      front light, so the back wall under the desk is solid black. That
+      follows from sphere2.pov's lighting; 6f's tuning decides what to
+      do about it.
+    - Render time at 800x800: 7 minutes with lights (adaptive sampling
+      runs to its 32-sample cap almost everywhere: the soft shadows of
+      the two area lights are noisy); 74 s ambient only. About 22 µs a
+      sample; removing the blinds, the wall wrinkles, the floor's
+      pigment or the clock's light each changed that by under 10%, so
+      no single prop dominates. Sampling settings are for 6f.
+    - Renders: `Claude outputs/snowman_room_lights.png` and
+      `snowman_room_ambient.png`. Test `snowman_room_scene_loads`.
 
 ## Pitfalls and conventions
 
@@ -4797,13 +4880,13 @@ with the as-written ambient-plus-clock-light mode as a flag.
   glasses, and colors.inc colours, in `_pov.lisp`.
 - **6b — Sky (done, entry 73).** Scene `:sky`, `:gradient` pattern.
 - **6c — Brick and pigment maps (done, entry 73).** `Wood_Floor`.
-- **6d — The props.** `_snowman_room.lisp`: the includes as SDL
+- **6d — The props (done, entry 74).** `_snowman_room.lisp`: the includes as SDL
   (RoundedBox, OneAxisRoundedBox, Quarter_Round, Corner_Round, the IKEA
   desk, the mirror, WallOutlet, ModernCross, ModernClock with its red
   internal light, WindowGlass, WindowFrame, WindowBlindSlats, Axis),
   each rendered alone on a contact sheet to check the POV transform
   order.
-- **6e — The room.** Walls with window openings and `wrinkles`, the
+- **6e — The room (done, entry 75).** Walls with window openings and `wrinkles`, the
   floor and molding, the placements, the snow plane and camera; render
   time and bounding (a BVH per window of blinds). Kept as written: the
   bowtie isn't moved with the snowman, and Wood_Floor's scale is

@@ -575,6 +575,10 @@ pub struct Scene {
     /// the canonical place for everything in the scene graph).
     pub root: Shape,
     pub background: LinearColor,
+    /// Scales every surface's `ambient` (POV-Ray's `global_settings {
+    /// ambient_light }`). 1.0, the default, leaves them as written; 0
+    /// turns ambient light off, for a scene lit only by its lights.
+    pub ambient_light: f64,
     /// A pigment for what a ray sees when it hits nothing, evaluated at
     /// the ray's unit direction (POV-Ray's `sky_sphere`). When set it
     /// replaces `background` for those rays; `None` (the default) keeps
@@ -1464,7 +1468,7 @@ fn shade_pixel(
 
     let scolor = surface_color(&surface, hit);
 
-    let ambient: LinearColor = scale_linear_color(&scolor, surface.ambient);
+    let ambient: LinearColor = scale_linear_color(&scolor, surface.ambient * scene.ambient_light);
 
     let reflected: LinearColor = if (surface.reflection > EPSILON) && (depth.reflect < scene.reflect_limit) {
         // A bumped surface reflects about its tilted normal, as in
@@ -2450,6 +2454,7 @@ mod light_tests {
             root: group(vec![Shape::Sphere(Sphere { center: [0.0, 0.0, 0.0], r: 1.0, surface: Some(opaque()) })]),
             background: [0.0, 0.0, 0.0],
             sky: None,
+            ambient_light: 1.0,
             reflect_limit: 0,
             transmit_limit: 0,
             indirect_limit: 0,

@@ -1114,6 +1114,16 @@ fn snowman_room_textures_scene_loads() {
 }
 
 #[test]
+fn snowman_room_props_scene_loads() {
+    assert_scene_loads("snowman_room_props.lisp", "snowman-room-props-scene");
+}
+
+#[test]
+fn snowman_room_scene_loads() {
+    assert_scene_loads("snowman_room.lisp", "snowman-room-scene");
+}
+
+#[test]
 fn metallic_test_scene_loads() {
     assert_scene_loads("metallic_test.lisp", "metallic-test-scene");
 }
@@ -1676,4 +1686,38 @@ fn pattern_pigments_reject_bad_keys() {
         };
         assert!(message.contains(expected), "{}: {}", source, message);
     }
+}
+
+/// `:ambient-light` scales every surface's ambient: at 0.5 an
+/// ambient-only surface is half as bright (in linear light), at 0 it's
+/// black, and the default is the surface as written.
+#[test]
+fn ambient_light_scales_ambient() {
+    let pixel = |setting: &str, tag: &str| {
+        let source = format!(
+            r#"
+(def s (scene {{:name "ambient"
+               :camera (camera-looking-at [0 0 -5] [0 0 0] [0 1 0] 1.0)
+               :background [0 0 0]
+               :min-samples 1 :max-samples 1
+               :view {{:curve :clip}}
+               {}
+               :objects [(sphere {{:center [0 0 0] :r 1
+                                  :surface (surface {{:color [1 1 1] :ambient 0.8 :light 0.0}})}})]}}))
+(def t (png-target 5 5))
+(render s t 5 5)
+(save-png t PATH)
+"#,
+            setting
+        );
+        render_to_image(&source, tag).get_pixel(2, 2).0[0]
+    };
+    let full = pixel("", "ambient_default");
+    let one = pixel(":ambient-light 1", "ambient_one");
+    let half = pixel(":ambient-light 0.5", "ambient_half");
+    let none = pixel(":ambient-light 0", "ambient_none");
+    assert_eq!(full, one);
+    assert_eq!(none, 0);
+    // sRGB of 0.8 is 231; of 0.4 is 170.
+    assert!((full as i32 - 231).abs() <= 1 && (half as i32 - 170).abs() <= 1, "{} {}", full, half);
 }
