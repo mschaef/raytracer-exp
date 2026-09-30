@@ -51,7 +51,7 @@ use crate::render::pigment::{LayeredPigment, Pattern, Pigment, Rgbt, Wave};
 use crate::render::heightfield::{height_field_triangles, read_tga_heights};
 use crate::render::normal::{Bump, NormalPattern};
 use crate::render::view::{ToneCurve, ViewTransform};
-use crate::render::{Camera, HeatmapTargets, Light, LightKind, Scene, SpotCone, Surface, ViewMode};
+use crate::render::{Camera, HeatmapTargets, Light, LightKind, Scene, SpotCone, Surface, ViewMode, DEFAULT_CONTRIBUTION_CUTOFF};
 
 use crate::sdl::env::EnvRef;
 use crate::sdl::error::Position;
@@ -1834,8 +1834,13 @@ fn builtin_aabb(args: &[Value], pos: &Position) -> Value {
 // Scene
 // ---------------------------------------------------------------------------
 
+/// The default `:min-samples` for a scene with an area light (see
+/// `builtin_scene`); 4 otherwise.
+pub const AREA_LIGHT_MIN_SAMPLES: u32 = 8;
+
 /// `(scene {:name "..." :camera C :background [r g b] :objects [...]
 ///          :reflect-limit n :transmit-limit n :indirect-limit n
+///          :contribution-cutoff c
 ///          :min-samples n :max-samples m :variance-threshold t
 ///          :view {:curve :clip :exposure 0} :size [w h]})`
 ///
@@ -1955,12 +1960,32 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
     let indirect_limit = maybe_key_int(&map, "indirect-limit", "scene", pos)
         .unwrap_or(0) as u32;
 
+    // Reflection and transmission rays weighing less than this in the
+    // pixel aren't traced (POV-Ray's `adc_bailout`; history entry 83).
+    // `0` turns it off.
+    let contribution_cutoff = maybe_key_number(&map, "contribution-cutoff", "scene", pos)
+        .unwrap_or(DEFAULT_CONTRIBUTION_CUTOFF);
+    if contribution_cutoff < 0.0 {
+        sdl_panic!(pos.clone(), "scene :contribution-cutoff must be at least 0 (got {})", contribution_cutoff);
+    }
+
     // Adaptive-sampling defaults: 4 samples on flat surfaces (which
     // matches the previous fixed `oversample = 2` cost exactly), up
     // to 32 in noisy regions, with a per-channel min/max spread of
     // 0.005 linear-color units as the early-termination threshold.
+    //
+    // A scene with an area light defaults to a minimum of 8 instead
+    // (history entry 82): with 4, the sampler sometimes stopped where
+    // four samples of a soft shadow happened to agree, leaving the
+    // penumbra noisy. An explicit `:min-samples` always wins.
+    let has_area_light = {
+        let mut lights = Vec::new();
+        root.collect_lights(Affine::identity(), &mut lights);
+        lights.iter().any(|l| matches!(l.kind, LightKind::Area { .. } | LightKind::Quad { .. }))
+    };
+    let default_min_samples = if has_area_light { AREA_LIGHT_MIN_SAMPLES } else { 4 };
     let min_samples = maybe_key_int(&map, "min-samples", "scene", pos)
-        .unwrap_or(4) as u32;
+        .map_or(default_min_samples, |n| n as u32);
     let max_samples = maybe_key_int(&map, "max-samples", "scene", pos)
         .unwrap_or(32) as u32;
     let variance_threshold = maybe_key_number(&map, "variance-threshold", "scene", pos)
@@ -2001,6 +2026,7 @@ fn builtin_scene(args: &[Value], pos: &Position) -> Value {
         reflect_limit,
         transmit_limit,
         indirect_limit,
+        contribution_cutoff,
         min_samples,
         max_samples,
         variance_threshold,

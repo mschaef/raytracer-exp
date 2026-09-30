@@ -623,6 +623,14 @@ pub struct Scene {
     /// the indirect branch in `shade_pixel`.
     pub indirect_limit: u32,
 
+    /// Reflection and transmission rays whose weight in the final pixel
+    /// would fall below this aren't traced; they contribute black
+    /// (POV-Ray's `adc_bailout`). A ray's weight is the product of the
+    /// reflection and transmission coefficients along its path (the
+    /// largest channel, for a tinted metal or a filter). `0` turns the
+    /// cutoff off. The SDL default is [`DEFAULT_CONTRIBUTION_CUTOFF`].
+    pub contribution_cutoff: f64,
+
     /// Adaptive oversampling parameters. The per-pixel sample loop in
     /// `pixel_color` takes at least `min_samples` samples, then keeps
     /// going batch-by-batch while the per-channel min/max spread
@@ -1303,6 +1311,10 @@ fn light_vector_quad(
     Some((ray, scale_linear_color(&transmittance, strength)))
 }
 
+/// The SDL's default `Scene::contribution_cutoff`: POV-Ray's default
+/// `adc_bailout`, one 8-bit level.
+pub const DEFAULT_CONTRIBUTION_CUTOFF: f64 = 1.0 / 255.0;
+
 /// Recursion-budget tracker threaded through `ray_color` /
 /// `shade_pixel`. Reflection, transmission, and indirect (diffuse
 /// path-tracing) bounces carry *independent* depth counters, checked
@@ -1316,8 +1328,8 @@ fn light_vector_quad(
 /// in `shade_pixel`). Default-zero means "no bounces spent," same
 /// shape as the other two — `Depth::zero()` returns all three at 0.
 ///
-/// `Copy` (three `u32`s), so it threads through the recursion by
-/// value with no ceremony; `..depth` struct-update syntax bumps one
+/// `Copy`, so it threads through the recursion by value with no
+/// ceremony; `..depth` struct-update syntax bumps one
 /// counter while carrying the others through unchanged.
 #[derive(Copy, Clone, Debug)]
 struct Depth {
@@ -1329,6 +1341,12 @@ struct Depth {
     /// a stack of N glass objects spends N transmissions, not 2N, and
     /// capped at `PASS_THROUGH_LIMIT` against degenerate geometry.
     pass: u32,
+    /// This ray's weight in the pixel: 1 for a camera ray, times each
+    /// reflection and transmission coefficient along the way. Rays
+    /// weighing less than `Scene::contribution_cutoff` aren't traced.
+    /// Indirect bounces pass it through unchanged (Russian roulette
+    /// already ends those paths), which keeps the cutoff conservative.
+    weight: f64,
 }
 
 /// The most transparent exits one ray may pass through before an exit
@@ -1340,7 +1358,7 @@ impl Depth {
     /// The starting budget for a primary (camera) ray: no reflection,
     /// transmission, or indirect bounces spent yet.
     fn zero() -> Depth {
-        Depth { reflect: 0, transmit: 0, indirect: 0, pass: 0 }
+        Depth { reflect: 0, transmit: 0, indirect: 0, pass: 0, weight: 1.0 }
     }
 }
 
@@ -1470,7 +1488,15 @@ fn shade_pixel(
 
     let ambient: LinearColor = scale_linear_color(&scolor, surface.ambient * scene.ambient_light);
 
-    let reflected: LinearColor = if (surface.reflection > EPSILON) && (depth.reflect < scene.reflect_limit) {
+    // The reflected ray's weight: a metal tints (and so dims) what it
+    // reflects by its colour.
+    let reflect_weight = depth.weight
+        * surface.reflection
+        * if surface.metallic { max_channel(&scolor) } else { 1.0 };
+    let reflected: LinearColor = if (surface.reflection > EPSILON)
+        && (depth.reflect < scene.reflect_limit)
+        && (reflect_weight >= scene.contribution_cutoff)
+    {
         // A bumped surface reflects about its tilted normal, as in
         // POV-Ray; the sign of the normal cancels in the formula.
         let rvec = reflect(ray.delta, if surface.normal.is_some() { normal } else { hit.normal });
@@ -1484,7 +1510,7 @@ fn shade_pixel(
         let rcolor = ray_color(&Vector {
             start: hit.hit_point,
             delta: normalizep(rvec)
-        }, scene, lights, Depth { reflect: depth.reflect + 1, ..depth }, sample);
+        }, scene, lights, Depth { reflect: depth.reflect + 1, weight: reflect_weight, ..depth }, sample);
 
         let scaled = scale_linear_color(&rcolor, surface.reflection);
 
@@ -1793,8 +1819,20 @@ fn shade_pixel(
     // `Full`-mode lerp below and the `Transmission` view-mode
     // dispatch read this same value, so the transmission ray is
     // computed exactly once regardless of view mode.
+    //
+    // Contribution cutoff: when the transmitted ray would weigh less
+    // than `scene.contribution_cutoff`, it isn't traced and what shows
+    // through is black (as in POV-Ray), but the surface keeps its
+    // transparency, so its body is still weighted `1 - t`.
+    let tint = pass_tint(&surface, &scolor);
+    let transmit_weight = depth.weight * max_channel(&tint);
     let (transmitted_color, transmitted_alpha) =
-        if (see_through(&surface) > EPSILON) && (depth.transmit < scene.transmit_limit) {
+        if (see_through(&surface) > EPSILON)
+            && (depth.transmit < scene.transmit_limit)
+            && (transmit_weight < scene.contribution_cutoff)
+        {
+            ([0.0, 0.0, 0.0], see_through(&surface))
+        } else if (see_through(&surface) > EPSILON) && (depth.transmit < scene.transmit_limit) {
             let transmitted = ray_color(
                 &Vector {
                     start: hit.hit_point,
@@ -1802,13 +1840,13 @@ fn shade_pixel(
                 },
                 scene,
                 lights,
-                Depth { transmit: depth.transmit + 1, ..depth },
+                Depth { transmit: depth.transmit + 1, weight: transmit_weight, ..depth },
                 sample,
             );
             // Tinted by a filter (history entry 71): the weight is
             // per channel, `transparency + filter * colour`; the body
             // gives up `transparency + filter`.
-            (multiply_linear_color(&transmitted, &pass_tint(&surface, &scolor)), see_through(&surface))
+            (multiply_linear_color(&transmitted, &tint), see_through(&surface))
         } else {
             ([0.0, 0.0, 0.0], 0.0)
         };
@@ -2458,6 +2496,7 @@ mod light_tests {
             reflect_limit: 0,
             transmit_limit: 0,
             indirect_limit: 0,
+            contribution_cutoff: 0.0,
             min_samples: 1,
             max_samples: 1,
             variance_threshold: 0.0,
@@ -2573,5 +2612,115 @@ mod light_tests {
         let side = [3.0, 0.0, 0.0];
         assert!(light_vector(&side, &scene, &plain, (0.5, 0.5)).is_some());
         assert!(light_vector(&side, &scene, &coned, (0.5, 0.5)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod contribution_cutoff_tests {
+    use super::*;
+    use crate::render::shapes::{group, Sphere};
+
+    fn surface(reflection: f64, transparency: f64) -> Surface {
+        Surface {
+            color: [1.0, 0.5, 0.25],
+            ambient: 0.2,
+            specular: 0.0,
+            light: 0.6,
+            checked: false,
+            reflection,
+            transparency,
+            filter: 0.0,
+            metallic: false,
+            shininess: 50.0,
+            brilliance: 1.0,
+            pigment: None,
+            normal: None,
+        }
+    }
+
+    /// A unit sphere at the origin with `surface`, on `background`, no
+    /// lights; the camera ray comes straight down -z onto it, so the
+    /// reflected ray goes back out to the background and the
+    /// transmitted one passes through to it.
+    fn scene(surface: Surface, background: LinearColor, cutoff: f64) -> Scene {
+        Scene {
+            name: "cutoff tests".to_string(),
+            camera: Camera::looking_at([0.0, 0.0, 5.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0], 1.0),
+            root: group(vec![Shape::Sphere(Sphere { center: [0.0; 3], r: 1.0, surface: Some(surface) })]),
+            background,
+            sky: None,
+            ambient_light: 1.0,
+            reflect_limit: 4,
+            transmit_limit: 4,
+            indirect_limit: 0,
+            contribution_cutoff: cutoff,
+            min_samples: 1,
+            max_samples: 1,
+            variance_threshold: 0.0,
+            view_mode: ViewMode::default(),
+            view: view::ViewTransform::default(),
+            size: None,
+        }
+    }
+
+    fn trace(scene: &Scene) -> LinearColor {
+        let ray = Vector { start: [0.0, 0.0, 5.0], delta: [0.0, 0.0, -1.0] };
+        let sample = PathSample { light: (0.5, 0.5), indirect: (0.5, 0.5), index: 0, pixel_seed: 0 };
+        ray_color(&ray, scene, &[], Depth::zero(), sample)
+    }
+
+    /// A reflection weighing 0.5 is traced under a cutoff of 0.4 and
+    /// skipped under 0.6, where the result is exactly the surface with
+    /// no reflection ray at all.
+    #[test]
+    fn reflections_below_the_cutoff_are_not_traced() {
+        let white = [1.0, 1.0, 1.0];
+        let mirror = surface(0.5, 0.0);
+        let traced = trace(&scene(mirror, white, 0.0));
+        assert_eq!(trace(&scene(mirror, white, 0.4)), traced);
+        let skipped = trace(&scene(mirror, white, 0.6));
+        let no_reflection = Scene { reflect_limit: 0, ..scene(mirror, white, 0.0) };
+        assert_eq!(skipped, trace(&no_reflection));
+        assert!(traced[0] > skipped[0] + 0.4, "the reflection of the white background is gone");
+    }
+
+    /// A transmitted ray weighing 0.5 is skipped under a cutoff of 0.6:
+    /// what shows through is black, but the surface keeps its
+    /// transparency (its body is still weighted 1 - t), exactly as if
+    /// the background behind it were black.
+    #[test]
+    fn transmission_below_the_cutoff_shows_black() {
+        let glass = surface(0.0, 0.5);
+        let behind_white = trace(&scene(glass, [1.0, 1.0, 1.0], 0.0));
+        let skipped = trace(&scene(glass, [1.0, 1.0, 1.0], 0.6));
+        let behind_black = trace(&scene(glass, [0.0, 0.0, 0.0], 0.0));
+        assert_eq!(skipped, behind_black);
+        assert!(behind_white[0] > skipped[0] + 0.4);
+        assert_eq!(trace(&scene(glass, [1.0, 1.0, 1.0], 0.4)), behind_white);
+    }
+
+    /// Weights multiply down the path: under a cutoff of 0.3, a
+    /// reflection of 0.5 off a surface seen through glass of 0.5 (weight
+    /// 0.25) is skipped, though each would be traced on its own.
+    #[test]
+    fn weights_multiply_along_the_path() {
+        let s = surface(0.5, 0.5);
+        let white = [1.0, 1.0, 1.0];
+        let depth = Depth { weight: 0.5, ..Depth::zero() };
+        let ray = Vector { start: [0.0, 0.0, 5.0], delta: [0.0, 0.0, -1.0] };
+        let sample = PathSample { light: (0.5, 0.5), indirect: (0.5, 0.5), index: 0, pixel_seed: 0 };
+        let at_half = |cutoff: f64, reflect_limit: u32| {
+            let sc = Scene { reflect_limit, ..scene(s, white, cutoff) };
+            ray_color(&ray, &sc, &[], depth, sample)
+        };
+        // At weight 0.5 the reflection (0.25) falls under 0.3: the same
+        // as not reflecting at all. Transmission (also 0.25) shows black.
+        let no_reflect_black = {
+            let sc = Scene { reflect_limit: 0, ..scene(s, [0.0; 3], 0.0) };
+            ray_color(&ray, &sc, &[], depth, sample)
+        };
+        assert_eq!(at_half(0.3, 4), no_reflect_black);
+        // From a camera ray (weight 1) both are traced under 0.3.
+        assert_eq!(trace(&scene(s, white, 0.3)), trace(&scene(s, white, 0.0)));
     }
 }

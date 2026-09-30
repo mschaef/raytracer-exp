@@ -3617,6 +3617,59 @@ Approximate order of recent commits, oldest first:
       than `red.tga`'s black backdrop; no change.
     - `Claude outputs/metal_presets_before_after.png`.
 
+82. **Scenes with area lights default to 8 samples minimum.** With a
+    minimum of 4, the adaptive sampler sometimes stopped where four
+    samples of a soft shadow happened to agree (entry 76 found it in
+    the snowman room and set 8 by hand there).
+    - `builtin_scene` collects the scene's lights; if any is an area
+      light (`LightKind::Area` or `Quad`), `:min-samples` defaults to
+      `AREA_LIGHT_MIN_SAMPLES` (8) instead of 4. An explicit
+      `:min-samples` always wins, and the maximum is unchanged (32).
+    - Only `area_light_test` and `soft_shadow_test` change: every other
+      scene with an area light (snowman_room, cornell_box, gi_test)
+      sets its own minimum. Against a 256-sample reference at 200 px:
+      area_light_test's RMS error 0.97 -> 0.42 levels at the same time
+      (1.47 s -> 1.48 s); soft_shadow_test 0.91 -> 0.60, 9% slower.
+    - Every other scene renders byte-identically.
+    - Test `area_lights_raise_the_default_min_samples` (point light 4;
+      area light 8, also inside a transformed group; explicit values
+      win).
+83. **Contribution cutoff (POV-Ray's `adc_bailout`).** Reflection and
+    transmission rays whose weight in the pixel would fall below
+    `Scene::contribution_cutoff` aren't traced and contribute black.
+    - `Depth` carries `weight`: 1 for a camera ray, times the
+      reflection coefficient at each reflection (times the surface
+      colour's largest channel for a metal, which tints what it
+      reflects) and the largest channel of `pass_tint` at each
+      transmission. Pass-through exits and indirect bounces leave it
+      unchanged (Russian roulette already ends indirect paths), which
+      keeps the cutoff conservative.
+    - A skipped transmission shows black, but the surface keeps its
+      transparency: its body is still weighted `1 - t`, as in POV. (At
+      `transmit_limit`, by contrast, a surface renders opaque.)
+    - SDL `:contribution-cutoff`, default `DEFAULT_CONTRIBUTION_CUTOFF`
+      = 1/255 (POV's default); 0 turns it off; negative is an error.
+    - **It changes nothing at the current recursion limits.** With the
+      cutoff at 0 every scene is byte-identical to before (checked);
+      at 1/255 every scene is still byte-identical at 64 px, and
+      texaco, cpot, snowman_avatar and transparency_test at 160 px,
+      with timings within noise. Reflection depth defaults to 2 (3 at
+      most in any scene) and transmission to 8, so a weight only falls
+      below 1/255 after two reflections of under 6% each or eight
+      passes through glass passing under 50%; the depth limits stop the
+      trees first.
+    - cpot with `:reflect-limit 5` (POV's default `max_trace_level`):
+      the cutoff saves 1.4% (7.06 -> 6.96 s at 200 px), differing by at
+      most 1 level in 89 of 40,000 pixels. Raising the limit from 2 to
+      5 costs cpot only 8% to begin with, so its ray trees aren't where
+      its time goes; the backlog's expectation of a cpot speedup was
+      wrong. What the cutoff buys is that deeper limits are safe to
+      set.
+    - Tests `contribution_cutoff_tests` (a skipped reflection equals no
+      reflection; a skipped transmission equals a black background;
+      weights multiply along the path) and `scene_contribution_cutoff`
+      (default, 0, negative rejected).
+
 
 ## Pitfalls and conventions
 
@@ -4301,10 +4354,9 @@ Polish items, sized like Phase 3:
   bulb of a desk lamp). The cleanest path is probably an
   optional emissive surface on the disk, not a Light variant
   change.
-- Guidance for `min_samples` when an area light is in the
-  scene. The default `min_samples = 4` may under-resolve
-  penumbra under some authoring choices; a per-scene
-  recommendation or auto-bump may earn its keep.
+- ~~Guidance for `min_samples` when an area light is in the
+  scene.~~ Done (entry 82): a scene with an area light defaults to
+  `:min-samples 8`.
 
 ### Decisions still open
 

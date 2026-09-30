@@ -353,6 +353,57 @@ fn catch_errors_adds_the_rust_backtrace_on_request() {
     assert!(failure.to_string().contains("\n\nRust backtrace:\n"));
 }
 
+/// A scene with an area light defaults to `:min-samples 8` rather than
+/// 4 (history entry 82), so a soft shadow isn't cut short where four
+/// samples happen to agree. An explicit `:min-samples` wins, and the
+/// light counts wherever it sits in the scene graph.
+#[test]
+fn area_lights_raise_the_default_min_samples() {
+    let min_samples = |lights: &str, extra: &str| {
+        let source = format!(
+            r#"(scene {{:name "s" :camera (camera-looking-at [0 0 5] [0 0 0] [0 1 0] 1.0)
+                       :background [0 0 0]
+                       :objects [{} (sphere {{:center [0 0 0] :r 1.0 :surface (surface {{:color [1 1 1]}})}})]
+                       {}}})"#,
+            lights, extra
+        );
+        match sdl::read_and_eval(&source, "min_samples_test.lisp") {
+            sdl::Value::Scene(s) => s.min_samples,
+            other => panic!("expected a scene, got {}", other),
+        }
+    };
+    let point = "(light-white [5 5 5])";
+    let area = "(light-area [0 5 5] [0 -1 -1] 1.0 [1 1 1] 1.0)";
+    assert_eq!(min_samples(point, ""), 4);
+    assert_eq!(min_samples(area, ""), 8);
+    assert_eq!(min_samples(&format!("(group [(translate [1 0 0] {})])", area), ""), 8);
+    assert_eq!(min_samples(area, ":min-samples 4"), 4);
+    assert_eq!(min_samples(point, ":min-samples 2"), 2);
+}
+
+/// `:contribution-cutoff` defaults to POV-Ray's `adc_bailout` (1/255),
+/// can be turned off with 0, and can't be negative (history entry 83).
+#[test]
+fn scene_contribution_cutoff() {
+    let cutoff = |extra: &str| {
+        let source = format!(
+            r#"(scene {{:name "s" :camera (camera-looking-at [0 0 5] [0 0 0] [0 1 0] 1.0)
+                       :background [0 0 0] :objects [(light-white [5 5 5])] {}}})"#,
+            extra
+        );
+        sdl::catch_errors(|| match sdl::read_and_eval(&source, "cutoff_test.lisp") {
+            sdl::Value::Scene(s) => s.contribution_cutoff,
+            other => panic!("expected a scene, got {}", other),
+        })
+    };
+    assert_eq!(cutoff("").unwrap(), raytracer::render::DEFAULT_CONTRIBUTION_CUTOFF);
+    assert_eq!(cutoff("").unwrap(), 1.0 / 255.0);
+    assert_eq!(cutoff(":contribution-cutoff 0").unwrap(), 0.0);
+    assert_eq!(cutoff(":contribution-cutoff 0.01").unwrap(), 0.01);
+    let err = cutoff(":contribution-cutoff -1").expect_err("negative must fail");
+    assert!(err.message.contains(":contribution-cutoff must be at least 0"), "{}", err.message);
+}
+
 /// A panic that isn't an SDL error is a renderer bug, not a script
 /// mistake: `catch_errors` must let it carry on unwinding (with its
 /// usual report) rather than turn it into an error message.
