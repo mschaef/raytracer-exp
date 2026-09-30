@@ -5,18 +5,30 @@
 ; The original renders at 65x75 (avatar.jpg); this keeps the shape at
 ; 520x600 (its :size); SIZE overrides.
 ;
-; See _snowman.lisp for the stand-in still in place (filter colours).
+; The view is the plain clip, as POV displayed it: nothing in this
+; dimly lit scene reaches 1.0 (the brightest value is about 0.75), so
+; the clip changes nothing and the image keeps avatar.jpg's levels.
+; Measured over six regions (under the brim, hat band, nose, bowtie,
+; body, floor) at avatar.jpg's size, it's within about 4 levels of it
+; on average. The default Reinhard curve darkened it (about 8 levels
+; off), and an exposure of +/-0.5 moved it further away.
 
 (load "_snowman.lisp")
 
 ; The mirror glass: box { <-5, -0.5, -5>, <5, 0, 5> } with
-; pigment { rgbf <0, 0, 0.1, 0.9> } and texture { Glass3 }. Glass3 is
-; near-white with filter 0.8, ambient 0.1, diffuse 0.1, reflection 0.1,
-; specular 0.8 and roughness 0.003 (:shininess 333). Untinted here.
+; pigment { rgbf <0, 0, 0.1, 0.9> } and then texture { Glass3 }, which
+; POV layers: Glass3 (near-white, filter 0.8, ambient 0.1, diffuse 0.1,
+; reflection 0.1, specular 0.8, roughness 0.003) over the dark blue
+; filter. Through both, only a little dark blue light gets through, and
+; what shows is mostly Glass3's own dim body. One surface can't hold
+; two layers, so this is an equivalent chosen to match avatar.jpg's
+; floor, a greyish navy (about 34, 34, 58): a grey-blue body with a
+; little blue-tinted filter. Glass3 alone (white, filter 0.8) left the
+; floor light grey; the blue layer alone left it nearly black.
 (def mirror-glass
-  (with-surface (surface {:color [0.98 0.98 0.98] :ambient 0.1 :light 0.1
+  (with-surface (surface {:color [0.2 0.2 0.4] :ambient 0.1 :light 0.1
                           :specular 0.8 :shininess 333 :reflection 0.1
-                          :transparency 0.8})
+                          :filter 0.2})
     (box [-5 -0.5 -5] [5 0 5])))
 
 ; The mirror under it: plane { y, -0.4999 } clipped to a thin box, in
@@ -50,6 +62,7 @@
      ; direction 1.5*z (zoom 1.5), up y, right 65/75 x: the 65:75 frame.
      :camera     (camera-looking-at [2.8 3.675 1.8] [0 2.5 0] [0 1 0] 1.5)
      :background pov-black
+     :view       {:curve :clip}
      :objects
      [; Moonlight and firelight.
       (light {:location [90 90 90] :color [0.1 0.1 0.2]})

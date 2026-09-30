@@ -3226,6 +3226,46 @@ Approximate order of recent commits, oldest first:
       `normal_rejects_bad_keys`.
     - The avatar renders at 260x300 in 6.9 s, up from 4.9 s: the
       turbulence is six octaves of noise per shading point.
+71. **Snowman phase 4: filter transparency, and the avatar tuned.**
+    - `Surface.filter` (SDL `:filter`, default 0) is POV's `filter`:
+      see-through like `transparency`, but tinted by the surface's own
+      colour at the hit (pigment included).
+      - Shading: the body is weighted by `1 - transparency - filter`,
+        and the light from behind by `transparency + filter * colour`,
+        per channel (`pass_tint`). Reflection and highlights sit on top,
+        as before.
+      - Shadows: the shadow walk's transmittance is now a colour, and a
+        filter occluder multiplies it by its `pass_tint`, so a red pane
+        casts a red shadow. `light_vector` and the per-kind helpers
+        return a `LinearColor` transmittance; with no filter anywhere
+        every channel equals the old scalar, so all other scenes are
+        byte-identical.
+      - The pass-through exit rule and the transmission ray gate on
+        `see_through` (`transparency + filter`, zero for a metal).
+      - `surface_color` factors out the pigment / checker / colour
+        lookup that `shade_pixel` and the shadow walk both need.
+      - SDL rejects a filter outside `[0, 1]` or `transparency + filter
+        > 1`.
+    - **The mirror glass** is `pigment { rgbf <0, 0, 0.1, 0.9> }`
+      followed by `texture { Glass3 }`, which POV layers: near-white
+      Glass3 (filter 0.8) over the dark blue filter. One surface can't
+      hold two layers, so the port uses an equivalent chosen to match
+      avatar.jpg's floor (about 34, 34, 58): colour [0.2 0.2 0.4] with
+      filter 0.2. Glass3 alone left the floor light grey (95, 95, 99);
+      the blue layer alone left it nearly black (0, 0, 32); the chosen
+      one gives (40, 40, 61).
+    - **The avatar's view is `{:curve :clip}`**, i.e. what POV showed:
+      the scene's brightest value is about 0.77, so nothing clips.
+      Over six regions at avatar.jpg's size (under the brim, hat band,
+      nose, bowtie, body, floor) it's within about 4 levels of the
+      reference on average; Reinhard white 4 was 8 off, exposure
+      +0.5 was 6 off and -0.5 was 15 off, AgX 8 and Punchy 14.
+    - Tests: `filter_tints_what_shows_through`, `filter_tints_shadows`
+      and `filter_rejects_bad_values`; the light-vector unit tests
+      compare colour transmittances.
+    - Comparison: `Claude outputs/snowman_phase4_avatar.png`. The
+      avatar takes 16 s at 520x600.
+    - avatar.pov is done apart from refraction, which it doesn't use.
 
 ## Pitfalls and conventions
 
@@ -4633,7 +4673,7 @@ noise and turbulence. A surface `:normal` map; applies after
 face-forward shading. The snow (`Dirty`), the nose and hat band
 (`Dirtier`) and the room's walls (`wrinkles`).
 
-### Phase 4 — Filter transparency
+### Phase 4 — Filter transparency (done, entry 71)
 
 `rgbf` filter: light through a transparent surface tinted by its
 colour. For the mirror glass here, window glass in sphere2 and T_Glass4

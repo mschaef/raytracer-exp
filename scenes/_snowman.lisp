@@ -7,9 +7,9 @@
 ; already linear and are used as written (no `srgb`, unlike the other
 ; ports; see _pov.lisp).
 ;
-; Stand-ins still in place (see "Snowman port: plan" in CLAUDE.md):
-; - `rgbf` filter colours are plain colours: every filter here is 0
-;   apart from the mirror glass (phase 4).
+; POV's `rgbf` colours here all have a filter of 0 (they're plain
+; colours), apart from avatar.pov's mirror glass, which uses the
+; surface :filter (see snowman_avatar.lisp).
 
 (load "_pov.lisp")
 

@@ -2801,6 +2801,7 @@ mod span_tests {
             checked: false,
             reflection: 0.0,
             transparency: 0.0,
+            filter: 0.0,
             metallic: false,
             shininess: 50.0,
             brilliance: 1.0,

@@ -1438,3 +1438,86 @@ fn normal_rejects_bad_keys() {
         assert!(message.contains(expected), "{}: {}", source, message);
     }
 }
+
+/// History entry 71: `:filter` tints what shows through a surface by
+/// its colour, where `:transparency` doesn't. Looking through a red
+/// sheet at a white background: a red filter shows red, the same amount
+/// of transparency shows white, and the body gives up `t + f`.
+#[test]
+fn filter_tints_what_shows_through() {
+    let pixel = |sheet: &str, tag: &str| {
+        let source = format!(
+            r#"
+(def s (scene {{:name "filter"
+               :camera (camera-looking-at [0 0 -5] [0 0 0] [0 1 0] 1.0)
+               :background [1 1 1]
+               :min-samples 1 :max-samples 1
+               :view {{:curve :clip}}
+               :objects [(with-surface (surface {}) (cuboid {{:center [0 0 0] :size [4 4 0.1]}}))]}}))
+(def t (png-target 5 5))
+(render s t 5 5)
+(save-png t PATH)
+"#,
+            sheet
+        );
+        render_to_image(&source, tag).get_pixel(2, 2).0
+    };
+    let filtered = pixel("{:color [1 0 0] :ambient 0.0 :light 0.0 :filter 1}", "filter_red");
+    let clear = pixel("{:color [1 0 0] :ambient 0.0 :light 0.0 :transparency 1}", "filter_clear");
+    let half = pixel("{:color [1 0 0] :ambient 1.0 :light 0.0 :filter 0.5}", "filter_half");
+    assert_eq!(filtered, [255, 0, 0]);
+    assert_eq!(clear, [255, 255, 255]);
+    // Half body (red, ambient 1) plus half the white filtered to red.
+    assert!(half[0] == 255 && half[1] == 0 && half[2] == 0, "{:?}", half);
+}
+
+/// A filter sheet between a light and a white floor casts a shadow
+/// tinted by its colour; an equally transparent untinted sheet casts a
+/// grey one.
+#[test]
+fn filter_tints_shadows() {
+    let floor = |sheet: &str, tag: &str| {
+        let source = format!(
+            r#"
+(def s (scene {{:name "filter-shadow"
+               :camera (camera-looking-at [0 2 -0.001] [0 0 0] [0 1 0] 1.0)
+               :background [0 0 0]
+               :min-samples 1 :max-samples 1
+               :view {{:curve :clip}}
+               :objects [(light {{:location [0 10 0] :color [1 1 1]}})
+                         (with-surface (surface {}) (cuboid {{:center [0 3 0] :size [20 0.1 20]}}))
+                         (plane {{:normal [0 1 0] :p0 [0 0 0]
+                                 :surface (surface {{:color [1 1 1] :ambient 0.0 :light 1.0}})}})]}}))
+(def t (png-target 5 5))
+(render s t 5 5)
+(save-png t PATH)
+"#,
+            sheet
+        );
+        render_to_image(&source, tag).get_pixel(2, 2).0
+    };
+    // The camera sits below the sheet, so it sees only the floor.
+    let tinted = floor("{:color [0 1 0] :ambient 0.0 :light 0.0 :filter 0.8}", "filter_shadow");
+    let grey = floor("{:color [0 1 0] :ambient 0.0 :light 0.0 :transparency 0.8}", "transp_shadow");
+    assert!(tinted[1] > 150 && tinted[0] == 0 && tinted[2] == 0, "green shadow: {:?}", tinted);
+    assert!(grey[0] > 150 && grey[0] == grey[1] && grey[1] == grey[2], "grey shadow: {:?}", grey);
+}
+
+#[test]
+fn filter_rejects_bad_values() {
+    for source in [
+        "(surface {:color [1 1 1] :filter 1.5})",
+        "(surface {:color [1 1 1] :filter -0.1})",
+        "(surface {:color [1 1 1] :filter 0.6 :transparency 0.6})",
+    ] {
+        let env = sdl::default_env();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sdl::eval_source(source, "filter_bad.lisp", &env);
+        }));
+        let message = match result {
+            Ok(_) => panic!("must reject {}", source),
+            Err(p) => p.downcast_ref::<String>().cloned().unwrap_or_default(),
+        };
+        assert!(message.contains(":filter"), "{}: {}", source, message);
+    }
+}

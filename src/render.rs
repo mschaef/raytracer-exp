@@ -77,6 +77,15 @@ pub struct Surface {
     /// transparency — a transparent object still casts a solid
     /// shadow; that's Phase 2.
     pub transparency: f64,
+    /// Filter coefficient in `[0.0, 1.0]`, POV-Ray's `filter`: like
+    /// `transparency`, the share of the surface that lets light
+    /// through, but what comes through is tinted by the surface's own
+    /// colour. With both, the surface's body is weighted by
+    /// `1 - transparency - filter` and the light behind it by
+    /// `transparency + filter * colour`, per channel; shadows are tinted
+    /// the same way (history entry 71). `0.0` (the default) is no
+    /// filter. Ignored, like `transparency`, on a metallic surface.
+    pub filter: f64,
     /// Metallic flag. `false` (the default for every pre-metallic
     /// scene) is an ordinary dielectric surface. When `true`, the
     /// mirror reflection and the specular highlight are both tinted
@@ -887,7 +896,7 @@ fn light_vector(
     scene: &Scene,
     light: &Light,
     light_coord: (f64, f64),
-) -> Option<(Vector, f64)> {
+) -> Option<(Vector, LinearColor)> {
     match light.kind {
         // Point and spot lights ignore `light_coord` — they sample a
         // single fixed point (`light.location`) regardless of which
@@ -927,7 +936,7 @@ fn light_vector(
 /// the same walk. Point and spot lights still go through this with
 /// `origin = light.location`, producing bit-identical behavior to
 /// the pre-refactor code.
-fn shadow_ray_walk(origin: Point, target: &Point, scene: &Scene) -> Option<(Vector, f64)> {
+fn shadow_ray_walk(origin: Point, target: &Point, scene: &Scene) -> Option<(Vector, LinearColor)> {
     let direction = subp(*target, origin);
     let distance = lenp(direction);
 
@@ -942,7 +951,7 @@ fn shadow_ray_walk(origin: Point, target: &Point, scene: &Scene) -> Option<(Vect
     // test from a hit point never re-finds that same surface — the
     // same self-intersection guard the reflection and transmission
     // rays rely on.
-    let mut transmittance = 1.0;
+    let mut transmittance: LinearColor = [1.0, 1.0, 1.0];
     let mut cursor = ray.start;
 
     loop {
@@ -988,13 +997,15 @@ fn shadow_ray_walk(origin: Point, target: &Point, scene: &Scene) -> Option<(Vect
                 // occludes — failing closed is safer than failing
                 // open (a "leaked" None as transparent would let a
                 // shadow ray skip a real geometric occluder).
-                let occluder_transparency = hit
-                    .surface
-                    .as_ref()
-                    .map(|s| s.transparency)
-                    .unwrap_or(0.0);
-                transmittance *= occluder_transparency;
-                if transmittance <= EPSILON {
+                // A filter tints what passes by the occluder's colour
+                // there (history entry 71).
+                let occluder_pass = match hit.surface.as_ref() {
+                    Some(s) if s.filter > 0.0 && !s.metallic => pass_tint(s, &surface_color(s, &hit)),
+                    Some(s) => [s.transparency; 3],
+                    None => [0.0; 3],
+                };
+                transmittance = multiply_linear_color(&transmittance, &occluder_pass);
+                if max_channel(&transmittance) <= EPSILON {
                     return None;
                 }
 
@@ -1007,27 +1018,31 @@ fn shadow_ray_walk(origin: Point, target: &Point, scene: &Scene) -> Option<(Vect
         }
     }
 
-    if transmittance <= EPSILON {
+    if max_channel(&transmittance) <= EPSILON {
         None
     } else {
         Some((ray, transmittance))
     }
 }
 
+fn max_channel(c: &LinearColor) -> f64 {
+    c[0].max(c[1]).max(c[2])
+}
+
 /// Shadow-ray test for a point light: thin wrapper that walks from
 /// `light.location` toward `point`. The full transmittance-walk logic
 /// lives in `shadow_ray_walk`; this function exists to give the
 /// `light_vector` dispatcher a uniform per-kind handler shape.
-fn light_vector_point(point: &Point, scene: &Scene, light: &Light) -> Option<(Vector, f64)> {
+fn light_vector_point(point: &Point, scene: &Scene, light: &Light) -> Option<(Vector, LinearColor)> {
     light_ray(light.location, point, scene, light.shadowless)
 }
 
 /// The ray from a point on a light (`origin`) to the shaded `point`,
 /// with the transmittance along it: the shadow walk, or for a
 /// shadowless light just the ray at full transmittance.
-fn light_ray(origin: Point, point: &Point, scene: &Scene, shadowless: bool) -> Option<(Vector, f64)> {
+fn light_ray(origin: Point, point: &Point, scene: &Scene, shadowless: bool) -> Option<(Vector, LinearColor)> {
     if shadowless {
-        Some((Vector { start: origin, delta: normalizep(subp(*point, origin)) }, 1.0))
+        Some((Vector { start: origin, delta: normalizep(subp(*point, origin)) }, [1.0, 1.0, 1.0]))
     } else {
         shadow_ray_walk(origin, point, scene)
     }
@@ -1071,7 +1086,7 @@ fn light_vector_spot(
     direction: Point,
     inner_angle: f64,
     outer_angle: f64,
-) -> Option<(Vector, f64)> {
+) -> Option<(Vector, LinearColor)> {
     let light_to_point = subp(*point, light.location);
     let dist = lenp(light_to_point);
     if dist < EPSILON {
@@ -1102,7 +1117,7 @@ fn light_vector_spot(
     // important property — a glass pane should attenuate a
     // spotlight the same way it attenuates a point light).
     let (ray, transmittance) = light_vector_point(point, scene, light)?;
-    Some((ray, transmittance * cone_falloff))
+    Some((ray, scale_linear_color(&transmittance, cone_falloff)))
 }
 
 /// Build an orthonormal basis `(u, v)` perpendicular to a unit-length
@@ -1177,7 +1192,7 @@ fn light_vector_area(
     radius: f64,
     cone: Option<SpotCone>,
     light_coord: (f64, f64),
-) -> Option<(Vector, f64)> {
+) -> Option<(Vector, LinearColor)> {
     let light_to_point = subp(*point, light.location);
     let dist = lenp(light_to_point);
     if dist < EPSILON {
@@ -1241,7 +1256,7 @@ fn light_vector_area(
     // through any transparent occluders, then fold the cosine
     // attenuation into the surviving transmittance.
     let (ray, transmittance) = light_ray(origin, point, scene, light.shadowless)?;
-    Some((ray, transmittance * strength))
+    Some((ray, scale_linear_color(&transmittance, strength)))
 }
 
 /// Shadow-ray helper for `LightKind::Quad`: a parallelogram emitter
@@ -1258,7 +1273,7 @@ fn light_vector_quad(
     v: Point,
     cone: Option<SpotCone>,
     light_coord: (f64, f64),
-) -> Option<(Vector, f64)> {
+) -> Option<(Vector, LinearColor)> {
     let strength = match cone {
         None => 1.0,
         Some(c) => {
@@ -1275,7 +1290,7 @@ fn light_vector_quad(
     let (lu, lv) = light_coord;
     let origin = addp(light.location, addp(scalep(u, lu - 0.5), scalep(v, lv - 0.5)));
     let (ray, transmittance) = light_ray(origin, point, scene, light.shadowless)?;
-    Some((ray, transmittance * strength))
+    Some((ray, scale_linear_color(&transmittance, strength)))
 }
 
 /// Recursion-budget tracker threaded through `ray_color` /
@@ -1336,6 +1351,7 @@ const MISSING_SURFACE: Surface = Surface {
     checked: false,
     reflection: 0.0,
     transparency: 0.0,
+    filter: 0.0,
     metallic: false,
     shininess: 50.0,
     brilliance: 1.0,
@@ -1353,6 +1369,41 @@ const MISSING_SURFACE: Surface = Surface {
 /// what was behind them or the object's own inside. See
 /// `reflect_leaves_on_the_incoming_side` and the `mirror_reflects_the_
 /// right_way` suite test.
+/// A surface's colour at a hit: its pigment at the texture point, the
+/// legacy checker, or its plain colour.
+fn surface_color(surface: &Surface, hit: &RayHit) -> LinearColor {
+    if let Some(pigment) = surface.pigment {
+        pigment.color_at(hit.texture_point)
+    } else if surface.checked {
+        let checkidx = (((hit.hit_point[0] + EPSILON).floor() +
+                         (hit.hit_point[1] + EPSILON).floor() +
+                         (hit.hit_point[2] + EPSILON).floor()) as i64 % 2).abs();
+
+        scale_linear_color(&surface.color, if checkidx == 0 { 1.0 } else { 0.5 })
+    } else {
+        surface.color
+    }
+}
+
+/// How much of a surface lets light through: `transparency + filter`,
+/// or nothing for a metal.
+fn see_through(surface: &Surface) -> f64 {
+    if surface.metallic { 0.0 } else { surface.transparency + surface.filter }
+}
+
+/// What a see-through surface passes of the light behind it, per
+/// channel, given its colour there: `transparency + filter * colour`.
+/// With no filter it's `transparency` on every channel.
+fn pass_tint(surface: &Surface, color: &LinearColor) -> LinearColor {
+    if surface.filter > 0.0 {
+        let t = surface.transparency;
+        let f = surface.filter;
+        [t + f * color[0], t + f * color[1], t + f * color[2]]
+    } else {
+        [surface.transparency; 3]
+    }
+}
+
 pub fn reflect(d: Point, n: Point) -> Point {
     subp(d, scalep(n, 2.0 * dotp(d, n)))
 }
@@ -1382,8 +1433,7 @@ fn shade_pixel(
     // blended once, as through a sphere, rather than once per wall it
     // crosses.
     if !hit.entering
-        && surface.transparency > EPSILON
-        && !surface.metallic
+        && see_through(&surface) > EPSILON
         && depth.pass < PASS_THROUGH_LIMIT
     {
         return ray_color(
@@ -1406,17 +1456,7 @@ fn shade_pixel(
         None => normal,
     };
 
-    let scolor = if let Some(pigment) = surface.pigment {
-        pigment.color_at(hit.texture_point)
-    } else if surface.checked {
-        let checkidx = (((hit.hit_point[0] + EPSILON).floor() +
-                         (hit.hit_point[1] + EPSILON).floor() +
-                         (hit.hit_point[2] + EPSILON).floor()) as i64 % 2).abs();
-
-        scale_linear_color(&surface.color, if checkidx == 0 { 1.0 } else { 0.5 })
-    } else {
-        surface.color
-    };
+    let scolor = surface_color(&surface, hit);
 
     let ambient: LinearColor = scale_linear_color(&scolor, surface.ambient);
 
@@ -1690,14 +1730,14 @@ fn shade_pixel(
             // occluders sit between the point and the light. Opaque
             // occluders never reach here — `light_vector` returns
             // `None` for those.
-            let contribution = scale_linear_color(
+            let contribution = multiply_linear_color(
                 &add_linear_color(&spec_term, &diff_term),
-                transmittance,
+                &transmittance,
             );
 
             light = add_linear_color(&light, &contribution);
-            light_diffuse = add_linear_color(&light_diffuse, &scale_linear_color(&diff_term, transmittance));
-            light_specular = add_linear_color(&light_specular, &scale_linear_color(&spec_term, transmittance));
+            light_diffuse = add_linear_color(&light_diffuse, &multiply_linear_color(&diff_term, &transmittance));
+            light_specular = add_linear_color(&light_specular, &multiply_linear_color(&spec_term, &transmittance));
         }
     }
 
@@ -1744,7 +1784,7 @@ fn shade_pixel(
     // dispatch read this same value, so the transmission ray is
     // computed exactly once regardless of view mode.
     let (transmitted_color, transmitted_alpha) =
-        if (surface.transparency > EPSILON) && !surface.metallic && (depth.transmit < scene.transmit_limit) {
+        if (see_through(&surface) > EPSILON) && (depth.transmit < scene.transmit_limit) {
             let transmitted = ray_color(
                 &Vector {
                     start: hit.hit_point,
@@ -1755,7 +1795,10 @@ fn shade_pixel(
                 Depth { transmit: depth.transmit + 1, ..depth },
                 sample,
             );
-            (transmitted, surface.transparency)
+            // Tinted by a filter (history entry 71): the weight is
+            // per channel, `transparency + filter * colour`; the body
+            // gives up `transparency + filter`.
+            (multiply_linear_color(&transmitted, &pass_tint(&surface, &scolor)), see_through(&surface))
         } else {
             ([0.0, 0.0, 0.0], 0.0)
         };
@@ -1780,7 +1823,7 @@ fn shade_pixel(
         add_linear_color(
             &add_linear_color(
                 &scale_linear_color(&body, 1.0 - t),
-                &scale_linear_color(&transmitted_color, t),
+                &transmitted_color,
             ),
             &add_linear_color(&reflected, &light_specular),
         )
@@ -1821,7 +1864,7 @@ fn shade_pixel(
         // so the Transmission view shows "the visible portion of
         // the scene that's reached via transmission," not "the
         // raw transmitted-ray output."
-        ViewMode::Transmission => scale_linear_color(&transmitted_color, transmitted_alpha),
+        ViewMode::Transmission => transmitted_color,
     }
 }
 
@@ -2376,6 +2419,7 @@ mod light_tests {
             checked: false,
             reflection: 0.0,
             transparency: 0.0,
+            filter: 0.0,
             metallic: false,
             shininess: 50.0,
             brilliance: 1.0,
@@ -2438,7 +2482,7 @@ mod light_tests {
         assert!(light_vector(&BELOW, &scene, &light, (0.5, 0.5)).is_none(), "the sphere blocks it");
         light.shadowless = true;
         let (ray, t) = light_vector(&BELOW, &scene, &light, (0.5, 0.5)).unwrap();
-        assert_eq!(t, 1.0);
+        assert_eq!(t, [1.0, 1.0, 1.0]);
         assert_eq!(ray.start, [0.0, 0.0, 3.0]);
         assert_eq!(ray.delta, [0.0, 0.0, -1.0]);
         // Shadowless area lights too.
@@ -2472,7 +2516,7 @@ mod light_tests {
         // Full strength with no cosine factor, even at a steep angle
         // and from behind: a quad emits equally in all directions.
         let (_, t) = light_vector(&[20.0, 2.0, 3.5], &scene, &quad, (0.5, 0.5)).unwrap();
-        assert_eq!(t, 1.0);
+        assert_eq!(t, [1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -2486,7 +2530,7 @@ mod light_tests {
             kind: LightKind::Quad { u: [1.0, 0.0, 0.0], v: [0.0, 1.0, 0.0], cone: Some(cone([0.0, 0.0, -1.0], 10.0, 20.0)) },
             shadowless: false,
         };
-        assert_eq!(light_vector(&[0.0, 0.0, 0.0], &scene, &quad, (0.2, 0.9)).unwrap().1, 1.0);
+        assert_eq!(light_vector(&[0.0, 0.0, 0.0], &scene, &quad, (0.2, 0.9)).unwrap().1, [1.0, 1.0, 1.0]);
         assert!(light_vector(&[3.0, 0.0, 0.0], &scene, &quad, (0.5, 0.5)).is_none(), "outside the cone");
     }
 

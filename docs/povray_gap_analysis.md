@@ -87,7 +87,8 @@ plans.
 - **Tuning pass done** (entries 60–66).
 - **Snowman started:** phase 1, avatar.pov with stand-ins (entry 68);
   phase 2, the blob primitive (entry 69); phase 3, bump normals
-  (entry 70).
+  (entry 70); phase 4, filter transparency, with avatar.pov tuned
+  against avatar.jpg (entry 71).
   The phases are in CLAUDE.md, "Snowman port: plan".
 - **View transform plan written** (CLAUDE.md, "View transform (tone
   mapping): implementation plan"). The output clips each channel on its

@@ -547,7 +547,7 @@ fn require_u32(v: &Value, ctx: &str, pos: &Position) -> u32 {
 
 /// `(surface {:color [r g b] :ambient n :specular n :light n :checked b
 ///            :reflection n :transparency n :metallic b
-///            :shininess n :brilliance n :normal {...}})`
+///            :shininess n :brilliance n :normal {...} :filter n})`
 ///
 /// All keys except `:color` have defaults. The defaults match an
 /// uninteresting matte surface so that omitting a key gives a
@@ -571,6 +571,10 @@ fn require_u32(v: &Value, ctx: &str, pos: &Position) -> u32 {
 /// positive) raises the diffuse Lambert factor to that power, like
 /// POV's `brilliance`.
 ///
+/// `:filter` (default 0) is POV's `filter`: see-through like
+/// `:transparency`, but what shows through (and the shadow cast) is
+/// tinted by the surface colour. `:transparency + :filter` is at most 1.
+///
 /// `:normal` tilts the shading normal with a pattern (POV's `normal { }`);
 /// see `build_normal`.
 fn builtin_surface(args: &[Value], pos: &Position) -> Value {
@@ -591,6 +595,15 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
     let checked = maybe_key_bool(&map, "checked", "surface", pos).unwrap_or(false);
     let reflection = maybe_key_number(&map, "reflection", "surface", pos).unwrap_or(0.0);
     let transparency = maybe_key_number(&map, "transparency", "surface", pos).unwrap_or(0.0);
+    let filter = maybe_key_number(&map, "filter", "surface", pos).unwrap_or(0.0);
+    if !(0.0..=1.0).contains(&filter) || transparency + filter > 1.0 + 1e-9 {
+        sdl_panic!(
+            pos.clone(),
+            "surface :filter must be in [0, 1], with :transparency + :filter at most 1 (got :transparency {} :filter {})",
+            transparency,
+            filter
+        );
+    }
     let metallic = maybe_key_bool(&map, "metallic", "surface", pos).unwrap_or(false);
     let shininess = maybe_key_number(&map, "shininess", "surface", pos).unwrap_or(50.0);
     let brilliance = maybe_key_number(&map, "brilliance", "surface", pos).unwrap_or(1.0);
@@ -608,6 +621,7 @@ fn builtin_surface(args: &[Value], pos: &Position) -> Value {
         checked,
         reflection,
         transparency,
+        filter,
         metallic,
         shininess,
         brilliance,
